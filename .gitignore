@@ -1,0 +1,10 @@
+/vendor/
+/.phpunit.result.cache
+/coverage/
+/.idea/
+/.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
