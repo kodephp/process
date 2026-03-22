@@ -929,7 +929,7 @@ Fibers::retry(fn() => riskyOperation(), 3, 0.5);
 - **并发连接数**: 受限于服务器内存
 - **并发请求数**: 受限于 CPU 处理能力
 
-> 💡 运行 `php examples/34-benchmark.php` 获取实时压测数据
+> 💡 运行 `php examples/18-benchmark-compare.php` 获取实时压测数据
 
 ## 📁 项目结构
 
