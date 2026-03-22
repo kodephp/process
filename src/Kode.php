@@ -4,15 +4,11 @@ declare(strict_types=1);
 
 namespace Kode\Process;
 
+use Kode\Fibers\Fibers;
 use Kode\Process\Cluster\ClusterManager;
-use Kode\Process\Fiber\FiberPool;
-use Kode\Process\Fiber\FiberScheduler;
 use Kode\Process\Integration\IntegrationManager;
-use Kode\Process\Protocol\ProtocolFactory;
 use Kode\Process\Protocol\ProtocolManager;
 use Psr\Log\LoggerInterface;
-
-use Kode\Process\Version;
 
 final class Kode
 {
@@ -76,14 +72,19 @@ final class Kode
         return ProtocolManager::getInstance();
     }
 
-    public static function fiberScheduler(): FiberScheduler
+    public static function fibers(): Fibers
     {
-        return FiberScheduler::getInstance();
+        return new Fibers();
     }
 
-    public static function fiberPool(int $concurrency = 100): FiberPool
+    public static function go(callable $callback): mixed
     {
-        return new FiberPool($concurrency);
+        return Fibers::go($callback);
+    }
+
+    public static function batch(array $items, callable $callback, int $concurrency = 10): array
+    {
+        return Fibers::batch($items, $callback, $concurrency);
     }
 
     public static function integration(): IntegrationManager

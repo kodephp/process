@@ -4,8 +4,6 @@ declare(strict_types=1);
 
 namespace Kode\Process\Async;
 
-use Kode\Process\Fiber\FiberScheduler;
-
 final class Async
 {
     private static ?EventEmitter $globalEmitter = null;

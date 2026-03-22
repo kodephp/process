@@ -985,7 +985,6 @@ src/
 │   ├── Promise.php
 │   └── HttpClient.php
 ├── Cluster/                 # 分布式集群
-├── Fiber/                   # Fiber 协程
 ├── Integration/             # 框架集成
 ├── Compat/                  # Workerman 兼容层
 ├── Worker/                  # Worker 进程池
