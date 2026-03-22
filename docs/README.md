@@ -30,10 +30,14 @@
 15. [Workerman 兼容](workerman-compat.md) - 无缝迁移
 16. [生产部署](deployment.md) - 部署、监控
 
+### 高级篇
+
+17. [性能压测对比](benchmark.md) - 压测数据、性能优化
+
 ### 组合案例
 
-17. [实时聊天系统](case-chat.md) - WebSocket + Channel + GlobalData
-18. [任务队列系统](case-queue.md) - Queue + Timer + API
+18. [实时聊天系统](case-chat.md) - WebSocket + Channel + GlobalData
+19. [任务队列系统](case-queue.md) - Queue + Timer + API
 
 ## 示例代码
 

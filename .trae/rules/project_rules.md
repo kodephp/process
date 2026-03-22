@@ -214,5 +214,5 @@ php examples/18-benchmark-compare.php
 ## 版本规范
 
 - 遵循语义化版本号：MAJOR.MINOR.PATCH
-- 当前版本：2.5.0
+- 当前版本：2.6.0
 - PHP 最低版本：8.1
