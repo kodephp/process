@@ -21,16 +21,19 @@
 ### 高级篇
 
 11. [信号处理](signal.md) - 进程信号
-12. [IPC 通信](ipc.md) - 进程间通信
-13. [SSL/TLS](ssl.md) - 安全连接
-14. [UDP 服务](udp.md) - UDP 协议
-15. [性能优化](performance.md) - 压测、调优
+12. [SSL/TLS](ssl.md) - 安全连接
+13. [UDP 服务](udp.md) - UDP 协议
+14. [性能优化](performance.md) - 压测、调优
 
 ### 集成篇
 
-16. [Workerman 兼容](workerman-compat.md) - 无缝迁移
-17. [框架集成](integration.md) - Laravel、Symfony
-18. [生产部署](deployment.md) - 部署、监控
+15. [Workerman 兼容](workerman-compat.md) - 无缝迁移
+16. [生产部署](deployment.md) - 部署、监控
+
+### 组合案例
+
+17. [实时聊天系统](case-chat.md) - WebSocket + Channel + GlobalData
+18. [任务队列系统](case-queue.md) - Queue + Timer + API
 
 ## 示例代码
 
