@@ -16,22 +16,15 @@ composer require kode/process
 <?php
 require __DIR__ . '/vendor/autoload.php';
 
-use Kode\Process\Compat\Worker;
+use Kode\Process\Kode;
 
-// 创建一个 Worker 监听 8080 端口，使用 HTTP 协议通讯
-$httpWorker = new Worker('http://0.0.0.0:8080');
-
-// 启动 4 个进程对外提供服务
-$httpWorker->count = 4;
-
-// 接收到浏览器发送的数据时回复 hello world
-$httpWorker->onMessage = function ($connection, $request) {
-    // 向浏览器发送 hello world
-    $connection->send('hello world');
-};
-
-// 运行 Worker
-Worker::runAll();
+// 使用统一方法，自动解析协议
+Kode::worker('http://0.0.0.0:8080', 4)
+    ->onMessage(function ($connection, $request) {
+        // 向浏览器发送 hello world
+        $connection->send('hello world');
+    })
+    ->start();
 ```
 
 ### 命令行运行
@@ -58,22 +51,15 @@ php start.php start
 <?php
 require __DIR__ . '/vendor/autoload.php';
 
-use Kode\Process\Compat\Worker;
+use Kode\Process\Kode;
 
-// 注意：这里使用的是 websocket 协议
-$wsWorker = new Worker('websocket://0.0.0.0:2000');
-
-// 启动 4 个进程对外提供服务
-$wsWorker->count = 4;
-
-// 当收到客户端发来的数据后返回 hello $data 给客户端
-$wsWorker->onMessage = function ($connection, $data) {
-    // 向客户端发送 hello $data
-    $connection->send('hello ' . $data);
-};
-
-// 运行 Worker
-Worker::runAll();
+// 使用统一方法，websocket:// 前缀自动识别为 WebSocket 协议
+Kode::worker('websocket://0.0.0.0:2000', 4)
+    ->onMessage(function ($connection, $data) {
+        // 向客户端发送 hello $data
+        $connection->send('hello ' . $data);
+    })
+    ->start();
 ```
 
 ### 命令行运行
@@ -113,22 +99,15 @@ ws.onmessage = function(e) {
 <?php
 require __DIR__ . '/vendor/autoload.php';
 
-use Kode\Process\Compat\Worker;
+use Kode\Process\Kode;
 
-// 创建一个 Worker 监听 2347 端口，不使用任何应用层协议
-$tcpWorker = new Worker('tcp://0.0.0.0:2347');
-
-// 启动 4 个进程对外提供服务
-$tcpWorker->count = 4;
-
-// 当客户端发来数据时
-$tcpWorker->onMessage = function ($connection, $data) {
-    // 向客户端发送 hello $data
-    $connection->send('hello ' . $data);
-};
-
-// 运行 Worker
-Worker::runAll();
+// 使用统一方法，tcp:// 前缀自动识别为 TCP 协议
+Kode::worker('tcp://0.0.0.0:2347', 4)
+    ->onMessage(function ($connection, $data) {
+        // 向客户端发送 hello $data
+        $connection->send('hello ' . $data);
+    })
+    ->start();
 ```
 
 ### 命令行运行
@@ -152,9 +131,9 @@ telnet 127.0.0.1 2347
 
 ---
 
-## 示例四、使用极简 API
+## 示例四、使用 UDP 协议
 
-Kode Process 提供极简 API，一行代码启动服务器：
+创建 `udp_test.php` 文件：
 
 ```php
 <?php
@@ -162,19 +141,12 @@ require __DIR__ . '/vendor/autoload.php';
 
 use Kode\Process\Kode;
 
-// HTTP 服务器
-Kode::http('http://0.0.0.0:8080', 4)
-    ->onMessage(fn($conn, $req) => $conn->send('Hello'))
-    ->start();
-
-// WebSocket 服务器
-Kode::websocket('websocket://0.0.0.0:8081', 4)
-    ->onMessage(fn($conn, $data) => $conn->send($data))
-    ->start();
-
-// TCP 服务器
-Kode::tcp('tcp://0.0.0.0:9000', 4)
-    ->onMessage(fn($conn, $data) => $conn->send($data))
+// 使用统一方法，udp:// 前缀自动识别为 UDP 协议
+Kode::worker('udp://0.0.0.0:9002', 1)
+    ->onMessage(function ($connection, $data) {
+        echo "收到数据: {$data}\n";
+        $connection->send("已收到: {$data}");
+    })
     ->start();
 ```
 
@@ -186,25 +158,159 @@ Kode::tcp('tcp://0.0.0.0:9000', 4)
 <?php
 require __DIR__ . '/vendor/autoload.php';
 
-use Kode\Process\Compat\Worker;
-use Kode\Process\Coroutine\CoroutineManager;
+use Kode\Process\Kode;
 
-$worker = new Worker('http://0.0.0.0:8080');
-$worker->count = 4;
-
-$worker->onMessage = function ($connection, $request) {
-    $manager = CoroutineManager::getInstance();
-    
-    // 在协程中处理耗时操作
-    $manager->go(function () use ($connection) {
-        // 模拟耗时操作
-        $result = fetchDataFromDatabase();
-        $connection->send(json_encode($result));
-    });
-};
-
-Worker::runAll();
+Kode::worker('http://0.0.0.0:8080', 4)
+    ->onMessage(function ($connection, $request) {
+        // 在协程中处理耗时操作
+        Kode::go(function () use ($connection) {
+            // 模拟耗时操作
+            $result = fetchDataFromDatabase();
+            $connection->send(json_encode($result));
+        });
+    })
+    ->start();
 ```
+
+---
+
+## 示例六、批量并发处理
+
+```php
+<?php
+require __DIR__ . '/vendor/autoload.php';
+
+use Kode\Process\Kode;
+
+Kode::worker('http://0.0.0.0:8080', 4)
+    ->onMessage(function ($connection, $request) {
+        $items = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        
+        // 批量并发处理，并发数为 3
+        $results = Kode::batch($items, function ($item) {
+            // 模拟耗时操作
+            usleep(100000);
+            return $item * 2;
+        }, 3);
+        
+        $connection->send(json_encode($results));
+    })
+    ->start();
+```
+
+---
+
+## 示例七、多端口监听
+
+```php
+<?php
+require __DIR__ . '/vendor/autoload.php';
+
+use Kode\Process\Kode;
+use Kode\Process\Application;
+
+// 创建应用
+$app = Kode::app(['worker_count' => 4]);
+
+// 监听 HTTP 端口
+$app->listen('http://0.0.0.0:8080')
+    ->onMessage(fn($conn, $req) => $conn->send('HTTP Response'));
+
+// 监听 WebSocket 端口
+$app->listen('websocket://0.0.0.0:8081')
+    ->onMessage(fn($conn, $data) => $conn->send($data));
+
+// 监听 TCP 端口
+$app->listen('tcp://0.0.0.0:9000')
+    ->onMessage(fn($conn, $data) => $conn->send($data));
+
+// 启动所有监听
+$app->start();
+```
+
+---
+
+## 示例八、使用 Channel 分布式通讯
+
+```php
+<?php
+require __DIR__ . '/vendor/autoload.php';
+
+use Kode\Process\Kode;
+use Kode\Process\Channel\Client;
+
+Kode::worker('websocket://0.0.0.0:8080', 4)
+    ->onWorkerStart(function ($worker) {
+        // 连接 Channel 服务端
+        Client::connect('127.0.0.1', 2206);
+        
+        // 订阅广播事件
+        Client::on('broadcast', function ($data) use ($worker) {
+            foreach ($worker->connections as $conn) {
+                $conn->send(json_encode($data));
+            }
+        });
+    })
+    ->onMessage(function ($connection, $data) {
+        // 发布广播事件
+        Client::publish('broadcast', [
+            'message' => $data,
+            'time' => date('H:i:s')
+        ]);
+    })
+    ->start();
+```
+
+---
+
+## 示例九、使用队列系统
+
+```php
+<?php
+require __DIR__ . '/vendor/autoload.php';
+
+use Kode\Process\Kode;
+use Kode\Process\Queue\QueueManager;
+
+// 注册任务处理器
+QueueManager::getInstance()
+    ->register('send_email', function (array $data) {
+        // 发送邮件
+        mail($data['to'], $data['subject'], $data['body']);
+        return ['status' => 'sent'];
+    });
+
+Kode::worker('http://0.0.0.0:8080', 4)
+    ->onMessage(function ($connection, $request) {
+        // 分发任务到队列
+        $jobId = QueueManager::getInstance()->dispatch('send_email', [
+            'to' => 'user@example.com',
+            'subject' => 'Hello',
+            'body' => 'World'
+        ]);
+        
+        $connection->send(json_encode([
+            'code' => 0,
+            'job_id' => $jobId
+        ]));
+    })
+    ->start();
+```
+
+---
+
+## 支持的协议前缀
+
+| 前缀 | 协议 | 示例 |
+|------|------|------|
+| `http://` | HTTP 协议 | `http://0.0.0.0:8080` |
+| `https://` | HTTPS 协议 | `https://0.0.0.0:443` |
+| `websocket://` | WebSocket 协议 | `websocket://0.0.0.0:8081` |
+| `ws://` | WebSocket 协议（简写） | `ws://0.0.0.0:8081` |
+| `tcp://` | TCP 原始协议 | `tcp://0.0.0.0:9000` |
+| `text://` | 文本+换行符协议 | `text://0.0.0.0:9001` |
+| `udp://` | UDP 协议 | `udp://0.0.0.0:9002` |
+| `ssl://` | SSL/TLS 协议 | `ssl://0.0.0.0:443` |
 
 ---
 
@@ -219,3 +325,27 @@ Worker::runAll();
 | `php start.php reload` | 平滑重载 |
 | `php start.php status` | 查看状态 |
 | `php start.php connections` | 查看连接 |
+
+---
+
+## Workerman 兼容模式
+
+如果你需要兼容 Workerman 代码，可以使用兼容层：
+
+```php
+<?php
+require __DIR__ . '/vendor/autoload.php';
+
+// 使用兼容层（与 Workerman API 完全一致）
+use Kode\Process\Compat\Worker;
+
+$worker = new Worker('http://0.0.0.0:8080');
+$worker->count = 4;
+$worker->onMessage = function ($connection, $request) {
+    $connection->send('hello world');
+};
+
+Worker::runAll();
+```
+
+> **推荐**：新项目建议使用 `Kode::worker()` 统一方法，更简洁易用。

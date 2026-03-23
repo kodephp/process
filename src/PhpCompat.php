@@ -4,13 +4,10 @@ declare(strict_types=1);
 
 namespace Kode\Process;
 
-/**
- * PHP 版本特性检测
- * 
- * 提供跨版本兼容性支持
- */
 final class PhpCompat
 {
+    private static mixed $curlShareHandle = null;
+
     public static function version(): string
     {
         return PHP_VERSION;
@@ -73,7 +70,7 @@ final class PhpCompat
 
     public static function hasPersistentCurlShare(): bool
     {
-        return PHP_VERSION_ID >= 80500;
+        return PHP_VERSION_ID >= 80500 && extension_loaded('curl');
     }
 
     public static function hasConstExprClosures(): bool
@@ -317,5 +314,43 @@ final class PhpCompat
         }
 
         return $value;
+    }
+
+    public static function enableCurlShare(): mixed
+    {
+        if (!self::hasPersistentCurlShare()) {
+            return null;
+        }
+
+        if (self::$curlShareHandle === null) {
+            $class = 'CURLShare';
+            $const = 'CURLSHARE_NONE';
+            $handle = new $class(constant($const));
+            $handle->setopt(\CURLSHOPT_SHARE, constant('CURL_LOCK_DATA_COOKIE'));
+            $handle->setopt(\CURLSHOPT_SHARE, constant('CURL_LOCK_DATA_DNS'));
+            $handle->setopt(\CURLSHOPT_SHARE, constant('CURL_LOCK_DATA_SSL_SESSION'));
+            self::$curlShareHandle = $handle;
+        }
+
+        return self::$curlShareHandle;
+    }
+
+    public static function disableCurlShare(): void
+    {
+        if (self::$curlShareHandle !== null) {
+            self::$curlShareHandle->close();
+            self::$curlShareHandle = null;
+        }
+    }
+
+    public static function createPipe(callable ...$callbacks): \Closure
+    {
+        return function (mixed $value) use ($callbacks): mixed {
+            foreach ($callbacks as $callback) {
+                $value = $callback($value);
+            }
+
+            return $value;
+        };
     }
 }
