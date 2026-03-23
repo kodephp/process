@@ -4,7 +4,7 @@
     "type": "library",
     "keywords": ["php", "process", "thread", "worker", "ipc", "signal", "pool", "fiber", "coroutine", "multiprocessing", "queue"],
     "license": "Apache-2.0",
-    "version": "2.7.0",
+    "version": "2.8.0",
     "authors": [
         {
             "name": "KodePHP Team",
@@ -32,8 +32,10 @@
         "ext-pthreads": "用于多线程支持",
         "ext-parallel": "用于 kode/parallel 多线程并行处理",
         "ext-swoole": "用于 Swoole 协程进程管理",
+        "ext-swow": "用于 Swow 协程引擎（跨平台支持）",
         "kode/parallel": "用于多线程并行任务处理（需要 ext-parallel）",
-        "kode/runtime": "用于运行时环境适配（Swoole/Swow/Fiber/Process/Thread）"
+        "kode/runtime": "用于运行时环境适配（Swoole/Swow/Fiber/Process/Thread）",
+        "swow/swow": "用于 Swow 协程引擎（跨平台支持，Windows/Linux/macOS）"
     },
     "autoload": {
         "psr-4": {
@@ -57,7 +59,7 @@
     "prefer-stable": true,
     "extra": {
         "branch-alias": {
-            "dev-main": "2.4-dev"
+            "dev-main": "2.8-dev"
         }
     }
 }
