@@ -164,29 +164,24 @@ $dispatcher->unregister(SIGUSR1);
 
 ## 进程控制命令
 
-本包使用信号控制进程：
+使用 `kode` 命令控制进程：
 
 ```bash
-# 启动服务
-php http_server.php
-
-# 停止（发送 SIGTERM）
-kill -TERM $PID
-
-# 平滑重载（发送 SIGHUP）
-kill -HUP $PID
-
-# 查看状态（发送 SIGUSR2）
-kill -USR2 $PID
+kode start              # 启动服务
+kode stop              # 停止服务
+kode reload            # 平滑重载
+kode status            # 查看状态
+kode info             # 版本信息
 ```
 
-## 信号说明
+## 底层信号说明
+
+`kode` 命令底层使用信号实现：
 
 | 信号 | 说明 | 操作 |
 |------|------|------|
 | SIGTERM | 优雅停止 | `kill -TERM $PID` |
 | SIGINT | 优雅停止 | `Ctrl+C` |
-| SIGQUIT | 强制停止 | `kill -QUIT $PID` |
 | SIGHUP | 平滑重载 | `kill -HUP $PID` |
 | SIGUSR1 | 平滑重载 | `kill -USR1 $PID` |
 | SIGUSR2 | 打印状态 | `kill -USR2 $PID` |

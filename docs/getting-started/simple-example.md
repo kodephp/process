@@ -295,10 +295,10 @@ Kode::app([
 
 | 操作 | 命令 |
 |------|------|
-| 启动 | `php http_server.php` |
-| 停止 | `kill -TERM $PID` |
-| 重载 | `kill -HUP $PID` |
-| 查看状态 | `kill -USR2 $PID` |
+| 启动 | `kode start` |
+| 停止 | `kode stop` |
+| 重载 | `kode reload` |
+| 查看状态 | `kode status` |
 
 ---
 

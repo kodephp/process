@@ -2,16 +2,14 @@
 
 ## 创建 Worker
 
-### 方式一：极简风格
+### 方式一：极简风格（推荐）
 
 ```php
 use Kode\Process\Kode;
 
-$worker = Kode::http('http://0.0.0.0:8080', 4);
-$worker->onMessage(function ($connection, $data) {
-    $connection->send('Hello');
-});
-$worker->start();
+Kode::worker('http://0.0.0.0:8080', 4)
+    ->onMessage(fn($conn, $data) => $conn->send('Hello'))
+    ->start();
 ```
 
 ### 方式二：Workerman 兼容风格
@@ -68,11 +66,11 @@ Worker 进程启动时触发。
 ```php
 $worker->onWorkerStart = function ($worker) {
     echo "Worker {$worker->id} 启动\n";
-    
+
     // 初始化数据库连接
     global $db;
     $db = new PDO('mysql:host=localhost;dbname=test', 'user', 'pass');
-    
+
     // 设置全局定时器
     \Kode\Process\Compat\Timer::add(10, function () {
         echo "心跳\n";
@@ -87,7 +85,7 @@ Worker 进程停止时触发。
 ```php
 $worker->onWorkerStop = function ($worker) {
     echo "Worker {$worker->id} 停止\n";
-    
+
     // 清理资源
     global $db;
     $db = null;
@@ -101,7 +99,7 @@ $worker->onWorkerStop = function ($worker) {
 ```php
 $worker->onConnect = function ($connection) {
     echo "新连接: {$connection->id} 来自 {$connection->getRemoteIp()}\n";
-    
+
     // 设置连接超时
     $connection->timeout = 30;
 };
@@ -114,10 +112,10 @@ $worker->onConnect = function ($connection) {
 ```php
 $worker->onMessage = function ($connection, $data) {
     echo "收到数据: {$data}\n";
-    
+
     // 处理请求
     $result = processRequest($data);
-    
+
     // 发送响应
     $connection->send($result);
 };
@@ -130,7 +128,7 @@ $worker->onMessage = function ($connection, $data) {
 ```php
 $worker->onClose = function ($connection) {
     echo "连接关闭: {$connection->id}\n";
-    
+
     // 清理连接相关资源
     cleanupConnection($connection->id);
 };
@@ -217,26 +215,19 @@ $connection->resumeRecv();
 ## 多 Worker 示例
 
 ```php
-use Kode\Process\Compat\Worker;
+use Kode\Process\Kode;
+
+$app = Kode::app(['worker_count' => 4]);
 
 // HTTP 服务
-$httpWorker = new Worker('http://0.0.0.0:8080');
-$httpWorker->count = 4;
-$httpWorker->name = 'HttpWorker';
-$httpWorker->onMessage = function ($connection, $request) {
-    $connection->send('HTTP Response');
-};
+$app->listen('http://0.0.0.0:8080')
+    ->onMessage(fn($conn, $req) => $conn->send('HTTP Response'));
 
 // WebSocket 服务
-$wsWorker = new Worker('websocket://0.0.0.0:8081');
-$wsWorker->count = 2;
-$wsWorker->name = 'WebSocketWorker';
-$wsWorker->onMessage = function ($connection, $data) {
-    $connection->send($data);
-};
+$app->listen('websocket://0.0.0.0:8081')
+    ->onMessage(fn($conn, $data) => $conn->send($data));
 
-// 启动所有 Worker
-Worker::runAll();
+$app->start();
 ```
 
 ## 完整示例
@@ -245,39 +236,19 @@ Worker::runAll();
 <?php
 require __DIR__ . '/vendor/autoload.php';
 
-use Kode\Process\Compat\Worker;
-use Kode\Process\Compat\Timer;
+use Kode\Process\Kode;
+use Kode\Process\Timer;
 
-// 创建 Worker
-$worker = new Worker('tcp://0.0.0.0:9000');
-$worker->count = 4;
-$worker->name = 'TcpServer';
-
-// 进程启动
-$worker->onWorkerStart = function ($worker) {
-    // 只在第一个进程执行
-    if ($worker->id === 0) {
-        Timer::add(60, function () {
-            echo "每分钟执行一次\n";
-        });
-    }
-};
-
-// 连接事件
-$worker->onConnect = function ($connection) {
-    echo "新连接: {$connection->id}\n";
-};
-
-// 消息事件
-$worker->onMessage = function ($connection, $data) {
-    $connection->send("收到: {$data}");
-};
-
-// 关闭事件
-$worker->onClose = function ($connection) {
-    echo "连接关闭: {$connection->id}\n";
-};
-
-// 运行
-Worker::runAll();
+Kode::worker('tcp://0.0.0.0:9000', 4)
+    ->onWorkerStart(function ($worker) {
+        if ($worker->id === 0) {
+            Timer::add(60, fn() => print "每分钟执行一次\n");
+        }
+    })
+    ->onConnect(fn($conn) => print "新连接: {$conn->id}\n")
+    ->onMessage(fn($conn, $data) => $conn->send("收到: {$data}"))
+    ->onClose(fn($conn) => print "连接关闭: {$conn->id}\n")
+    ->start();
 ```
+
+> **推荐**：新项目使用 `Kode::worker()` 统一方法，更简洁易用。

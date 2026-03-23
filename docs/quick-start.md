@@ -29,10 +29,10 @@ php http_server.php
 ## 信号控制
 
 ```bash
-php http_server.php        # 启动
-kill -TERM $PID           # 停止
-kill -HUP $PID            # 平滑重载
-kill -USR2 $PID           # 查看状态
+kode start              # 启动
+kode stop              # 停止
+kode reload            # 平滑重载
+kode status            # 查看状态
 ```
 
 ## 多协议支持

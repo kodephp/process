@@ -196,12 +196,12 @@ $global->increment('counter', 1);
 
 ## 14、支持守护进程化
 
-守护进程模式启动后，使用信号控制：
+守护进程模式启动后，使用命令控制：
 
 ```bash
-kill -TERM $PID  # 停止
-kill -HUP $PID   # 重载
-kill -USR2 $PID  # 查看状态
+kode stop   # 停止
+kode reload # 重载
+kode status # 查看状态
 ```
 
 ## 15、支持多端口监听
