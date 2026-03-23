@@ -101,11 +101,17 @@ $results = $manager->batch($items, function ($item) {
 Kode Process 提供平滑重启功能，能够保障服务平滑升级，不影响客户端的使用。
 
 ```bash
-# 平滑重启（不中断现有连接）
-php server.php reload
+# 启动服务
+php http_server.php
+
+# 平滑重载（不中断现有连接）
+kill -HUP $PID
 
 # 完全重启
-php server.php restart
+kill -TERM $PID && php http_server.php
+
+# 查看状态
+kill -USR2 $PID
 ```
 
 ## 8、支持文件更新检测及自动加载
@@ -190,15 +196,6 @@ $global->increment('counter', 1);
 
 ## 14、支持守护进程化
 
-```bash
-# 守护进程模式启动
-php server.php start -d
-
-# 查看状态
-php server.php status
-
-# 停止
-php server.php stop
 ```
 
 ## 15、支持多端口监听

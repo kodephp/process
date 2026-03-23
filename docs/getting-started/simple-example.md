@@ -31,13 +31,14 @@ Kode::worker('http://0.0.0.0:8080', 4)
 php http_server.php
 ```
 
-### 测试
+### 信号控制
 
-在浏览器中访问 `http://127.0.0.1:8080`，即可看到 "hello world"。
-
-> **信号控制**：
-> - `kill -TERM $PID` 或 `Ctrl+C` - 停止服务
-> - `kill -HUP $PID` - 平滑重载
+| 操作 | 命令 |
+|------|------|
+| 启动 | `php http_server.php` |
+| 停止 | `kill -TERM $PID` 或 `Ctrl+C` |
+| 重载 | `kill -HUP $PID` |
+| 查看状态 | `kill -USR2 $PID` |
 
 ---
 
