@@ -26,7 +26,7 @@ final class VersionTest extends TestCase
     public function testVersionComponents(): void
     {
         $this->assertEquals(2, Version::getMajor());
-        $this->assertEquals(8, Version::getMinor());
+        $this->assertEquals(9, Version::getMinor());
         $this->assertGreaterThanOrEqual(0, Version::getPatch());
     }
 
@@ -48,7 +48,7 @@ final class VersionTest extends TestCase
 
     public function testVersionComparison(): void
     {
-        $this->assertTrue(Version::isEqualTo('2.8.1'));
+        $this->assertTrue(Version::isEqualTo('2.9.0'));
         $this->assertFalse(Version::isGreaterThan('3.0.0'));
         $this->assertTrue(Version::isGreaterThan('1.0.0'));
     }
@@ -361,7 +361,7 @@ final class PromiseTest extends TestCase
         Async::runMicrotasks();
 
         $this->assertNotNull($result);
-        $this->assertCount(2, $result);
+        $this->assertEquals(2, count($result));
         $this->assertEquals('fulfilled', $result[0]['status']);
         $this->assertEquals('rejected', $result[1]['status']);
     }

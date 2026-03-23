@@ -7,10 +7,10 @@ namespace Kode\Process;
 final class Version
 {
     public const MAJOR = 2;
-    public const MINOR = 8;
-    public const PATCH = 1;
-    public const VERSION = '2.8.1';
-    public const VERSION_ID = 20801;
+    public const MINOR = 9;
+    public const PATCH = 0;
+    public const VERSION = '2.9.0';
+    public const VERSION_ID = 20900;
 
     private static ?string $phpVersion = null;
     private static ?int $phpVersionId = null;
