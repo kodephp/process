@@ -28,7 +28,7 @@ Kode::worker('http://0.0.0.0:8080', 4)
 ### 命令行运行
 
 ```bash
-php http_server.php
+kode start
 ```
 
 ### 信号控制
@@ -291,11 +291,11 @@ Kode::app([
 ->start();
 ```
 
-### 命令
+### 信号控制
 
 | 操作 | 命令 |
 |------|------|
-| 启动 | `php server.php` |
+| 启动 | `php http_server.php` |
 | 停止 | `kill -TERM $PID` |
 | 重载 | `kill -HUP $PID` |
 | 查看状态 | `kill -USR2 $PID` |

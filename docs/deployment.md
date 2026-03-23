@@ -380,7 +380,7 @@ chmod -R 755 /var/www/kode-process
 ps aux | grep php
 
 # 重启服务
-kill -TERM $PID && php http_server.php
+kode stop && kode start
 ```
 
 ### 日志查看

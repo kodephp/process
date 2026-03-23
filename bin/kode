@@ -1,0 +1,125 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+require dirname(__DIR__) . '/vendor/autoload.php';
+
+use Kode\Process\Kode;
+use Kode\Process\Signal;
+
+$command = $argv[1] ?? 'help';
+
+if (php_sapi_name() !== 'cli') {
+    echo "Error: This script must be run from the command line.\n";
+    exit(1);
+}
+
+switch ($command) {
+    case 'start':
+        $file = $argv[2] ?? 'server.php';
+
+        if (!file_exists($file)) {
+            echo "Error: File '{$file}' not found.\n";
+            echo "Usage: kode start <file>\n";
+            exit(1);
+        }
+
+        echo "Starting server from {$file}...\n";
+        $code = include $file;
+        break;
+
+    case 'stop':
+        $pidFile = sys_get_temp_dir() . '/kode-process.pid';
+
+        if (!file_exists($pidFile)) {
+            echo "No PID file found. Is the server running?\n";
+            exit(1);
+        }
+
+        $pid = (int) file_get_contents($pidFile);
+
+        if (posix_kill($pid, Signal::TERM)) {
+            echo "Server stopped (PID: {$pid})\n";
+            unlink($pidFile);
+        } else {
+            echo "Failed to stop server.\n";
+            exit(1);
+        }
+        break;
+
+    case 'reload':
+        $pidFile = sys_get_temp_dir() . '/kode-process.pid';
+
+        if (!file_exists($pidFile)) {
+            echo "No PID file found. Is the server running?\n";
+            exit(1);
+        }
+
+        $pid = (int) file_get_contents($pidFile);
+
+        if (posix_kill($pid, Signal::HUP)) {
+            echo "Server reloaded (PID: {$pid})\n";
+        } else {
+            echo "Failed to reload server.\n";
+            exit(1);
+        }
+        break;
+
+    case 'status':
+        $pidFile = sys_get_temp_dir() . '/kode-process.pid';
+
+        if (!file_exists($pidFile)) {
+            echo "Server is not running.\n";
+            exit(0);
+        }
+
+        $pid = (int) file_get_contents($pidFile);
+
+        if (posix_kill($pid, 0)) {
+            echo "Server is running (PID: {$pid})\n";
+        } else {
+            echo "Server is not running (stale PID file).\n";
+            unlink($pidFile);
+            exit(1);
+        }
+        break;
+
+    case 'info':
+        echo "Kode Process " . Kode::version() . "\n";
+        echo "PHP Version: " . PHP_VERSION . "\n";
+        echo "SAPI: " . php_sapi_name() . "\n";
+        echo "Platform: " . PHP_OS . "\n";
+        break;
+
+    case 'help':
+    default:
+        echo <<<HELP
+Kode Process - 高性能 PHP 进程管理器
+
+用法:
+    kode <command> [options]
+
+命令:
+    start <file>    启动服务 (默认 server.php)
+    stop            停止服务
+    reload          平滑重载
+    status          查看状态
+    info            版本信息
+    help            显示帮助
+
+示例:
+    kode start              # 启动 server.php
+    kode start app.php     # 启动 app.php
+    kode stop              # 停止服务
+    kode reload            # 平滑重载
+    kode status            # 查看状态
+
+信号控制:
+    kill -TERM \$PID       # 停止服务
+    kill -HUP \$PID       # 平滑重载
+    kill -USR2 \$PID       # 查看状态
+
+HELP;
+        break;
+}
