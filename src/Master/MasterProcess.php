@@ -39,9 +39,9 @@ class MasterProcess implements ProcessInterface
 
     private ?int $serverSocket = null;
 
-    private string $pidFile;
+    private ?string $pidFile = null;
 
-    private string $logFile;
+    private ?string $logFile = null;
 
     private bool $daemonize = false;
 
@@ -456,6 +456,10 @@ class MasterProcess implements ProcessInterface
 
     private function writePidFile(): void
     {
+        if ($this->pidFile === null) {
+            return;
+        }
+
         $dir = dirname($this->pidFile);
 
         if (!is_dir($dir)) {
@@ -467,7 +471,7 @@ class MasterProcess implements ProcessInterface
 
     private function removePidFile(): void
     {
-        if (file_exists($this->pidFile)) {
+        if ($this->pidFile !== null && file_exists($this->pidFile)) {
             unlink($this->pidFile);
         }
     }

@@ -29,23 +29,18 @@ composer require kode/process
 use Kode\Process\Kode;
 
 // 一行启动 HTTP 服务器
-Kode::http('http://0.0.0.0:8080', 4)
+Kode::worker('http://0.0.0.0:8080', 4)
     ->onMessage(fn($conn, $data) => $conn->send('Hello'))
     ->start();
 
 // 一行启动 WebSocket 服务器
-Kode::websocket('websocket://0.0.0.0:8081', 4)
+Kode::worker('websocket://0.0.0.0:8081', 4)
     ->onMessage(fn($conn, $data) => $conn->send($data))
     ->start();
 
 // 一行启动 TCP 服务器
-Kode::tcp('tcp://0.0.0.0:9000', 4)
+Kode::worker('tcp://0.0.0.0:9000', 4)
     ->onMessage(fn($conn, $data) => $conn->send($data))
-    ->start();
-
-// 自动检测协议
-Kode::worker('http://0.0.0.0:8080', 4)
-    ->onMessage(fn($conn, $data) => handleRequest($data))
     ->start();
 ```
 
