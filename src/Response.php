@@ -6,12 +6,10 @@ namespace Kode\Process;
 
 /**
  * 标准响应格式
- * 
- * 统一的 API 响应结构，使用 code 替代 result
- * 
- * PHP 8.1+: 使用 readonly 属性
- * PHP 8.5+: 支持管道操作符、fpow、array_find 等新特性
- * 
+ *
+ * 统一的 API 响应结构，使用 code 替代 result。
+ * 值对象语义：实例创建后不可变，所有 with* 方法返回新实例。
+ *
  * 响应格式:
  * {
  *   "code": 0,           // 状态码，0=成功，非0=错误
@@ -21,24 +19,25 @@ namespace Kode\Process;
  *   "time": 1234567890.0 // 时间戳
  * }
  */
-final class Response implements \JsonSerializable
+final readonly class Response implements \JsonSerializable
 {
-    public const CODE_SUCCESS = 0;
-    public const CODE_ERROR = 1;
-    public const CODE_TIMEOUT = 2;
-    public const CODE_NOT_FOUND = 3;
-    public const CODE_INVALID = 4;
-    public const CODE_UNAUTHORIZED = 5;
-    public const CODE_FORBIDDEN = 6;
-    public const CODE_OVERLOADED = 7;
-    public const CODE_SHUTDOWN = 8;
-    public const CODE_RATE_LIMITED = 9;
-    public const CODE_MAINTENANCE = 10;
-    public const CODE_DUPLICATE = 11;
-    public const CODE_TOO_LARGE = 12;
-    public const CODE_UNSUPPORTED = 13;
+    public const int CODE_SUCCESS = 0;
+    public const int CODE_ERROR = 1;
+    public const int CODE_TIMEOUT = 2;
+    public const int CODE_NOT_FOUND = 3;
+    public const int CODE_INVALID = 4;
+    public const int CODE_UNAUTHORIZED = 5;
+    public const int CODE_FORBIDDEN = 6;
+    public const int CODE_OVERLOADED = 7;
+    public const int CODE_SHUTDOWN = 8;
+    public const int CODE_RATE_LIMITED = 9;
+    public const int CODE_MAINTENANCE = 10;
+    public const int CODE_DUPLICATE = 11;
+    public const int CODE_TOO_LARGE = 12;
+    public const int CODE_UNSUPPORTED = 13;
 
-    private static array $messages = [
+    /** @var array<int, string> */
+    private const array MESSAGES = [
         self::CODE_SUCCESS => 'success',
         self::CODE_ERROR => 'error',
         self::CODE_TIMEOUT => 'timeout',
@@ -55,13 +54,17 @@ final class Response implements \JsonSerializable
         self::CODE_UNSUPPORTED => 'unsupported operation',
     ];
 
-    public readonly int $code;
-    public readonly string $message;
-    public readonly mixed $data;
-    public readonly array $meta;
-    public readonly float $time;
-    public readonly ?float $duration;
+    public int $code;
+    public string $message;
+    public mixed $data;
+    /** @var array<string, mixed> */
+    public array $meta;
+    public float $time;
+    public ?float $duration;
 
+    /**
+     * @param array<string, mixed> $meta
+     */
     public function __construct(
         int $code,
         string $message,
@@ -160,8 +163,15 @@ final class Response implements \JsonSerializable
 
     public static function fromCode(int $code, string $message = '', mixed $data = null): self
     {
-        $message = $message ?: (self::$messages[$code] ?? 'unknown');
-        return new self($code, $message, $data);
+        return new self($code, $message ?: (self::MESSAGES[$code] ?? 'unknown'), $data);
+    }
+
+    /**
+     * 返回状态码对应的默认文案
+     */
+    public static function messageFor(int $code): string
+    {
+        return self::MESSAGES[$code] ?? 'unknown';
     }
 
     public function withData(mixed $data): self
@@ -258,6 +268,7 @@ final class Response implements \JsonSerializable
         return $result;
     }
 
+    #[\Override]
     public function jsonSerialize(): array
     {
         return $this->toArray();
@@ -290,10 +301,21 @@ final class Response implements \JsonSerializable
         );
     }
 
+    /**
+     * 从 JSON 字符串还原响应
+     *
+     * 先用 json_validate() 校验，避免对非法输入调用 json_decode 产生的
+     * 解析开销与静默 null，从而把「格式非法」和「合法的 null」区分开。
+     */
     public static function fromJson(string $json): self
     {
+        if (!json_validate($json)) {
+            return self::invalid('响应 JSON 格式非法');
+        }
+
         $data = json_decode($json, true);
-        return self::fromArray($data ?? []);
+
+        return self::fromArray(is_array($data) ? $data : []);
     }
 
     public function throwOnError(): self

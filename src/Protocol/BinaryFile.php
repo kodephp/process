@@ -12,14 +12,17 @@ namespace Kode\Process\Protocol;
  */
 final class BinaryFile implements ProtocolInterface
 {
-    private const HEAD_LEN = 5;
-    private const MAX_SIZE = 104857600;
+    private const int HEAD_LEN = 5;
 
+    public const int MAX_SIZE = 104857600;
+
+    #[\Override]
     public static function getName(): string
     {
         return 'binary-file';
     }
 
+    #[\Override]
     public static function input(string $buffer, mixed $connection = null): int
     {
         if (strlen($buffer) < self::HEAD_LEN) {
@@ -35,6 +38,7 @@ final class BinaryFile implements ProtocolInterface
         return strlen($buffer) < $data['len'] ? 0 : $data['len'];
     }
 
+    #[\Override]
     public static function encode(mixed $data, mixed $connection = null): string
     {
         if (!is_array($data)) {
@@ -48,6 +52,7 @@ final class BinaryFile implements ProtocolInterface
         return pack('N', $totalLen) . pack('C', strlen($name)) . $name . $content;
     }
 
+    #[\Override]
     public static function decode(string $buffer, mixed $connection = null): mixed
     {
         if (strlen($buffer) < self::HEAD_LEN) {

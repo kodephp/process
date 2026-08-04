@@ -1,10 +1,10 @@
 {
     "name": "kode/process",
-    "description": "高性能 PHP 进程与线程管理器，支持 Master-Worker 模型、进程池、IPC 通信、信号处理、队列消费，兼容 PHP 8.1-8.5+",
+    "description": "高性能 PHP 进程与线程管理器，支持 Master-Worker 模型、进程池、IPC 通信、信号处理、队列消费，要求 PHP 8.3+",
     "type": "library",
     "keywords": ["php", "process", "thread", "worker", "ipc", "signal", "pool", "fiber", "coroutine", "multiprocessing", "queue"],
     "license": "Apache-2.0",
-    "version": "2.8.0",
+    "version": "3.0.0",
     "authors": [
         {
             "name": "KodePHP Team",
@@ -12,7 +12,7 @@
         }
     ],
     "require": {
-        "php": "^8.1",
+        "php": "^8.3",
         "ext-pcntl": "*",
         "ext-posix": "*",
         "ext-sockets": "*",
@@ -22,7 +22,7 @@
         "psr/log": "^2.0|^3.0"
     },
     "require-dev": {
-        "phpunit/phpunit": "^10.0|^11.0",
+        "phpunit/phpunit": "^11.0|^12.0",
         "swoole/ide-helper": "^5.0"
     },
     "suggest": {
@@ -59,7 +59,7 @@
     "prefer-stable": true,
     "extra": {
         "branch-alias": {
-            "dev-main": "2.8-dev"
+            "dev-main": "3.0-dev"
         }
     }
 }

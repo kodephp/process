@@ -4,30 +4,36 @@ declare(strict_types=1);
 
 namespace Kode\Process\Protocol;
 
+/**
+ * 文本协议
+ *
+ * 以换行符作为消息边界，适合面向行的简单交互。
+ */
 final class TextProtocol implements ProtocolInterface
 {
-    private const EOF = "\n";
-    private const MAX_LENGTH = 1048576;
+    private const string EOF = "\n";
 
+    public const int MAX_LENGTH = 1048576;
+
+    #[\Override]
     public static function getName(): string
     {
         return 'text';
     }
 
+    #[\Override]
     public static function input(string $buffer, mixed $connection = null): int
     {
         $pos = strpos($buffer, self::EOF);
 
         if ($pos === false) {
-            if (strlen($buffer) > self::MAX_LENGTH) {
-                return -1;
-            }
-            return 0;
+            return strlen($buffer) > self::MAX_LENGTH ? -1 : 0;
         }
 
         return $pos + 1;
     }
 
+    #[\Override]
     public static function encode(mixed $data, mixed $connection = null): string
     {
         if (is_string($data)) {
@@ -35,20 +41,27 @@ final class TextProtocol implements ProtocolInterface
         }
 
         if (is_array($data)) {
-            return json_encode($data, JSON_UNESCAPED_UNICODE) . self::EOF;
+            return json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . self::EOF;
         }
 
-        return (string)$data . self::EOF;
+        return (string) $data . self::EOF;
     }
 
+    #[\Override]
     public static function decode(string $buffer, mixed $connection = null): mixed
     {
         $data = rtrim($buffer, self::EOF);
 
-        $json = @json_decode($data, true);
-        
-        if ($json !== null) {
-            return $json;
+        if ($data === '') {
+            return $data;
+        }
+
+        if (json_validate($data)) {
+            $decoded = json_decode($data, true);
+
+            if ($decoded !== null) {
+                return $decoded;
+            }
         }
 
         return $data;

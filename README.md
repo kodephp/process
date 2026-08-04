@@ -2,12 +2,14 @@
 
 **高性能 PHP 进程管理器 | 分布式 | 协程 | 多协议**
 
-[![PHP Version](https://img.shields.io/badge/PHP-8.1+-777BB4?style=flat-square&logo=php)](https://php.net)
+[![PHP Version](https://img.shields.io/badge/PHP-8.3+-777BB4?style=flat-square&logo=php)](https://php.net)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green?style=flat-square)](LICENSE)
 
 ## 简介
 
 Kode Process 是一款专为高并发场景设计的高性能 PHP 进程管理器，支持分布式集群、Fiber 协程、多协议解析。
+
+> **v3.0 起最低要求 PHP 8.3**。若仍在 PHP 8.1 / 8.2 上运行，请继续使用 `^2.9`。
 
 ## 特性
 

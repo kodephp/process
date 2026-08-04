@@ -8,15 +8,17 @@ use Kode\Process\Response;
 
 final class ProtocolFactory
 {
+    /** @var array<string, ProtocolInterface> */
     private static array $protocols = [];
+    /** @var array<string, class-string> */
     private static array $customProtocols = [];
 
-    public const HTTP = 'http';
-    public const WEBSOCKET = 'websocket';
-    public const TCP = 'tcp';
-    public const TEXT = 'text';
-    public const SSL = 'ssl';
-    public const UDP = 'udp';
+    public const string HTTP = 'http';
+    public const string WEBSOCKET = 'websocket';
+    public const string TCP = 'tcp';
+    public const string TEXT = 'text';
+    public const string SSL = 'ssl';
+    public const string UDP = 'udp';
 
     private static bool $initialized = false;
 
@@ -124,10 +126,14 @@ final class ProtocolFactory
             return self::TEXT;
         }
 
-        $prefix = substr($data, 0, 3);
+        $isHttpVerb = match (substr($data, 0, 3)) {
+            'GET', 'POS', 'PUT', 'DEL', 'HEA', 'PAT', 'OPT', 'TRA', 'CON' => true,
+            default => false,
+        };
 
-        if ($prefix === 'GET' || $prefix === 'POS' || $prefix === 'PUT' || $prefix === 'DEL' || $prefix === 'HEA' || $prefix === 'PAT' || $prefix === 'OPT') {
-            return self::HTTP;
+        if ($isHttpVerb) {
+            // WebSocket 握手同样以 GET 开头，需进一步区分
+            return WebSocketProtocol::isHandshakeRequest($data) ? self::WEBSOCKET : self::HTTP;
         }
 
         $firstByte = ord($data[0]);
@@ -136,7 +142,7 @@ final class ProtocolFactory
             return self::WEBSOCKET;
         }
 
-        if (strpos($data, "\n") !== false) {
+        if (str_contains($data, "\n")) {
             return self::TEXT;
         }
 

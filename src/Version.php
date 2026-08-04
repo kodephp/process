@@ -4,16 +4,38 @@ declare(strict_types=1);
 
 namespace Kode\Process;
 
+use Kode\Process\Exceptions\ProcessException;
+
+/**
+ * 版本与运行环境信息
+ *
+ * 自 3.0.0 起最低要求 PHP 8.3。所有在 8.3 已无条件可用的特性探测方法均已移除，
+ * 仅保留对 8.4 / 8.5 前瞻特性的运行时探测。
+ */
 final class Version
 {
-    public const MAJOR = 2;
-    public const MINOR = 9;
-    public const PATCH = 0;
-    public const VERSION = '2.9.0';
-    public const VERSION_ID = 20900;
+    public const int MAJOR = 3;
+    public const int MINOR = 0;
+    public const int PATCH = 0;
+    public const string VERSION = '3.0.0';
+    public const int VERSION_ID = 30000;
 
-    private static ?string $phpVersion = null;
-    private static ?int $phpVersionId = null;
+    /** 本库要求的最低 PHP 版本 */
+    public const string MINIMUM_PHP_VERSION = '8.3.0';
+    public const int MINIMUM_PHP_VERSION_ID = 80300;
+
+    /** 运行所必需的扩展 */
+    public const array REQUIRED_EXTENSIONS = ['pcntl', 'posix', 'sockets'];
+
+    /** 可选扩展及其用途 */
+    public const array OPTIONAL_EXTENSIONS = [
+        'sysvmsg' => 'System V 消息队列 IPC',
+        'sysvshm' => '共享内存 IPC',
+        'sysvsem' => '信号量同步',
+        'parallel' => '多线程并行处理',
+        'swoole' => 'Swoole 协程进程管理',
+        'swow' => 'Swow 协程引擎',
+    ];
 
     public static function get(): string
     {
@@ -42,40 +64,22 @@ final class Version
 
     public static function getPhpVersion(): string
     {
-        if (self::$phpVersion === null) {
-            self::$phpVersion = PHP_VERSION;
-        }
-
-        return self::$phpVersion;
+        return PHP_VERSION;
     }
 
     public static function getPhpVersionId(): int
     {
-        if (self::$phpVersionId === null) {
-            self::$phpVersionId = PHP_VERSION_ID;
-        }
-
-        return self::$phpVersionId;
+        return PHP_VERSION_ID;
     }
 
     public static function getPhpMajorVersion(): int
     {
-        return (int) PHP_MAJOR_VERSION;
+        return PHP_MAJOR_VERSION;
     }
 
     public static function getPhpMinorVersion(): int
     {
-        return (int) PHP_MINOR_VERSION;
-    }
-
-    public static function isPhp81(): bool
-    {
-        return PHP_VERSION_ID >= 80100 && PHP_VERSION_ID < 80200;
-    }
-
-    public static function isPhp82(): bool
-    {
-        return PHP_VERSION_ID >= 80200 && PHP_VERSION_ID < 80300;
+        return PHP_MINOR_VERSION;
     }
 
     public static function isPhp83(): bool
@@ -93,49 +97,88 @@ final class Version
         return PHP_VERSION_ID >= 80500 && PHP_VERSION_ID < 80600;
     }
 
-    public static function supportsFiber(): bool
+    /**
+     * 当前 PHP 是否满足最低版本要求
+     */
+    public static function isPhpSupported(): bool
     {
-        return PHP_VERSION_ID >= 80100;
+        return PHP_VERSION_ID >= self::MINIMUM_PHP_VERSION_ID;
     }
 
-    public static function supportsReadonly(): bool
+    /**
+     * 断言运行环境可用，不满足时抛出异常
+     *
+     * @throws ProcessException
+     */
+    public static function requireSupportedEnvironment(): void
     {
-        return PHP_VERSION_ID >= 80100;
+        $problems = self::checkEnvironment();
+
+        if ($problems !== []) {
+            throw new ProcessException('运行环境不满足要求: ' . implode('; ', $problems));
+        }
     }
 
-    public static function supportsEnums(): bool
+    /**
+     * 检查运行环境，返回问题清单（为空表示通过）
+     *
+     * @return list<string>
+     */
+    public static function checkEnvironment(): array
     {
-        return PHP_VERSION_ID >= 80100;
+        $problems = [];
+
+        if (!self::isPhpSupported()) {
+            $problems[] = sprintf(
+                'PHP >= %s，当前 %s',
+                self::MINIMUM_PHP_VERSION,
+                PHP_VERSION
+            );
+        }
+
+        $missing = self::getMissingExtensions();
+
+        if ($missing !== []) {
+            $problems[] = '缺少扩展: ' . implode(', ', $missing);
+        }
+
+        return $problems;
     }
 
-    public static function supportsAttributes(): bool
+    /**
+     * 返回缺失的必需扩展
+     *
+     * @return list<string>
+     */
+    public static function getMissingExtensions(): array
     {
-        return PHP_VERSION_ID >= 80000;
+        $missing = [];
+
+        foreach (self::REQUIRED_EXTENSIONS as $extension) {
+            if (!extension_loaded($extension)) {
+                $missing[] = $extension;
+            }
+        }
+
+        return $missing;
     }
 
-    public static function supportsMatch(): bool
+    /**
+     * 返回已加载的可选扩展及用途
+     *
+     * @return array<string, string>
+     */
+    public static function getLoadedOptionalExtensions(): array
     {
-        return PHP_VERSION_ID >= 80000;
-    }
+        $loaded = [];
 
-    public static function supportsNamedArguments(): bool
-    {
-        return PHP_VERSION_ID >= 80000;
-    }
+        foreach (self::OPTIONAL_EXTENSIONS as $extension => $purpose) {
+            if (extension_loaded($extension)) {
+                $loaded[$extension] = $purpose;
+            }
+        }
 
-    public static function supportsUnionTypes(): bool
-    {
-        return PHP_VERSION_ID >= 80000;
-    }
-
-    public static function supportsIntersectionTypes(): bool
-    {
-        return PHP_VERSION_ID >= 80100;
-    }
-
-    public static function supportsNeverType(): bool
-    {
-        return PHP_VERSION_ID >= 80100;
+        return $loaded;
     }
 
     public static function supportsCloneWith(): bool
@@ -158,6 +201,21 @@ final class Version
         return PHP_VERSION_ID >= 80500;
     }
 
+    public static function supportsPropertyHooks(): bool
+    {
+        return PHP_VERSION_ID >= 80400;
+    }
+
+    public static function supportsAsymmetricVisibility(): bool
+    {
+        return PHP_VERSION_ID >= 80400;
+    }
+
+    public static function supportsLazyObjects(): bool
+    {
+        return PHP_VERSION_ID >= 80400;
+    }
+
     public static function compare(string $version): int
     {
         return version_compare(self::VERSION, $version);
@@ -178,18 +236,17 @@ final class Version
         return self::compare($version) === 0;
     }
 
+    /**
+     * 前瞻特性探测结果
+     *
+     * @return array<string, bool>
+     */
     public static function getFeatures(): array
     {
         return [
-            'fiber' => self::supportsFiber(),
-            'readonly' => self::supportsReadonly(),
-            'enums' => self::supportsEnums(),
-            'attributes' => self::supportsAttributes(),
-            'match' => self::supportsMatch(),
-            'named_arguments' => self::supportsNamedArguments(),
-            'union_types' => self::supportsUnionTypes(),
-            'intersection_types' => self::supportsIntersectionTypes(),
-            'never_type' => self::supportsNeverType(),
+            'property_hooks' => self::supportsPropertyHooks(),
+            'asymmetric_visibility' => self::supportsAsymmetricVisibility(),
+            'lazy_objects' => self::supportsLazyObjects(),
             'clone_with' => self::supportsCloneWith(),
             'pipe_operator' => self::supportsPipeOperator(),
             'uri_extension' => self::supportsUriExtension(),
@@ -197,6 +254,9 @@ final class Version
         ];
     }
 
+    /**
+     * @return array<string, mixed>
+     */
     public static function getInfo(): array
     {
         return [
@@ -205,10 +265,14 @@ final class Version
             'major' => self::MAJOR,
             'minor' => self::MINOR,
             'patch' => self::PATCH,
-            'php_version' => self::getPhpVersion(),
-            'php_version_id' => self::getPhpVersionId(),
-            'php_major' => self::getPhpMajorVersion(),
-            'php_minor' => self::getPhpMinorVersion(),
+            'php_version' => PHP_VERSION,
+            'php_version_id' => PHP_VERSION_ID,
+            'php_major' => PHP_MAJOR_VERSION,
+            'php_minor' => PHP_MINOR_VERSION,
+            'minimum_php' => self::MINIMUM_PHP_VERSION,
+            'php_supported' => self::isPhpSupported(),
+            'missing_extensions' => self::getMissingExtensions(),
+            'optional_extensions' => self::getLoadedOptionalExtensions(),
             'features' => self::getFeatures(),
         ];
     }

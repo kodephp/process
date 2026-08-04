@@ -2,9 +2,11 @@
 
 ## 环境要求
 
-- **PHP**: >= 8.1
+- **PHP**: >= 8.3
 - **扩展**: pcntl, posix, sockets
 - **可选扩展**: sysvmsg, sysvshm, sysvsem, pthreads, parallel, swoole
+
+> v3.0 起最低要求 PHP 8.3；PHP 8.1 / 8.2 环境请使用 `^2.9`。
 
 ## 安装方式
 
@@ -21,7 +23,7 @@ composer require kode/process
 ```json
 {
     "require": {
-        "kode/process": "^2.4"
+        "kode/process": "^3.0"
     }
 }
 ```

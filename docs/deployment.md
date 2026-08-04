@@ -17,7 +17,7 @@
 
 | 软件 | 版本 |
 |------|------|
-| PHP | 8.1+ |
+| PHP | 8.3+ |
 | Composer | 2.0+ |
 | 扩展 | pcntl, posix, sockets |
 | 可选扩展 | opcache, redis, pdo |

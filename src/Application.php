@@ -34,6 +34,16 @@ final class Application
     private ?IntegrationManager $integration = null;
     private array $clusterConfig = [];
 
+    /**
+     * 守护进程重定向后的标准流句柄。
+     *
+     * 必须由对象持有：若仅作为局部变量，函数返回时会被 GC 回收并关闭底层
+     * 描述符，导致后续 fd 0/1/2 被其它 fopen/socket 意外复用。
+     *
+     * @var list<resource>
+     */
+    private array $stdStreams = [];
+
     private function __construct()
     {
         $this->processManager = GlobalProcessManager::getInstance();
@@ -503,17 +513,22 @@ final class Application
 
         umask(0);
 
-        if ($this->pidFile) {
-            file_put_contents($this->pidFile, getmypid());
+        if ($this->pidFile !== '') {
+            file_put_contents($this->pidFile, (string) getmypid());
         }
+
+        $target = $this->logFile !== '' ? $this->logFile : '/dev/null';
 
         fclose(STDIN);
         fclose(STDOUT);
         fclose(STDERR);
 
-        $stdin = fopen('/dev/null', 'r');
-        $stdout = $this->logFile ? fopen($this->logFile, 'a') : fopen('/dev/null', 'a');
-        $stderr = $this->logFile ? fopen($this->logFile, 'a') : fopen('/dev/null', 'a');
+        // 关闭后立即按 0/1/2 顺序重新占位，句柄存入属性防止被 GC 关闭
+        $this->stdStreams = array_values(array_filter([
+            fopen('/dev/null', 'r'),
+            fopen($target, 'a'),
+            fopen($target, 'a'),
+        ], static fn (mixed $handle): bool => is_resource($handle)));
     }
 
     private function parseAddress(string $address): array

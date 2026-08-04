@@ -38,16 +38,6 @@ final class Kode
         return PhpCompat::versionId();
     }
 
-    public static function isPhp81(): bool
-    {
-        return PhpCompat::isPhp81();
-    }
-
-    public static function isPhp82(): bool
-    {
-        return PhpCompat::isPhp82();
-    }
-
     public static function isPhp83(): bool
     {
         return PhpCompat::isPhp83();
@@ -71,6 +61,36 @@ final class Kode
     public static function hasPersistentCurlShare(): bool
     {
         return PhpCompat::hasPersistentCurlShare();
+    }
+
+    /**
+     * 检查运行环境，返回问题清单（为空表示通过）
+     *
+     * @return list<string>
+     */
+    public static function checkEnvironment(): array
+    {
+        return Version::checkEnvironment();
+    }
+
+    /**
+     * 断言运行环境满足要求，不满足时抛出异常
+     *
+     * @throws Exceptions\ProcessException
+     */
+    public static function requireEnvironment(): void
+    {
+        Version::requireSupportedEnvironment();
+    }
+
+    /**
+     * 运行环境与版本信息
+     *
+     * @return array<string, mixed>
+     */
+    public static function info(): array
+    {
+        return Version::getInfo();
     }
 
     public static function app(array $config = []): Application

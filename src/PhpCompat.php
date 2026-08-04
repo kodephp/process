@@ -4,6 +4,15 @@ declare(strict_types=1);
 
 namespace Kode\Process;
 
+/**
+ * PHP 版本能力探测与前向兼容垫片
+ *
+ * 自 3.0.0 起最低要求 PHP 8.3，因此 8.0 - 8.3 的语言特性一律视为可用，
+ * 相关的恒真探测方法已全部移除。本类只处理 8.4 / 8.5 及以后的前瞻特性。
+ *
+ * 能力探测优先使用 function_exists()/extension_loaded() 而非版本号比较：
+ * 版本号只能表达「某版本起应当存在」，而实际运行环境可能禁用了对应函数。
+ */
 final class PhpCompat
 {
     private static mixed $curlShareHandle = null;
@@ -16,16 +25,6 @@ final class PhpCompat
     public static function versionId(): int
     {
         return PHP_VERSION_ID;
-    }
-
-    public static function isPhp81(): bool
-    {
-        return PHP_VERSION_ID >= 80100 && PHP_VERSION_ID < 80200;
-    }
-
-    public static function isPhp82(): bool
-    {
-        return PHP_VERSION_ID >= 80200 && PHP_VERSION_ID < 80300;
     }
 
     public static function isPhp83(): bool
@@ -48,6 +47,21 @@ final class PhpCompat
         return PHP_VERSION_ID >= 80600;
     }
 
+    public static function hasPropertyHooks(): bool
+    {
+        return PHP_VERSION_ID >= 80400;
+    }
+
+    public static function hasAsymmetricVisibility(): bool
+    {
+        return PHP_VERSION_ID >= 80400;
+    }
+
+    public static function hasLazyObjects(): bool
+    {
+        return PHP_VERSION_ID >= 80400;
+    }
+
     public static function hasPipeOperator(): bool
     {
         return PHP_VERSION_ID >= 80500;
@@ -58,9 +72,9 @@ final class PhpCompat
         return PHP_VERSION_ID >= 80500;
     }
 
-    public static function hasUriExtension(): bool
+    public static function hasConstExprClosures(): bool
     {
-        return PHP_VERSION_ID >= 80500 && extension_loaded('uri');
+        return PHP_VERSION_ID >= 80500;
     }
 
     public static function hasNoDiscardAttribute(): bool
@@ -68,169 +82,27 @@ final class PhpCompat
         return PHP_VERSION_ID >= 80500;
     }
 
+    public static function hasUriExtension(): bool
+    {
+        return extension_loaded('uri');
+    }
+
     public static function hasPersistentCurlShare(): bool
     {
-        return PHP_VERSION_ID >= 80500 && extension_loaded('curl');
+        return extension_loaded('curl') && class_exists('CURLShare', false);
     }
 
-    public static function hasConstExprClosures(): bool
-    {
-        return PHP_VERSION_ID >= 80500;
-    }
-
+    /**
+     * array_find 系列函数是否原生可用
+     */
     public static function hasArrayFind(): bool
     {
-        return PHP_VERSION_ID >= 80500;
+        return function_exists('array_find');
     }
 
     public static function hasFpow(): bool
     {
-        return PHP_VERSION_ID >= 80500;
-    }
-
-    public static function hasFiberLocal(): bool
-    {
-        return PHP_VERSION_ID >= 80300;
-    }
-
-    public static function hasReadonlyProperties(): bool
-    {
-        return PHP_VERSION_ID >= 80100;
-    }
-
-    public static function hasEnums(): bool
-    {
-        return PHP_VERSION_ID >= 80100;
-    }
-
-    public static function hasAttributes(): bool
-    {
-        return PHP_VERSION_ID >= 80000;
-    }
-
-    public static function hasMatchExpression(): bool
-    {
-        return PHP_VERSION_ID >= 80000;
-    }
-
-    public static function hasNamedArguments(): bool
-    {
-        return PHP_VERSION_ID >= 80000;
-    }
-
-    public static function hasUnionTypes(): bool
-    {
-        return PHP_VERSION_ID >= 80000;
-    }
-
-    public static function hasIntersectionTypes(): bool
-    {
-        return PHP_VERSION_ID >= 80100;
-    }
-
-    public static function hasNeverType(): bool
-    {
-        return PHP_VERSION_ID >= 80100;
-    }
-
-    public static function hasVoidType(): bool
-    {
-        return PHP_VERSION_ID >= 70100;
-    }
-
-    public static function hasMixedType(): bool
-    {
-        return PHP_VERSION_ID >= 80000;
-    }
-
-    public static function hasStaticReturnType(): bool
-    {
-        return PHP_VERSION_ID >= 80000;
-    }
-
-    public static function hasThrowExpression(): bool
-    {
-        return PHP_VERSION_ID >= 80000;
-    }
-
-    public static function hasNullsafeOperator(): bool
-    {
-        return PHP_VERSION_ID >= 80000;
-    }
-
-    public static function hasWeakMaps(): bool
-    {
-        return PHP_VERSION_ID >= 80000;
-    }
-
-    public static function hasStringableInterface(): bool
-    {
-        return PHP_VERSION_ID >= 80000;
-    }
-
-    public static function hasClosuresFromCallable(): bool
-    {
-        return PHP_VERSION_ID >= 80100;
-    }
-
-    public static function hasFirstClassCallables(): bool
-    {
-        return PHP_VERSION_ID >= 80100;
-    }
-
-    public static function hasNewInInitializers(): bool
-    {
-        return PHP_VERSION_ID >= 80100;
-    }
-
-    public static function hasReadonlyClasses(): bool
-    {
-        return PHP_VERSION_ID >= 80200;
-    }
-
-    public static function hasDisjunctiveNormalFormTypes(): bool
-    {
-        return PHP_VERSION_ID >= 80200;
-    }
-
-    public static function hasConstantsInTraits(): bool
-    {
-        return PHP_VERSION_ID >= 80200;
-    }
-
-    public static function hasDeprecatedDynamicProperties(): bool
-    {
-        return PHP_VERSION_ID >= 80200;
-    }
-
-    public static function hasRandomExtension(): bool
-    {
-        return PHP_VERSION_ID >= 80200 && extension_loaded('random');
-    }
-
-    public static function hasTypedClassConstants(): bool
-    {
-        return PHP_VERSION_ID >= 80300;
-    }
-
-    public static function hasDynamicClassConstantFetch(): bool
-    {
-        return PHP_VERSION_ID >= 80300;
-    }
-
-    public static function hasJsonValidate(): bool
-    {
-        return PHP_VERSION_ID >= 80300;
-    }
-
-    public static function hasOverrideAttribute(): bool
-    {
-        return PHP_VERSION_ID >= 80300;
-    }
-
-    public static function hasDeepCloningOfReadonlyProperties(): bool
-    {
-        return PHP_VERSION_ID >= 80300;
+        return function_exists('fpow');
     }
 
     public static function supportsPipe(): bool
@@ -238,9 +110,12 @@ final class PhpCompat
         return self::hasPipeOperator();
     }
 
+    /**
+     * @param array<array-key, mixed> $array
+     */
     public static function arrayFind(array $array, callable $callback): mixed
     {
-        if (self::hasArrayFind()) {
+        if (function_exists('array_find')) {
             return \array_find($array, $callback);
         }
 
@@ -253,9 +128,12 @@ final class PhpCompat
         return null;
     }
 
+    /**
+     * @param array<array-key, mixed> $array
+     */
     public static function arrayFindKey(array $array, callable $callback): int|string|null
     {
-        if (self::hasArrayFind()) {
+        if (function_exists('array_find_key')) {
             return \array_find_key($array, $callback);
         }
 
@@ -268,9 +146,12 @@ final class PhpCompat
         return null;
     }
 
+    /**
+     * @param array<array-key, mixed> $array
+     */
     public static function arrayAny(array $array, callable $callback): bool
     {
-        if (self::hasArrayFind()) {
+        if (function_exists('array_any')) {
             return \array_any($array, $callback);
         }
 
@@ -283,9 +164,12 @@ final class PhpCompat
         return false;
     }
 
+    /**
+     * @param array<array-key, mixed> $array
+     */
     public static function arrayAll(array $array, callable $callback): bool
     {
-        if (self::hasArrayFind()) {
+        if (function_exists('array_all')) {
             return \array_all($array, $callback);
         }
 
@@ -300,7 +184,7 @@ final class PhpCompat
 
     public static function fpow(float $base, float $exponent): float
     {
-        if (self::hasFpow()) {
+        if (function_exists('fpow')) {
             return \fpow($base, $exponent);
         }
 
@@ -316,6 +200,17 @@ final class PhpCompat
         return $value;
     }
 
+    public static function createPipe(callable ...$callbacks): \Closure
+    {
+        return static function (mixed $value) use ($callbacks): mixed {
+            foreach ($callbacks as $callback) {
+                $value = $callback($value);
+            }
+
+            return $value;
+        };
+    }
+
     public static function enableCurlShare(): mixed
     {
         if (!self::hasPersistentCurlShare()) {
@@ -324,8 +219,7 @@ final class PhpCompat
 
         if (self::$curlShareHandle === null) {
             $class = 'CURLShare';
-            $const = 'CURLSHARE_NONE';
-            $handle = new $class(constant($const));
+            $handle = new $class(constant('CURLSHARE_NONE'));
             $handle->setopt(\CURLSHOPT_SHARE, constant('CURL_LOCK_DATA_COOKIE'));
             $handle->setopt(\CURLSHOPT_SHARE, constant('CURL_LOCK_DATA_DNS'));
             $handle->setopt(\CURLSHOPT_SHARE, constant('CURL_LOCK_DATA_SSL_SESSION'));
@@ -341,16 +235,5 @@ final class PhpCompat
             self::$curlShareHandle->close();
             self::$curlShareHandle = null;
         }
-    }
-
-    public static function createPipe(callable ...$callbacks): \Closure
-    {
-        return function (mixed $value) use ($callbacks): mixed {
-            foreach ($callbacks as $callback) {
-                $value = $callback($value);
-            }
-
-            return $value;
-        };
     }
 }

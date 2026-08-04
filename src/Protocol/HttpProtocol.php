@@ -4,98 +4,164 @@ declare(strict_types=1);
 
 namespace Kode\Process\Protocol;
 
+/**
+ * HTTP/1.1 协议实现
+ */
 final class HttpProtocol implements ProtocolInterface
 {
-    private const EOF = "\r\n\r\n";
-    private const HEADER_EOF = "\r\n";
-    private const MAX_LENGTH = 10485760;
-    private static array $cache = [];
+    private const string EOF = "\r\n\r\n";
+    private const string HEADER_EOF = "\r\n";
 
+    /** 请求报文总长度上限 */
+    public const int MAX_LENGTH = 10485760;
+
+    /** @var array<int, string> */
+    private const array STATUS_TEXTS = [
+        100 => 'Continue',
+        101 => 'Switching Protocols',
+        200 => 'OK',
+        201 => 'Created',
+        202 => 'Accepted',
+        204 => 'No Content',
+        206 => 'Partial Content',
+        301 => 'Moved Permanently',
+        302 => 'Found',
+        303 => 'See Other',
+        304 => 'Not Modified',
+        307 => 'Temporary Redirect',
+        308 => 'Permanent Redirect',
+        400 => 'Bad Request',
+        401 => 'Unauthorized',
+        403 => 'Forbidden',
+        404 => 'Not Found',
+        405 => 'Method Not Allowed',
+        406 => 'Not Acceptable',
+        408 => 'Request Timeout',
+        409 => 'Conflict',
+        410 => 'Gone',
+        411 => 'Length Required',
+        413 => 'Payload Too Large',
+        414 => 'URI Too Long',
+        415 => 'Unsupported Media Type',
+        422 => 'Unprocessable Entity',
+        429 => 'Too Many Requests',
+        431 => 'Request Header Fields Too Large',
+        500 => 'Internal Server Error',
+        501 => 'Not Implemented',
+        502 => 'Bad Gateway',
+        503 => 'Service Unavailable',
+        504 => 'Gateway Timeout',
+        505 => 'HTTP Version Not Supported',
+    ];
+
+    #[\Override]
     public static function getName(): string
     {
         return 'http';
     }
 
+    /**
+     * 计算完整请求报文长度
+     *
+     * @return int 0=报文未接收完整；-1=超长应拒绝；>0=完整报文字节数
+     */
+    #[\Override]
     public static function input(string $buffer, mixed $connection = null): int
     {
         $pos = strpos($buffer, self::EOF);
 
         if ($pos === false) {
-            if (strlen($buffer) > self::MAX_LENGTH) {
-                return -1;
-            }
+            return strlen($buffer) > self::MAX_LENGTH ? -1 : 0;
+        }
+
+        $headerLength = $pos + 4;
+        $contentLength = self::scanContentLength($buffer, $pos);
+
+        if ($contentLength <= 0) {
+            return $headerLength;
+        }
+
+        $totalLength = $headerLength + $contentLength;
+
+        if ($totalLength > self::MAX_LENGTH) {
+            return -1;
+        }
+
+        return strlen($buffer) < $totalLength ? 0 : $totalLength;
+    }
+
+    /**
+     * 只扫描 Content-Length 字段，避免为了拿一个数字而解析整个头部。
+     *
+     * 该方法在每个请求的每次收包上都会被调用，是最热的路径之一。
+     */
+    private static function scanContentLength(string $buffer, int $headerEnd): int
+    {
+        $pos = stripos($buffer, "\r\ncontent-length:");
+
+        if ($pos === false || $pos >= $headerEnd) {
             return 0;
         }
 
-        $headerLength = $pos + strlen(self::EOF);
-        $headers = self::parseHeaders(substr($buffer, 0, $pos));
-        $contentLength = (int)($headers['Content-Length'] ?? $headers['content-length'] ?? 0);
+        $valueStart = $pos + 17;
+        $lineEnd = strpos($buffer, self::HEADER_EOF, $valueStart);
 
-        if ($contentLength > 0) {
-            $totalLength = $headerLength + $contentLength;
-            
-            if (strlen($buffer) < $totalLength) {
-                return 0;
-            }
-            
-            return $totalLength;
+        if ($lineEnd === false || $lineEnd > $headerEnd) {
+            return 0;
         }
 
-        return $headerLength;
+        return (int) trim(substr($buffer, $valueStart, $lineEnd - $valueStart));
     }
 
+    #[\Override]
     public static function encode(mixed $data, mixed $connection = null): string
     {
         if (is_string($data)) {
             return $data;
         }
 
-        if (is_array($data)) {
-            $status = $data['status'] ?? 200;
-            $headers = $data['headers'] ?? ['Content-Type' => 'text/html; charset=utf-8'];
-            $body = $data['body'] ?? '';
-
-            if (!isset($headers['Content-Length']) && !isset($headers['content-length'])) {
-                $headers['Content-Length'] = strlen($body);
-            }
-
-            $response = "HTTP/1.1 {$status} " . self::getStatusText($status) . self::HEADER_EOF;
-
-            foreach ($headers as $name => $value) {
-                $response .= "{$name}: {$value}" . self::HEADER_EOF;
-            }
-
-            $response .= self::HEADER_EOF . $body;
-
-            return $response;
+        if (!is_array($data)) {
+            return '';
         }
 
-        return '';
+        $status = (int) ($data['status'] ?? 200);
+        $headers = $data['headers'] ?? ['Content-Type' => 'text/html; charset=utf-8'];
+        $body = (string) ($data['body'] ?? '');
+
+        if (!isset($headers['Content-Length']) && !isset($headers['content-length'])) {
+            $headers['Content-Length'] = strlen($body);
+        }
+
+        $response = 'HTTP/1.1 ' . $status . ' ' . self::getStatusText($status) . self::HEADER_EOF;
+
+        foreach ($headers as $name => $value) {
+            $response .= $name . ': ' . $value . self::HEADER_EOF;
+        }
+
+        return $response . self::HEADER_EOF . $body;
     }
 
+    /**
+     * @return array{
+     *     method: string, uri: string, path: string, query: array<string, mixed>,
+     *     protocol: string, headers: array<string, string>, body: string,
+     *     get: array<string, mixed>, post: array<string, mixed>
+     * }
+     */
+    #[\Override]
     public static function decode(string $buffer, mixed $connection = null): mixed
     {
-        $hash = md5($buffer);
-        
-        if (isset(self::$cache[$hash])) {
-            return self::$cache[$hash];
-        }
-
-        $request = self::parseRequest($buffer);
-        self::$cache[$hash] = $request;
-
-        if (count(self::$cache) > 1000) {
-            self::$cache = array_slice(self::$cache, -500, null, true);
-        }
-
-        return $request;
+        return self::parseRequest($buffer);
     }
 
+    /**
+     * @return array<string, mixed>
+     */
     private static function parseRequest(string $data): array
     {
         $headerEnd = strpos($data, self::EOF);
         $headerPart = $headerEnd !== false ? substr($data, 0, $headerEnd) : $data;
-        $body = $headerEnd !== false ? substr($data, $headerEnd + strlen(self::EOF)) : '';
+        $body = $headerEnd !== false ? substr($data, $headerEnd + 4) : '';
 
         $lines = explode(self::HEADER_EOF, $headerPart);
         $requestLine = array_shift($lines) ?? '';
@@ -105,20 +171,20 @@ final class HttpProtocol implements ProtocolInterface
         $uri = $parts[1] ?? '/';
         $protocol = $parts[2] ?? 'HTTP/1.1';
 
-        $headers = [];
-        foreach ($lines as $line) {
-            if (strpos($line, ':') !== false) {
-                [$name, $value] = explode(':', $line, 2);
-                $headers[trim($name)] = trim($value);
-            }
-        }
+        $headers = self::parseHeaderLines($lines);
 
-        $path = parse_url($uri, PHP_URL_PATH) ?: '/';
         $query = [];
         $queryPos = strpos($uri, '?');
-        
+
         if ($queryPos !== false) {
+            $path = substr($uri, 0, $queryPos);
             parse_str(substr($uri, $queryPos + 1), $query);
+        } else {
+            $path = $uri;
+        }
+
+        if ($path === '') {
+            $path = '/';
         }
 
         return [
@@ -130,64 +196,63 @@ final class HttpProtocol implements ProtocolInterface
             'headers' => $headers,
             'body' => $body,
             'get' => $query,
-            'post' => self::parseBody($body, $headers)
+            'post' => self::parseBody($body, $headers),
         ];
     }
 
-    private static function parseHeaders(string $headerPart): array
+    /**
+     * @param list<string> $lines
+     * @return array<string, string>
+     */
+    private static function parseHeaderLines(array $lines): array
     {
         $headers = [];
-        $lines = explode(self::HEADER_EOF, $headerPart);
-        array_shift($lines);
 
         foreach ($lines as $line) {
-            if (strpos($line, ':') !== false) {
-                [$name, $value] = explode(':', $line, 2);
-                $headers[trim($name)] = trim($value);
+            $colon = strpos($line, ':');
+
+            if ($colon === false) {
+                continue;
             }
+
+            $headers[trim(substr($line, 0, $colon))] = trim(substr($line, $colon + 1));
         }
 
         return $headers;
     }
 
+    /**
+     * @param array<string, string> $headers
+     * @return array<string, mixed>
+     */
     private static function parseBody(string $body, array $headers): array
     {
-        if (empty($body)) {
+        if ($body === '') {
             return [];
         }
 
         $contentType = $headers['Content-Type'] ?? $headers['content-type'] ?? '';
 
-        if (strpos($contentType, 'application/x-www-form-urlencoded') !== false) {
+        if (str_contains($contentType, 'application/x-www-form-urlencoded')) {
             parse_str($body, $post);
             return $post;
         }
 
-        if (strpos($contentType, 'application/json') !== false) {
-            return json_decode($body, true) ?? [];
+        if (str_contains($contentType, 'application/json')) {
+            if (!json_validate($body)) {
+                return [];
+            }
+
+            $decoded = json_decode($body, true);
+
+            return is_array($decoded) ? $decoded : [];
         }
 
         return [];
     }
 
-    private static function getStatusText(int $status): string
+    public static function getStatusText(int $status): string
     {
-        return match ($status) {
-            200 => 'OK',
-            201 => 'Created',
-            204 => 'No Content',
-            301 => 'Moved Permanently',
-            302 => 'Found',
-            304 => 'Not Modified',
-            400 => 'Bad Request',
-            401 => 'Unauthorized',
-            403 => 'Forbidden',
-            404 => 'Not Found',
-            405 => 'Method Not Allowed',
-            500 => 'Internal Server Error',
-            502 => 'Bad Gateway',
-            503 => 'Service Unavailable',
-            default => 'Unknown',
-        };
+        return self::STATUS_TEXTS[$status] ?? 'Unknown';
     }
 }
