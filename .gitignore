@@ -1,5 +1,6 @@
 # Dependencies
 /vendor/
+/composer.local.json
 
 # PHPUnit
 /.phpunit.result.cache

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Kode\Process\Coroutine\Driver;
 
 use Kode\Process\Coroutine\CoroutineDriverInterface;
+use Fiber;
 use Kode\Process\Coroutine\ChannelInterface;
 use Kode\Process\Coroutine\WaitGroupInterface;
 use Kode\Fibers\Fibers;
@@ -43,7 +44,7 @@ final class FibersDriver implements CoroutineDriverInterface
 
     public function inCoroutine(): bool
     {
-        return Fibers::inFiber();
+        return Fiber::getCurrent() !== null;
     }
 
     public function createChannel(int $capacity = 0): ChannelInterface
