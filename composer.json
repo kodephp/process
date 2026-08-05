@@ -4,7 +4,7 @@
     "type": "library",
     "keywords": ["php", "process", "thread", "worker", "ipc", "signal", "pool", "fiber", "coroutine", "multiprocessing", "queue"],
     "license": "Apache-2.0",
-    "version": "3.2.1",
+    "version": "3.3.0",
     "authors": [
         {
             "name": "KodePHP Team",
@@ -16,14 +16,14 @@
         "ext-pcntl": "*",
         "ext-posix": "*",
         "ext-sockets": "*",
-        "kode/context": "^2.0",
-        "kode/fibers": "^4.0",
-        "kode/queue": "^1.0",
+        "kode/context": "^2.3|^3.0",
+        "kode/fibers": "^4.1",
+        "kode/queue": "^2.1",
         "psr/log": "^2.0|^3.0"
     },
     "require-dev": {
         "phpunit/phpunit": "^11.0|^12.0",
-        "swoole/ide-helper": "^5.0"
+        "swoole/ide-helper": "^6.2"
     },
     "suggest": {
         "ext-sysvmsg": "用于 System V 消息队列 IPC",
@@ -59,7 +59,7 @@
     "prefer-stable": true,
     "extra": {
         "branch-alias": {
-            "dev-main": "3.3-dev"
+            "dev-main": "3.4-dev"
         }
     }
 }

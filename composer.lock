@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "40a366ccbd1ee8c031bda4a36e10529a",
+    "content-hash": "9cb6e007b3e2a5db9ac790bf9ebcc931",
     "packages": [
         {
             "name": "guzzlehttp/psr7",
@@ -580,32 +580,48 @@
         },
         {
             "name": "kode/queue",
-            "version": "1.4.0",
+            "version": "2.1.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/kodephp/queue.git",
-                "reference": "18865d41adbfab20cab760fdafae0ef2080b1e2b"
+                "reference": "35bdd67887179fa3ce0b94c3893d7cbf51234ea0"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/kodephp/queue/zipball/18865d41adbfab20cab760fdafae0ef2080b1e2b",
-                "reference": "18865d41adbfab20cab760fdafae0ef2080b1e2b",
+                "url": "https://api.github.com/repos/kodephp/queue/zipball/35bdd67887179fa3ce0b94c3893d7cbf51234ea0",
+                "reference": "35bdd67887179fa3ce0b94c3893d7cbf51234ea0",
                 "shasum": ""
             },
             "require": {
                 "ext-json": "*",
-                "ext-pdo": "*",
-                "php": ">=8.1"
+                "ext-mbstring": "*",
+                "php": "^8.3",
+                "psr/container": "^1.1 || ^2.0",
+                "psr/log": "^2.0 || ^3.0",
+                "psr/simple-cache": "^2.0 || ^3.0"
             },
             "require-dev": {
-                "phpunit/phpunit": "^9.6|^10.0"
+                "phpunit/phpunit": "^10.5 || ^11.0"
             },
             "suggest": {
-                "ext-rdkafka": "Kafka 驱动所需",
-                "pda/pheanstalk": "Beanstalkd 驱动所需",
-                "php-amqplib/php-amqplib": "AMQP 驱动所需",
-                "predis/predis": "Redis 驱动所需"
+                "ext-igbinary": "IgbinarySerializer：比 JSON 更小更快的二进制序列化",
+                "ext-pcntl": "Worker 优雅退出、任务超时强制中断所需",
+                "ext-pdo": "DatabaseDriver / DatabaseFailedJobStore 所需",
+                "ext-rdkafka": "KafkaDriver 所需",
+                "ext-redis": "RedisDriver 首选客户端（性能优于 Predis）",
+                "kode/cache": "IdempotencyMiddleware 的分布式幂等存储",
+                "kode/context": "协程 / 请求级上下文透传，ContextMiddleware 自动启用",
+                "kode/di": "PSR-11 容器，让任务处理器支持构造函数依赖注入",
+                "kode/event": "自动接管队列事件派发（无需手动接线）",
+                "kode/limiting": "RateLimitMiddleware 的分布式限流后端",
+                "pda/pheanstalk": "BeanstalkdDriver 所需",
+                "php-amqplib/php-amqplib": "AmqpDriver 所需",
+                "predis/predis": "RedisDriver 的纯 PHP 客户端（无 ext-redis 时使用）",
+                "psr/event-dispatcher": "接入任意 PSR-14 事件派发器"
             },
+            "bin": [
+                "bin/kode-queue"
+            ],
             "type": "library",
             "autoload": {
                 "psr-4": {
@@ -623,20 +639,23 @@
                     "homepage": "https://kodephp.com"
                 }
             ],
-            "description": "一个现代化、高性能的 PHP 队列客户端，支持多种队列驱动，专为 PHP 8.1+ 设计，完美支持 PHP 8.5 管道操作符新特性",
+            "description": "现代化 PHP 8.3+ 队列组件：不可变消息对象、可见性超时与至少一次投递、内建 Worker 与死信存储，支持 Redis / 数据库 / Beanstalkd / AMQP / Kafka 等多种后端",
             "homepage": "https://github.com/kodephp/queue",
             "keywords": [
                 "AMQP",
                 "beanstalkd",
+                "coroutine",
                 "database",
+                "dead-letter",
+                "job-queue",
                 "kafka",
-                "php",
-                "php81",
-                "php85",
-                "pipeline",
+                "message-queue",
+                "php83",
                 "queue",
+                "rabbitmq",
                 "redis",
-                "sync",
+                "worker",
+                "延迟队列",
                 "消息队列",
                 "队列"
             ],
@@ -645,7 +664,7 @@
                 "issues": "https://github.com/kodephp/queue/issues",
                 "source": "https://github.com/kodephp/queue"
             },
-            "time": "2026-03-18T09:01:22+00:00"
+            "time": "2026-08-04T13:12:11+00:00"
         },
         {
             "name": "psr/container",
@@ -909,6 +928,57 @@
                 "source": "https://github.com/php-fig/log/tree/3.0.2"
             },
             "time": "2024-09-11T13:17:53+00:00"
+        },
+        {
+            "name": "psr/simple-cache",
+            "version": "3.0.0",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/php-fig/simple-cache.git",
+                "reference": "764e0b3939f5ca87cb904f570ef9be2d78a07865"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/php-fig/simple-cache/zipball/764e0b3939f5ca87cb904f570ef9be2d78a07865",
+                "reference": "764e0b3939f5ca87cb904f570ef9be2d78a07865",
+                "shasum": ""
+            },
+            "require": {
+                "php": ">=8.0.0"
+            },
+            "type": "library",
+            "extra": {
+                "branch-alias": {
+                    "dev-master": "3.0.x-dev"
+                }
+            },
+            "autoload": {
+                "psr-4": {
+                    "Psr\\SimpleCache\\": "src/"
+                }
+            },
+            "notification-url": "https://packagist.org/downloads/",
+            "license": [
+                "MIT"
+            ],
+            "authors": [
+                {
+                    "name": "PHP-FIG",
+                    "homepage": "https://www.php-fig.org/"
+                }
+            ],
+            "description": "Common interfaces for simple caching",
+            "keywords": [
+                "cache",
+                "caching",
+                "psr",
+                "psr-16",
+                "simple-cache"
+            ],
+            "support": {
+                "source": "https://github.com/php-fig/simple-cache/tree/3.0.0"
+            },
+            "time": "2021-10-29T13:26:27+00:00"
         },
         {
             "name": "ralouphie/getallheaders",
@@ -2744,16 +2814,16 @@
         },
         {
             "name": "swoole/ide-helper",
-            "version": "5.1.8",
+            "version": "6.2.2",
             "source": {
                 "type": "git",
                 "url": "https://github.com/swoole/ide-helper.git",
-                "reference": "2806169ec7385e3b5eb484efef1f4764af46d995"
+                "reference": "ad91a281e135f498426fb2e5297376581a4e2dca"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/swoole/ide-helper/zipball/2806169ec7385e3b5eb484efef1f4764af46d995",
-                "reference": "2806169ec7385e3b5eb484efef1f4764af46d995",
+                "url": "https://api.github.com/repos/swoole/ide-helper/zipball/ad91a281e135f498426fb2e5297376581a4e2dca",
+                "reference": "ad91a281e135f498426fb2e5297376581a4e2dca",
                 "shasum": ""
             },
             "type": "library",
@@ -2770,9 +2840,9 @@
             "description": "IDE help files for Swoole.",
             "support": {
                 "issues": "https://github.com/swoole/ide-helper/issues",
-                "source": "https://github.com/swoole/ide-helper/tree/5.1.8"
+                "source": "https://github.com/swoole/ide-helper/tree/6.2.2"
             },
-            "time": "2025-08-04T05:40:28+00:00"
+            "time": "2026-07-25T08:15:29+00:00"
         },
         {
             "name": "theseer/tokenizer",

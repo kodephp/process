@@ -10,86 +10,142 @@ use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
 /**
- * 共享内存 IPC 通信
- * 
- * 基于共享内存的进程间通信实现
+ * 共享内存 IPC（有界环形队列）
+ *
+ * 基于 System V 共享内存（shm_attach）+ 信号量实现的多生产者 / 多消费者队列：
+ *  - 每个槽位是一个独立的共享内存变量，消息以环形方式推进 head/tail；
+ *  - O(1) 入队 / 出队，无单槽位覆盖问题，也避免了“持锁睡眠”导致的发送方被饿死；
+ *  - 适合同主机多进程间的高吞吐消息传递。
+ *
+ * 与 SocketIPC（Unix 域套接字）相比，数据直接落在共享内存，少一次内核套接字缓冲拷贝，
+ * 在中小消息场景下吞吐更高、延迟更低。
  */
 class SharedMemoryIPC implements IPCInterface
 {
-    private ?int $shmId = null;
+    private const string MAGIC = 'GDQ1';
+    private const int HEADER_VAR = 1;
+    private const int FIRST_SLOT = 2;
+    private const int SLOT_OVERHEAD = 1024;
+    private const int MAX_SEGMENT = 4 * 1024 * 1024;
 
-    private string $shmKey;
-
-    private int $bufferSize = 1048576;
-
+    private \SysvSharedMemory $shm;
+    private ?\SysvSemaphore $sem;
+    private int $key;
+    private int $bufferSize;
+    private int $slotSize;
+    private int $capacity;
     private bool $closed = false;
-
     private LoggerInterface $logger;
 
-    private int $projectId;
-
-    private ?int $semId = null;
-
-    private int $headerSize = 16;
-
-    private int $readOffset = 0;
-
-    private int $writeOffset = 0;
-
-    public function __construct(?int $projectId = null, ?LoggerInterface $logger = null)
-    {
+    public function __construct(
+        ?int $projectId = null,
+        ?LoggerInterface $logger = null,
+        int $bufferSize = 2 * 1024 * 1024,
+        int $slotSize = 4096
+    ) {
         if (!extension_loaded('sysvshm')) {
-            throw IPCException::connectionFailed(
-                IPCInterface::TYPE_SHARED_MEMORY,
-                'sysvshm 扩展未加载'
-            );
+            throw IPCException::connectionFailed(IPCInterface::TYPE_SHARED_MEMORY, 'sysvshm 扩展未加载');
+        }
+        if (!extension_loaded('sysvsem')) {
+            throw IPCException::connectionFailed(IPCInterface::TYPE_SHARED_MEMORY, 'sysvsem 扩展未加载');
         }
 
         $this->logger = $logger ?? new NullLogger();
-        $this->projectId = $projectId ?? ftok(__FILE__, 'a');
-        $this->shmKey = $this->projectId;
+        $this->bufferSize = min($bufferSize, self::MAX_SEGMENT);
+        $this->slotSize = $slotSize;
 
-        $this->initialize();
-    }
+        $avail = $this->bufferSize - 8192;
+        $this->capacity = max(1, intdiv($avail, $this->slotSize + self::SLOT_OVERHEAD));
+        $shmSize = $this->capacity * ($this->slotSize + self::SLOT_OVERHEAD) + 8192;
 
-    private function initialize(): void
-    {
-        $this->shmId = shm_attach($this->shmKey, $this->bufferSize, 0644);
+        $this->key = $projectId ?? ftok(__FILE__, 'a');
 
-        if ($this->shmId === false) {
-            throw IPCException::sharedMemoryFailed('attach', '无法创建共享内存段');
+        $shm = @shm_attach($this->key, $shmSize, 0644);
+        if ($shm === false) {
+            throw IPCException::sharedMemoryFailed('attach', '无法创建共享内存段（可能超出系统 shmmax 限制）');
+        }
+        $this->shm = $shm;
+
+        $semKey = ($this->key & 0x7FFFFFFF) ^ 0x6B1D8A31;
+        $sem = @sem_get($semKey, 1, 0644, true);
+        if ($sem === false) {
+            $this->logger->warning('无法创建信号量，将使用无锁模式（不保证并发安全）');
+            $this->sem = null;
+        } else {
+            $this->sem = $sem;
         }
 
-        if (extension_loaded('sysvsem')) {
-            $this->semId = sem_get($this->shmKey, 1, 0644, 1);
-
-            if ($this->semId === false) {
-                $this->logger->warning('无法创建信号量，将使用无锁模式');
-            }
-        }
+        $this->initializeHeader();
 
         $this->logger->debug('共享内存 IPC 已初始化', [
-            'key' => $this->shmKey,
-            'size' => $this->bufferSize
+            'key' => $this->key,
+            'size' => $shmSize,
+            'capacity' => $this->capacity,
+            'slot_size' => $this->slotSize,
         ]);
     }
 
-    private function lock(): bool
+    private function initializeHeader(): void
     {
-        if ($this->semId === null) {
-            return true;
+        $header = @shm_get_var($this->shm, self::HEADER_VAR);
+        if (is_array($header) && ($header['magic'] ?? '') === self::MAGIC) {
+            // 既有段：采用其容量 / 槽位大小，避免布局不一致
+            $this->capacity = $header['capacity'];
+            $this->slotSize = $header['slotSize'];
+            return;
         }
-
-        return sem_acquire($this->semId);
+        $this->lock();
+        try {
+            $header = @shm_get_var($this->shm, self::HEADER_VAR);
+            if (is_array($header) && ($header['magic'] ?? '') === self::MAGIC) {
+                $this->capacity = $header['capacity'];
+                $this->slotSize = $header['slotSize'];
+                return;
+            }
+            $this->writeHeader(0, 0, 0);
+        } finally {
+            $this->unlock();
+        }
     }
 
-    private function unlock(): bool
+    private function readHeader(): array
     {
-        if ($this->semId === null) {
-            return true;
+        $header = @shm_get_var($this->shm, self::HEADER_VAR);
+        if (!is_array($header)) {
+            return ['head' => 0, 'tail' => 0, 'count' => 0, 'capacity' => $this->capacity, 'slotSize' => $this->slotSize];
         }
+        return $header;
+    }
 
-        return sem_release($this->semId);
+    private function writeHeader(int $head, int $tail, int $count): void
+    {
+        shm_put_var($this->shm, self::HEADER_VAR, [
+            'magic' => self::MAGIC,
+            'head' => $head,
+            'tail' => $tail,
+            'count' => $count,
+            'capacity' => $this->capacity,
+            'slotSize' => $this->slotSize,
+        ]);
+    }
+
+    private function lock(): void
+    {
+        if ($this->sem !== null) {
+            @sem_acquire($this->sem);
+        }
+    }
+
+    private function unlock(): void
+    {
+        if ($this->sem !== null) {
+            @sem_release($this->sem);
+        }
+    }
+
+    private function slotVar(int $index): int
+    {
+        return self::FIRST_SLOT + $index;
     }
 
     public function send(mixed $message, int $targetPid = 0): bool
@@ -98,39 +154,27 @@ class SharedMemoryIPC implements IPCInterface
             throw IPCException::channelClosed();
         }
 
-        if ($this->shmId === null) {
-            throw IPCException::sharedMemoryFailed('send', '共享内存未初始化');
-        }
-
         $serialized = $this->serialize($message);
-        $length = strlen($serialized);
-
-        if ($length + $this->headerSize > $this->bufferSize) {
-            throw IPCException::bufferOverflow($length, $this->bufferSize - $this->headerSize);
+        $len = strlen($serialized);
+        if ($len > $this->slotSize) {
+            throw IPCException::bufferOverflow($len, $this->slotSize);
         }
 
         $this->lock();
-
         try {
-            $header = pack('NN', $length, $targetPid);
-
-            $data = $header . $serialized;
-
-            $written = shm_put_var($this->shmId, 1, $data);
-
-            if (!$written) {
-                throw IPCException::sendFailed($targetPid, '写入共享内存失败');
+            $header = $this->readHeader();
+            if ($header['count'] >= $header['capacity']) {
+                return false; // 队列已满
             }
-
-            $this->logger->debug('共享内存消息已发送', [
-                'size' => $length,
-                'target_pid' => $targetPid
-            ]);
-
-            return true;
+            shm_put_var($this->shm, $this->slotVar($header['tail']), $serialized);
+            $tail = ($header['tail'] + 1) % $header['capacity'];
+            $this->writeHeader($header['head'], $tail, $header['count'] + 1);
         } finally {
             $this->unlock();
         }
+
+        $this->logger->debug('共享内存消息已发送', ['size' => $len, 'target_pid' => $targetPid]);
+        return true;
     }
 
     public function receive(?float $timeout = null): mixed
@@ -139,47 +183,32 @@ class SharedMemoryIPC implements IPCInterface
             throw IPCException::channelClosed();
         }
 
-        if ($this->shmId === null) {
-            throw IPCException::sharedMemoryFailed('receive', '共享内存未初始化');
-        }
-
-        $startTime = microtime(true);
+        $start = $timeout !== null ? microtime(true) : 0;
 
         while (true) {
             $this->lock();
-
             try {
-                $data = shm_get_var($this->shmId, 1);
-
-                if ($data === false) {
-                    if ($timeout !== null && (microtime(true) - $startTime) >= $timeout) {
-                        throw IPCException::timeout($timeout);
-                    }
-
-                    usleep(1000);
-                    continue;
+                $header = $this->readHeader();
+                if ($header['count'] > 0) {
+                    $serialized = @shm_get_var($this->shm, $this->slotVar($header['head']));
+                    @shm_remove_var($this->shm, $this->slotVar($header['head']));
+                    $head = ($header['head'] + 1) % $header['capacity'];
+                    $this->writeHeader($head, $header['tail'], $header['count'] - 1);
+                    $message = $this->unserialize((string) $serialized);
+                    $this->logger->debug('共享内存消息已接收', ['size' => strlen((string) $serialized)]);
+                    return $message;
                 }
-
-                $header = substr($data, 0, $this->headerSize);
-                $unpacked = unpack('Nlength/Npid', $header);
-
-                $length = $unpacked['length'];
-                $sourcePid = $unpacked['pid'];
-
-                $serialized = substr($data, $this->headerSize, $length);
-
-                shm_remove_var($this->shmId, 1);
-
-                $message = $this->unserialize($serialized);
-
-                $this->logger->debug('共享内存消息已接收', [
-                    'size' => $length,
-                    'source_pid' => $sourcePid
-                ]);
-
-                return $message;
             } finally {
                 $this->unlock();
+            }
+
+            if ($timeout !== null) {
+                if (microtime(true) - $start >= $timeout) {
+                    throw IPCException::timeout($timeout);
+                }
+                usleep(200);
+            } else {
+                usleep(200);
             }
         }
     }
@@ -211,19 +240,27 @@ class SharedMemoryIPC implements IPCInterface
 
     public function setBufferSize(int $size): void
     {
-        $this->bufferSize = $size;
+        $this->bufferSize = min($size, self::MAX_SEGMENT);
+        $avail = $this->bufferSize - 8192;
+        $this->capacity = max(1, intdiv($avail, $this->slotSize + self::SLOT_OVERHEAD));
+    }
+
+    public function getCapacity(): int
+    {
+        return $this->capacity;
     }
 
     public function flush(): void
     {
-        if ($this->shmId !== null) {
-            $this->lock();
-
-            try {
-                shm_remove_var($this->shmId, 1);
-            } finally {
-                $this->unlock();
+        $this->lock();
+        try {
+            $header = $this->readHeader();
+            for ($i = 0; $i < $header['capacity']; $i++) {
+                @shm_remove_var($this->shm, $this->slotVar($i));
             }
+            $this->writeHeader(0, 0, 0);
+        } finally {
+            $this->unlock();
         }
     }
 
@@ -232,19 +269,24 @@ class SharedMemoryIPC implements IPCInterface
         if ($this->closed) {
             return;
         }
-
-        if ($this->shmId !== null) {
-            shm_detach($this->shmId);
-            $this->shmId = null;
-        }
-
-        if ($this->semId !== null) {
-            sem_remove($this->semId);
-            $this->semId = null;
-        }
-
+        shm_detach($this->shm);
         $this->closed = true;
         $this->logger->debug('共享内存 IPC 已关闭');
+    }
+
+    /**
+     * 销毁底层共享内存段（最后一个进程脱离后被回收）。
+     */
+    public function destroy(): void
+    {
+        if (!$this->closed) {
+            @shm_remove($this->shm);
+            $this->close();
+        }
+        if ($this->sem !== null) {
+            @sem_remove($this->sem);
+            $this->sem = null;
+        }
     }
 
     public function isClosed(): bool

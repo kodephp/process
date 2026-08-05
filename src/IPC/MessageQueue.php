@@ -16,7 +16,7 @@ use Psr\Log\NullLogger;
  */
 class MessageQueue implements IPCInterface
 {
-    private ?int $queueId = null;
+    private ?\SysvMessageQueue $queueId = null;
 
     private int $key;
 

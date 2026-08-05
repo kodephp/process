@@ -30,7 +30,7 @@ class SocketIPC implements IPCInterface
 
     private int $targetPid = 0;
 
-    private array $pendingMessages = [];
+    private string $buffer = '';
 
     public function __construct(?LoggerInterface $logger = null)
     {
@@ -49,10 +49,12 @@ class SocketIPC implements IPCInterface
             );
         }
 
-        return [
-            new self(),
-            new self(),
-        ];
+        $a = new self();
+        $b = new self();
+        $a->setSocket($sockets[0]);
+        $b->setWorkerSocket($sockets[1]);
+
+        return [$a, $b];
     }
 
     public function setSocket($socket): void
@@ -110,75 +112,60 @@ class SocketIPC implements IPCInterface
 
         $socket = $this->workerSocket ?? $this->masterSocket;
 
-        if (!is_resource($socket) && !($socket instanceof \Socket)) {
+        if (!is_object($socket) && !is_resource($socket)) {
             throw IPCException::connectionFailed(IPCInterface::TYPE_SOCKET, '套接字未初始化');
         }
 
-        if ($timeout !== null) {
-            $read = [$socket];
-            $write = $except = [];
+        $start = $timeout !== null ? microtime(true) : 0;
 
-            $result = @socket_select($read, $write, $except, (int) $timeout, (int) (($timeout - (int) $timeout) * 1000000));
-
-            if ($result === false) {
-                throw IPCException::receiveFailed(socket_strerror(socket_last_error()));
+        while (true) {
+            // 缓冲区中已有完整帧则直接解析，避免无谓的系统调用
+            if (strlen($this->buffer) >= 4) {
+                $len = unpack('N', substr($this->buffer, 0, 4))[1];
+                if (strlen($this->buffer) - 4 >= $len) {
+                    $body = substr($this->buffer, 4, $len);
+                    $this->buffer = substr($this->buffer, 4 + $len);
+                    $this->logger->debug('IPC 消息已接收', ['size' => $len]);
+                    return $this->unserialize($body);
+                }
             }
 
-            if ($result === 0) {
-                throw IPCException::timeout($timeout);
-            }
-        }
-
-        $header = @socket_read($socket, 4, PHP_BINARY_READ);
-
-        if ($header === false || strlen($header) < 4) {
-            return null;
-        }
-
-        $length = unpack('N', $header)[1];
-
-        if ($length > $this->bufferSize) {
-            throw IPCException::bufferOverflow($length, $this->bufferSize);
-        }
-
-        $data = '';
-        $remaining = $length;
-
-        while ($remaining > 0) {
-            $chunk = @socket_read($socket, min($remaining, 8192), PHP_BINARY_READ);
-
-            if ($chunk === false || $chunk === '') {
-                throw IPCException::receiveFailed('连接已关闭');
+            if ($timeout !== null) {
+                $read = [$socket];
+                $write = $except = [];
+                $sec = (int) $timeout;
+                $usec = (int) (($timeout - $sec) * 1000000);
+                $ready = @socket_select($read, $write, $except, $sec, $usec);
+                if ($ready === false) {
+                    throw IPCException::receiveFailed(socket_strerror(socket_last_error($socket)));
+                }
+                if ($ready === 0) {
+                    throw IPCException::timeout($timeout);
+                }
             }
 
-            $data .= $chunk;
-            $remaining -= strlen($chunk);
+            // 一次性尽量多读，减少系统调用次数（帧解析交给缓冲区）
+            $chunk = @socket_read($socket, 65535, PHP_BINARY_READ);
+
+            if ($chunk === false) {
+                throw IPCException::receiveFailed(socket_strerror(socket_last_error($socket)));
+            }
+
+            if ($chunk === '') {
+                return null; // 对端关闭
+            }
+
+            $this->buffer .= $chunk;
         }
-
-        $message = $this->unserialize($data);
-
-        $this->logger->debug('IPC 消息已接收', ['size' => $length]);
-
-        return $message;
     }
 
     public function broadcast(mixed $message): bool
     {
-        $serialized = $this->serialize($message);
-
-        foreach ($this->pendingMessages as $pid => &$queue) {
-            $queue[] = $serialized;
-        }
-
-        $this->logger->debug('IPC 消息已广播', ['count' => count($this->pendingMessages)]);
-
-        return true;
+        return $this->send($message, 0);
     }
 
     public function sendTo(int $targetPid, mixed $message): bool
     {
-        $this->targetPid = $targetPid;
-
         return $this->send($message, $targetPid);
     }
 
@@ -206,7 +193,7 @@ class SocketIPC implements IPCInterface
 
     public function flush(): void
     {
-        $this->pendingMessages = [];
+        $this->buffer = '';
     }
 
     public function close(): void
