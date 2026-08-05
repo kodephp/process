@@ -186,7 +186,7 @@ final class Timer
                     self::$stats['total_executed']++;
                     self::$timers[$id]['executed']++;
                 } catch (\Throwable $e) {
-                    self::$emitter?->emit('timer.error', [$id, $e]);
+                    self::$emitter?->emit('timer.error', $id, $e);
                 }
 
                 if ($timer['count'] === self::TIMER_PERSISTENT) {
@@ -212,7 +212,7 @@ final class Timer
                     self::$stats['total_executed']++;
                     self::$cronJobs[$id]['executed']++;
                 } catch (\Throwable $e) {
-                    self::$emitter?->emit('timer.error', [$id, $e]);
+                    self::$emitter?->emit('timer.error', $id, $e);
                 }
 
                 self::$cronJobs[$id]['next_run'] = self::parseCronNext($cron['expression']);

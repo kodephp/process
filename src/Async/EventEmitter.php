@@ -47,10 +47,14 @@ final class EventEmitter implements EventEmitterInterface
     /**
      * 派发事件
      *
-     * @param list<mixed> $args 按位置展开给监听器的参数列表
+     * 采用普通可变参数，直接透传给监听器：
+     *   $emitter->emit('data', $payload)     // 监听器收到 ($payload)
+     *   $emitter->emit('data', $a, $b, $c)   // 监听器收到 ($a, $b, $c)
+     *
+     * @param mixed ...$args 透传给监听器的参数
      */
     #[\Override]
-    public function emit(string $event, array $args = []): self
+    public function emit(string $event, mixed ...$args): self
     {
         $listeners = $this->listeners[$event] ?? [];
         $onceListeners = $this->onceListeners[$event] ?? [];
@@ -222,7 +226,7 @@ final class EventEmitter implements EventEmitterInterface
         $this->handlingError = true;
 
         try {
-            $this->emit('error', [$e]);
+            $this->emit('error', $e);
         } finally {
             $this->handlingError = false;
         }

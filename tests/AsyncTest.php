@@ -83,7 +83,7 @@ final class AsyncTest extends TestCase
             $received = $data;
         });
 
-        Async::emit('custom_event', [['message' => 'hello']]);
+        Async::emit('custom_event', ['message' => 'hello']);
 
         $this->assertSame(['message' => 'hello'], $received);
     }

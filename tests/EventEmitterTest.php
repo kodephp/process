@@ -132,8 +132,8 @@ final class EventEmitterTest extends TestCase
             $received = $payload;
         });
 
-        // 第二参数是「参数列表」，数组载荷需再包一层
-        $emitter->emit('data', [['id' => 7]]);
+        // emit 采用普通可变参数，数组载荷直接作为单个参数传入
+        $emitter->emit('data', ['id' => 7]);
 
         $this->assertSame(['id' => 7], $received);
     }
@@ -147,7 +147,7 @@ final class EventEmitterTest extends TestCase
             $received = [$a, $b, $c];
         });
 
-        $emitter->emit('data', [1, 'two', [3]]);
+        $emitter->emit('data', 1, 'two', [3]);
 
         $this->assertSame([1, 'two', [3]], $received);
     }

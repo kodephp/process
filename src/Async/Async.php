@@ -38,9 +38,9 @@ final class Async
         self::getEmitter()->off($event, $listener);
     }
 
-    public static function emit(string $event, array $args = []): void
+    public static function emit(string $event, mixed ...$args): void
     {
-        self::getEmitter()->emit($event, $args);
+        self::getEmitter()->emit($event, ...$args);
     }
 
     public static function defer(callable $callback): void
@@ -63,7 +63,7 @@ final class Async
                 try {
                     $callback();
                 } catch (\Throwable $e) {
-                    self::emit('error', [$e]);
+                    self::emit('error', $e);
                 }
             }
         }
@@ -79,7 +79,7 @@ final class Async
                 try {
                     $callback();
                 } catch (\Throwable $e) {
-                    self::emit('error', [$e]);
+                    self::emit('error', $e);
                 }
             }
         }

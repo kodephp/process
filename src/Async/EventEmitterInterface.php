@@ -12,7 +12,7 @@ interface EventEmitterInterface
 
     public function off(string $event, ?callable $listener = null): self;
 
-    public function emit(string $event, array $args = []): self;
+    public function emit(string $event, mixed ...$args): self;
 
     public function listeners(string $event): array;
 
