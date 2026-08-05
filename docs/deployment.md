@@ -45,6 +45,31 @@ sudo apt install php8.3-pcntl php8.3-posix php8.3-sockets
 sudo apt install php8.3-opcache php8.3-redis php8.3-pdo php8.3-mysql
 ```
 
+### 2.1 启用多线程并行（ZTS，可选）
+
+若需使用 `Kode::parallel()` 的**真正 CPU 多线程**能力，生产环境必须使用 **ZTS（线程安全）构建**的 PHP 并加载 **ext-parallel**。系统仓库的 `php-cli` 通常是 NTS，无法启用 parallel。
+
+**推荐：使用官方 ZTS Docker 镜像**（最简单，无需自行编译）：
+
+```dockerfile
+FROM php:8.3-zts
+
+# 安装 ext-parallel（仅能在 ZTS 构建上编译/加载）
+RUN pecl install parallel \
+    && docker-php-ext-enable parallel
+
+COPY . /var/www/app
+WORKDIR /var/www/app
+RUN composer install --no-dev --optimize-autoloader
+
+CMD ["php", "server.php", "start"]
+```
+
+**裸机 Ubuntu/Debian**：需从源码编译开启 `--enable-zts` 的 PHP，再 `pecl install parallel`（完整步骤见 [并行（多线程）文档](../docs/parallel.md)）。
+
+> ⚠️ 注意：`kode/fibers` 的 `parallel()` 只是协作式别名，**不是**真线程；只有 ZTS + ext-parallel 下的 `Kode::parallel()` 才是真实多线程。
+> 若不需要 CPU 多线程，保持 NTS 即可，I/O 并发仍由协程（Fiber）提供。
+
 ### 3. 安装项目
 
 ```bash

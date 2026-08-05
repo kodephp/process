@@ -15,10 +15,10 @@ use Kode\Process\Exceptions\ProcessException;
 final class Version
 {
     public const int MAJOR = 3;
-    public const int MINOR = 1;
+    public const int MINOR = 2;
     public const int PATCH = 0;
-    public const string VERSION = '3.1.0';
-    public const int VERSION_ID = 30100;
+    public const string VERSION = '3.2.0';
+    public const int VERSION_ID = 30200;
 
     /** 本库要求的最低 PHP 版本 */
     public const string MINIMUM_PHP_VERSION = '8.3.0';
@@ -32,10 +32,19 @@ final class Version
         'sysvmsg' => 'System V 消息队列 IPC',
         'sysvshm' => '共享内存 IPC',
         'sysvsem' => '信号量同步',
-        'parallel' => '多线程并行处理',
+        'parallel' => '多线程并行处理（需要 ZTS 线程安全版 PHP + ext-parallel）',
+        'pthreads' => '多线程（仅 PHP < 8，已弃用，请改用 parallel）',
         'swoole' => 'Swoole 协程进程管理',
         'swow' => 'Swow 协程引擎',
     ];
+
+    /**
+     * 当前 PHP 是否为 ZTS（Zend 线程安全）构建。
+     *
+     * 真正的多线程（ext-parallel）只能在 ZTS 构建上加载并运行；
+     * 普通 NTS 构建无法启用 parallel 扩展。
+     */
+    public const int IS_ZTS = \PHP_ZTS;
 
     public static function get(): string
     {
@@ -255,6 +264,51 @@ final class Version
     }
 
     /**
+     * 当前 PHP 是否为 ZTS（线程安全）构建
+     */
+    public static function isZts(): bool
+    {
+        return self::IS_ZTS === 1;
+    }
+
+    /**
+     * 是否支持真正的多线程并行（ext-parallel / kode/parallel）。
+     *
+     * 必须同时满足：ZTS 构建 + 已加载 parallel 扩展。
+     */
+    public static function supportsParallel(): bool
+    {
+        return self::IS_ZTS
+            && (extension_loaded('parallel') || class_exists('parallel\\Runtime'));
+    }
+
+    /**
+     * 当前可用的并行后端
+     *
+     * @return 'ext-parallel'|'kode-parallel'|'none'
+     */
+    public static function parallelBackend(): string
+    {
+        if (class_exists('parallel\\Runtime') || extension_loaded('parallel')) {
+            return 'ext-parallel';
+        }
+
+        if (class_exists(\Kode\Parallel\Parallel::class)) {
+            return 'kode-parallel';
+        }
+
+        return 'none';
+    }
+
+    /**
+     * 是否支持 pthreads（仅 PHP < 8，已弃用，请改用 parallel）。
+     */
+    public static function supportsPthreads(): bool
+    {
+        return extension_loaded('pthreads');
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public static function getInfo(): array
@@ -274,6 +328,10 @@ final class Version
             'missing_extensions' => self::getMissingExtensions(),
             'optional_extensions' => self::getLoadedOptionalExtensions(),
             'features' => self::getFeatures(),
+            'zts' => self::isZts(),
+            'parallel' => self::supportsParallel(),
+            'parallel_backend' => self::parallelBackend(),
+            'pthreads' => self::supportsPthreads(),
         ];
     }
 

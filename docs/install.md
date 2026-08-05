@@ -8,6 +8,10 @@
 
 > v3.0 起最低要求 PHP 8.3；PHP 8.1 / 8.2 环境请使用 `^2.9`。
 
+> 🧵 **真正的多线程并行**需要 **ZTS（线程安全）构建**的 PHP 并加载 **ext-parallel**，普通 NTS 构建无法启用。
+> 环境探测、安装步骤与 Fiber ↔ Parallel 桥接用法见 **[并行（多线程）文档](parallel.md)**。
+> 提示：`kode/fibers` 的 `parallel()` 只是协作式别名，**不是**真线程。
+
 ## 安装方式
 
 ### Composer 安装

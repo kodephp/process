@@ -19,6 +19,7 @@ Kode Process 是一款专为高并发场景设计的高性能 PHP 进程管理�
 | 📡 **多协议** | HTTP、WebSocket、TCP、UDP、Text、SSL |
 | 🌐 **分布式** | Channel 通讯、GlobalData 共享、负载均衡 |
 | ⚡ **协程** | Fiber 协程支持，百万级并发 |
+| 🧵 **多线程并行** | 真正的 CPU 多线程（需 ZTS + ext-parallel），与协程无缝桥接 |
 | 🔄 **平滑重载** | 热更新代码，不中断连接 |
 | ⏱️ **定时器** | 一次性、永久、Cron 表达式 |
 | 📢 **广播** | 全局广播、群组广播、定向发送 |
@@ -271,6 +272,7 @@ Kode::app([
 - [协议系统](docs/protocol.md)
 - [分布式集群](docs/distributed.md)
 - [协程系统](docs/fiber.md)
+- [并行（多线程）](docs/parallel.md)
 - [定时器](docs/timer.md)
 - [广播系统](docs/broadcast.md)
 - [队列系统](docs/queue.md)

@@ -183,3 +183,13 @@ Kode::worker('http://0.0.0.0:8080', 4)
 2. **控制并发数** - `batch` 的并发数不要过大
 3. **合理使用 Channel** - 适合生产者-消费者模式
 4. **异常处理** - 协程中的异常需要捕获处理
+
+## 与并行（多线程）结合
+
+协程负责 **I/O 密集型**并发，真正耗 CPU 的 **CPU 密集型**任务应交给多线程并行，二者互补。
+
+- 在协程内等待并行任务：`Kode::parallel()` 投送 + `Kode::awaitParallel()` 等待（协程内挂起、不阻塞其它协程）。
+- 完整的 Fiber ↔ Parallel 桥接说明、ZTS 检测与 ext-parallel 安装步骤见 **[并行（多线程）文档](parallel.md)**。
+
+> ⚠️ 注意：`kode/fibers` 的 `Kode\Fibers\Fibers::parallel()` **只是协作式并发的别名，并不会创建真实 OS 线程**。
+> 需要真正的 CPU 多线程，请使用本库的 `Kode::parallel()` / `Kode\Process\Parallel\Parallel`（要求 ZTS + ext-parallel）。

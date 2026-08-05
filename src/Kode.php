@@ -6,7 +6,10 @@ namespace Kode\Process;
 
 use Kode\Fibers\Fibers;
 use Kode\Process\Cluster\ClusterManager;
+use Kode\Process\Exceptions\ParallelException;
 use Kode\Process\Integration\IntegrationManager;
+use Kode\Process\Parallel\FutureInterface;
+use Kode\Process\Parallel\Parallel;
 use Kode\Process\Protocol\ProtocolManager;
 use Psr\Log\LoggerInterface;
 
@@ -210,6 +213,61 @@ final class Kode
     public static function batch(array $items, callable $callback, int $concurrency = 10): array
     {
         return Coroutine\CoroutineManager::getInstance()->batch($items, $callback, $concurrency);
+    }
+
+    /**
+     * 在并行（多线程）运行时中执行任务
+     *
+     * 将 CPU 密集型任务投到独立 OS 线程（需 ZTS + ext-parallel）。
+     * 与 {@see self::go()}/{@see self::batch()} 的协作式协程互补：
+     * 协程负责 I/O 并发，并行负责 CPU 并发。返回值经 {@see self::awaitParallel()} 在协程内等待。
+     *
+     * @param callable $task 要在独立线程中执行的可调用体（不能捕获 $this / 引用外部变量）
+     * @param mixed    ...$args 传给任务的参数
+     *
+     * @return FutureInterface 可用于 {@see self::awaitParallel()} 等待结果
+     *
+     * @throws ParallelException 当前环境不支持真正的多线程时
+     *
+     * @example
+     * // 协程内等待并行任务（ZTS + ext-parallel 环境）
+     * $future = Kode::parallel(fn($n) => heavyCompute($n), 42);
+     * $result = Kode::awaitParallel($future);
+     */
+    public static function parallel(callable $task, mixed ...$args): FutureInterface
+    {
+        return Parallel::run($task, ...$args);
+    }
+
+    /**
+     * 等待并行任务完成并获取结果
+     *
+     * 在协程（Fiber）内调用时会挂起当前协程，由所在事件循环（Async 或 kode/fibers FiberPool）
+     * 在任务完成后自动恢复，等待期间不阻塞其它协程；普通上下文则阻塞等待。
+     *
+     * @throws \Throwable 任务执行失败时透传原异常
+     *
+     * @see Parallel::await()
+     */
+    public static function awaitParallel(FutureInterface $future): mixed
+    {
+        return Parallel::await($future);
+    }
+
+    /**
+     * 当前是否支持真正的多线程并行（ZTS + ext-parallel）
+     */
+    public static function supportsParallel(): bool
+    {
+        return Parallel::isAvailable();
+    }
+
+    /**
+     * 当前并行后端：'ext-parallel' | 'kode-parallel' | 'none'
+     */
+    public static function parallelBackend(): string
+    {
+        return Parallel::backend();
     }
 
     /**

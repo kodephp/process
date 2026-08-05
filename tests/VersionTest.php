@@ -16,13 +16,13 @@ final class VersionTest extends TestCase
 
     public function testVersionId(): void
     {
-        $this->assertSame(30100, Version::getId());
+        $this->assertSame(30200, Version::getId());
     }
 
     public function testVersionComponents(): void
     {
         $this->assertSame(3, Version::getMajor());
-        $this->assertSame(1, Version::getMinor());
+        $this->assertSame(2, Version::getMinor());
         $this->assertGreaterThanOrEqual(0, Version::getPatch());
     }
 
@@ -108,24 +108,43 @@ final class VersionTest extends TestCase
     {
         $info = Version::getInfo();
 
-        $this->assertSame('3.1.0', $info['version']);
-        $this->assertSame(30100, $info['version_id']);
+        $this->assertSame('3.2.0', $info['version']);
+        $this->assertSame(30200, $info['version_id']);
         $this->assertSame('8.3.0', $info['minimum_php']);
         $this->assertTrue($info['php_supported']);
         $this->assertIsArray($info['features']);
         $this->assertIsArray($info['optional_extensions']);
+
+        // ZTS / 并行探测字段自 3.2.0 起存在
+        $this->assertArrayHasKey('zts', $info);
+        $this->assertArrayHasKey('parallel', $info);
+        $this->assertArrayHasKey('parallel_backend', $info);
+        $this->assertArrayHasKey('pthreads', $info);
+        $this->assertIsBool($info['zts']);
+        $this->assertIsBool($info['parallel']);
+        $this->assertContains($info['parallel_backend'], ['ext-parallel', 'kode-parallel', 'none']);
+        $this->assertIsBool($info['pthreads']);
+    }
+
+    public function testZtsAndParallelDetection(): void
+    {
+        // 当前 CI / 本地为 NTS 构建，仅断言方法可用且返回一致
+        $this->assertSame(Version::isZts(), Version::IS_ZTS === 1);
+        $this->assertSame(Version::supportsParallel(), Version::isZts() && (extension_loaded('parallel') || class_exists('parallel\\Runtime')));
+        $this->assertContains(Version::parallelBackend(), ['ext-parallel', 'kode-parallel', 'none']);
+        $this->assertSame(Version::supportsPthreads(), extension_loaded('pthreads'));
     }
 
     public function testVersionComparison(): void
     {
-        $this->assertTrue(Version::isEqualTo('3.1.0'));
+        $this->assertTrue(Version::isEqualTo('3.2.0'));
         $this->assertTrue(Version::isGreaterThan('2.9.0'));
-        $this->assertTrue(Version::isLessThan('3.2.0'));
+        $this->assertTrue(Version::isLessThan('3.3.0'));
         $this->assertFalse(Version::isGreaterThan('4.0.0'));
     }
 
     public function testToString(): void
     {
-        $this->assertSame('3.1.0', (string) new Version());
+        $this->assertSame('3.2.0', (string) new Version());
     }
 }
