@@ -30,7 +30,9 @@ final class GlobalDataTest extends TestCase
         $available = GlobalData::available();
         $this->assertIsArray($available);
         $this->assertContains(GlobalData::BACKEND_SHM, $available);
-        $this->assertSame(GlobalData::BACKEND_SHM, GlobalData::preferred());
+        // preferred() 是当前环境下优先级最高且可用的后端（装了 swoole 时为 swoole，否则 sysvshm）
+        $this->assertSame($available[0], GlobalData::preferred());
+        $this->assertContains(GlobalData::preferred(), $available);
     }
 
     public function testAutoReturnsUsableTable(): void

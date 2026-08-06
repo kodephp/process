@@ -1,40 +1,45 @@
-# GlobalData 数据共享
+# GlobalData / 多进程共享数据
 
-提供两种跨进程共享数据的方式：
+本库提供**两套独立**的跨进程数据共享能力：
 
-1. **本地多后端共享表（同主机，零安装）** — 本库核心能力，无需任何扩展即可在多进程间共享计数、配置、状态。已装 Swoole / APCu 时自动启用对应的高性能后端。
-2. **网络 GlobalData（跨主机）** — 通过 `Server` + `Client` 在多个主机之间共享数据，见文末「网络模型」一节。
+1. **本地多进程共享表（`SharedTable`）** —— 同主机、fork 出来的多进程之间共享计数/配置/状态，**零安装**即可用（已装 Swoole/APCu/旧版 Workerman 时自动启用对应高性能后端）。这是绝大多数场景的首选。
+2. **网络 GlobalData（`Server` + `Client`）** —— 跨**多台主机**共享数据，见文末「网络模型」一节。
+
+> **命名说明**：本库既提供了 `Kode\Process\GlobalData\GlobalData` 门面（向后兼容、同时暴露本地表与网络客户端），也单独提供了 `Kode\Process\SharedTable` 门面——**只负责本地多进程共享表、不依赖网络**。如果你只想要「同主机的多进程共享数据」，直接用 `SharedTable` 即可，不必经过 `GlobalData`。
 
 ---
 
-# 一、本地多后端共享表（GlobalData 门面）
+# 一、本地多进程共享表（`SharedTable`）
 
-`GlobalData` 门面对外提供**一套语义**（`TableInterface`），内部按「已装什么用什么」自动挑选最快后端：
+`SharedTable` 对外提供**一套语义**（`TableInterface`），内部按「已装什么用什么」自动挑选最快后端。
 
 | 后端 | 依赖 | 何时被 `auto()` 选中 | 特点 |
 |------|------|---------------------|------|
 | `swoole` | `ext-swoole` | 首选（已装 swoole 时） | 性能最高；**必须在 fork 之前创建** |
 | `apcu`   | `ext-apcu`（CLI 需 `apc.enable_cli=1`） | 次选 | 运行期任意时刻可创建，适合 FPM / 动态拉起的 worker |
+| `workerman` | `Workerman\Table`（仅旧版 Workerman v3 + ext-swoole） | 仅当该类存在 | `Workerman\Table` ≡ `Swoole\Table` 子类，表现与 Swoole 持平 |
 | `sysvshm` | `ext-sysvshm` + `ext-sysvsem`（PHP 内置） | 兜底 | **零安装**，开箱即用，跨进程语义完整 |
 
-设计原则：**零安装优先**。本库从不要求你安装 Swoole 或 APCu，只在它们恰好存在时顺带用上；否则一律走 PHP 内置 System V 共享内存。
+设计原则：**零安装优先**。本库从不要求你安装 Swoole / APCu / Workerman，只在它们恰好存在时顺带用上；否则一律走 PHP 内置 System V 共享内存。
+
+> `GlobalData` 门面（`Kode\Process\GlobalData\GlobalData`）的本地表方法**全部委托给 `SharedTable`**，二者语义完全一致；`GlobalData` 额外暴露 `client()` 用于跨主机网络共享。下文以 `SharedTable` 为例，`GlobalData::xxx()` 同样可用。
 
 ## 1.1 自动选择
 
 ```php
-use Kode\Process\GlobalData\GlobalData;
+use Kode\Process\SharedTable;
 
-// 自动挑选当前环境可用的最快后端（swoole → apcu → sysvshm）
-$table = GlobalData::auto();
+// 自动挑选当前环境可用的最快后端（swoole → apcu → workerman → sysvshm）
+$table = SharedTable::auto();
 
 // 或显式指定
-$table = GlobalData::make(GlobalData::BACKEND_SHM, key: 0x4B4F4445, size: 4 * 1024 * 1024);
+$table = SharedTable::make(SharedTable::BACKEND_SHM, key: 0x4B4F4445, size: 4 * 1024 * 1024);
 
 // 自检当前可用后端
-GlobalData::available();   // 例如 ['sysvshm']
-GlobalData::preferred();   // 例如 'sysvshm'
-GlobalData::supports(GlobalData::BACKEND_APCU); // bool
-GlobalData::diagnose();    // 各后端可用性明细
+SharedTable::available();   // 例如 ['swoole', 'sysvshm']
+SharedTable::preferred();   // 例如 'swoole'
+SharedTable::supports(SharedTable::BACKEND_APCU); // bool
+SharedTable::diagnose();    // 各后端可用性明细
 ```
 
 ## 1.2 统一 API（TableInterface）
@@ -83,9 +88,9 @@ $table->set('ticket', 'abc', ttl: 60);
 ## 1.3 典型场景：跨进程计数器 / 限流
 
 ```php
-use Kode\Process\GlobalData\GlobalData;
+use Kode\Process\SharedTable;
 
-$table = GlobalData::default();   // 进程内共享的默认表（按 auto() 创建）
+$table = SharedTable::default();   // 进程内共享的默认表（按 auto() 创建）
 
 // worker 启动时初始化
 $table->add('online', 0);
@@ -98,21 +103,21 @@ $table->decrement('online');
 echo $table->get('online');
 ```
 
-> fork 之后子进程若需独立的默认表，调用 `GlobalData::reset()` 让子进程重建。
+> fork 之后子进程若需独立的默认表，调用 `SharedTable::reset()` 让子进程重建（Swoole/共享内存表必须在 fork 前由父进程创建，子进程继承其内存）。
 
 ## 1.4 共享内存帮助方法
 
 同主机各进程传入相同键（或相同文件路径）即可共享同一份数据：
 
 ```php
-use Kode\Process\GlobalData\GlobalData;
+use Kode\Process\SharedTable;
 
 // 按整数键
-$t = GlobalData::table(key: 0x4B4F4445, size: 4 * 1024 * 1024);
+$t = SharedTable::table(key: 0x4B4F4445, size: 4 * 1024 * 1024);
 $t->set('x', 42);
 
 // 按文件路径派生键（不同进程传相同路径即共享）
-$o = GlobalData::open('/var/run/app/global.sock', project: 'g');
+$o = SharedTable::open('/var/run/app/global.sock', project: 'g');
 $o->set('y', 'z');
 ```
 
@@ -274,7 +279,7 @@ $data = $client->getMulti(['k1', 'k2']);
 
 # 三、注意事项
 
-1. **本地共享表**：原子操作（`increment` / `cas`）跨进程安全；macOS 的 System V 共享内存总量很小（约 4MB），生产部署建议在 Linux 上运行，或安装 Swoole/APCu 启用更大容量的后端。
+1. **本地共享表**：原子操作（`increment` / `cas`）跨进程安全；fork 场景下 Swoole/共享内存表必须在 fork 前由父进程创建，子进程继承其内存。macOS 的 System V 共享内存总量很小（约 4MB），生产部署建议在 Linux 上运行，或安装 Swoole/APCu 启用更大容量的后端。
 2. **网络延迟** - 网络模型每次操作都有网络开销，避免频繁调用。
 3. **数据大小** - 不要存储过大的数据，影响性能。
 4. **连接管理** - 网络模型在 `onWorkerStart` 中创建连接。

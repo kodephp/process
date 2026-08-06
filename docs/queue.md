@@ -1,8 +1,17 @@
 # 队列系统
 
-集成 `kode/queue` 包（^2.1），在进程侧提供**处理器注册 + 消费**封装：底层保持 kode/queue 的不可变消息对象、可见性超时与至少一次投递语义，本层只负责把 `ReservedJob` 路由到已注册的处理器并完成 `ack` / `fail`。
+`QueueManager` **不是独立的队列实现**，而是对 [`kode/queue`](https://github.com/kodephp/queue)（^2.1）的**进程侧适配层（facade）**：底层队列、连接、序列化、可见性超时、至少一次投递、失败存储、重试全部由 `kode/queue` 承担；本层只在「进程/Worker 运行期」提供**处理器注册 + 消费循环**封装，把 `ReservedJob` 路由到已注册的处理器并完成 `ack` / `fail`。
 
-> 切换 kode/queue 2.x 的破坏性变更（本库已吸收）：`Factory` 移除改为 `QueueManager::make()/auto()`；`QueueInterface` 迁移到 `Kode\Queue\Contract\QueueInterface`；`pop()` 返回 `ReservedJob` 对象；`stats()` 返回 `QueueStats` 值对象。
+```php
+// 底层就是 kode/queue 的 QueueManager，本库只是薄封装：
+use Kode\Queue\QueueManager as Backend;       // kode/queue 原生的队列管理器
+use Kode\Process\Queue\QueueManager as Adapter; // 本库的进程侧适配层
+
+$backend = Backend::make([/* driver 配置 */]); // 真实的队列引擎（Redis/DB/Memory/...）
+$adapter = Adapter::useRedis('127.0.0.1', 6379); // 经本库适配层使用同一个 kode/queue
+```
+
+> **升级到 kode/queue 2.x 的破坏性变更（本库已吸收）**：`Factory` 移除 → `QueueManager::make()/auto()`；`QueueInterface` 迁移到 `Kode\Queue\Contract\QueueInterface`；`pop()` 返回 `ReservedJob` 对象；`stats()` 返回 `QueueStats` 值对象；`delete($id)` → `ack(ReservedJob)` / `release(ReservedJob)` / `fail(ReservedJob, Throwable)`。
 
 ## 快速开始
 
@@ -88,8 +97,8 @@ QueueManager::useSync();
 ### Redis 队列（生产推荐）
 
 ```php
-QueueManager::useRedis('127.0.0.1', 6379, 'password', 0);
-// 或自定义连接：withDriver(DriverType::Redis, ['host' => ..., 'port' => ..., ...])
+QueueManager::useRedis('127.0.0.1', 6379, 'password', 0, []);
+// 等价：withDriver(DriverType::Redis, ['host' => ..., 'port' => ..., 'password' => ..., 'database' => ..., ...])
 ```
 
 ### 数据库 / 其他驱动

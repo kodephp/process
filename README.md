@@ -152,7 +152,7 @@ Client::publish('broadcast', [
 
 ### GlobalData 数据共享
 
-> 同主机的多进程共享优先使用**零安装的本地共享表**：`GlobalData::auto()` 会自动挑选最快可用后端（已装 Swoole → APCu → PHP 内置共享内存），详见 [docs/global-data.md](docs/global-data.md)。跨主机共享才使用下面的网络 `Client`。
+> 同主机的多进程共享优先使用**零安装的本地共享表**：`SharedTable::auto()`（或等价的 `GlobalData::auto()`）会自动挑选最快可用后端（已装 Swoole → APCu → Workerman → PHP 内置共享内存），详见 [docs/global-data.md](docs/global-data.md)。跨主机共享才使用下面的网络 `Client`。
 
 ```php
 use Kode\Process\GlobalData\Client;
