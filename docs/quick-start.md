@@ -11,8 +11,8 @@ require __DIR__ . '/vendor/autoload.php';
 use Kode\Process\Kode;
 
 // 一行启动 HTTP 服务器
-Kode::worker('http://0.0.0.0:8080', 4)
-    ->onMessage(function ($connection, $request) {
+Kode::serve('http://0.0.0.0:8080', ['workers' => 4])
+    ->on('message', function ($connection, $request) {
         $connection->send('Hello World!');
     })
     ->start();
@@ -29,11 +29,13 @@ php http_server.php
 ## 信号控制
 
 ```bash
-kode start              # 启动
+kode start              # 启动（运行你的服务脚本）
 kode stop              # 停止
 kode reload            # 平滑重载
 kode status            # 查看状态
 ```
+
+运行中的服务也可用信号直接控制：`SIGTERM` 优雅停机、`SIGUSR1` 平滑重载。
 
 ## 多协议支持
 
@@ -41,18 +43,18 @@ kode status            # 查看状态
 use Kode\Process\Kode;
 
 // HTTP 服务器
-Kode::worker('http://0.0.0.0:8080', 4)
-    ->onMessage(fn($conn, $data) => $conn->send('HTTP'))
+Kode::serve('http://0.0.0.0:8080', ['workers' => 4])
+    ->on('message', fn($conn, $data) => $conn->send('HTTP'))
     ->start();
 
 // WebSocket 服务器
-Kode::worker('websocket://0.0.0.0:8081', 4)
-    ->onMessage(fn($conn, $data) => $conn->send($data))
+Kode::serve('websocket://0.0.0.0:8081', ['workers' => 4])
+    ->on('message', fn($conn, $data) => $conn->send($data))
     ->start();
 
 // TCP 服务器
-Kode::worker('tcp://0.0.0.0:9000', 4)
-    ->onMessage(fn($conn, $data) => $conn->send($data))
+Kode::serve('tcp://0.0.0.0:9000', ['workers' => 4])
+    ->on('message', fn($conn, $data) => $conn->send($data))
     ->start();
 ```
 
@@ -64,20 +66,20 @@ require __DIR__ . '/vendor/autoload.php';
 
 use Kode\Process\Kode;
 
-Kode::app([
-    'worker_count' => 4,
-    'daemonize' => false,
+Kode::serve('http://0.0.0.0:8080', [
+    'workers'   => 4,
+    'name'      => 'demo-http',
+    'reusePort' => true,
 ])
-->listen('http://0.0.0.0:8080')
-->onMessage(function ($connection, $request) {
-    $connection->send(json_encode([
-        'code' => 0,
-        'message' => 'success',
-        'data' => [
-            'path' => $request['path'] ?? '/',
-            'method' => $request['method'] ?? 'GET',
-        ]
-    ]));
-})
-->start();
+    ->on('message', function ($connection, $request) {
+        $connection->send(json_encode([
+            'code'    => 0,
+            'message' => 'success',
+            'data'    => [
+                'path'   => $request['path'] ?? '/',
+                'method' => $request['method'] ?? 'GET',
+            ],
+        ]));
+    })
+    ->start();
 ```

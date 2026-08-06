@@ -18,8 +18,8 @@ require __DIR__ . '/vendor/autoload.php';
 
 use Kode\Process\Kode;
 
-Kode::worker('http://0.0.0.0:8080', 4)
-    ->onMessage(function ($connection, $request) {
+Kode::serve('http://0.0.0.0:8080', ['workers' => 4])
+    ->on('message', function ($connection, $request) {
         $connection->send('hello world');
     })
     ->start();
@@ -28,7 +28,7 @@ Kode::worker('http://0.0.0.0:8080', 4)
 ### 命令行运行
 
 ```bash
-kode start
+php http_server.php
 ```
 
 ### 信号控制
@@ -37,8 +37,7 @@ kode start
 |------|------|
 | 启动 | `php http_server.php` |
 | 停止 | `kill -TERM $PID` 或 `Ctrl+C` |
-| 重载 | `kill -HUP $PID` |
-| 查看状态 | `kill -USR2 $PID` |
+| 重载 | `kill -USR1 $PID` |
 
 ---
 
@@ -52,8 +51,8 @@ require __DIR__ . '/vendor/autoload.php';
 
 use Kode\Process\Kode;
 
-Kode::worker('websocket://0.0.0.0:8081', 4)
-    ->onMessage(function ($connection, $data) {
+Kode::serve('websocket://0.0.0.0:8081', ['workers' => 4])
+    ->on('message', function ($connection, $data) {
         $connection->send('hello ' . $data);
     })
     ->start();
@@ -92,8 +91,8 @@ require __DIR__ . '/vendor/autoload.php';
 
 use Kode\Process\Kode;
 
-Kode::worker('tcp://0.0.0.0:9000', 4)
-    ->onMessage(function ($connection, $data) {
+Kode::serve('tcp://0.0.0.0:9000', ['workers' => 4])
+    ->on('message', function ($connection, $data) {
         $connection->send('hello ' . $data);
     })
     ->start();
@@ -117,7 +116,7 @@ telnet 127.0.0.1 9000
 
 ## 示例四、使用 UDP 协议
 
-创建 `udp_server.php` 文件：
+> UDP 仅 Swoole / Workerman 运行时支持，需显式指定运行时。
 
 ```php
 <?php
@@ -125,8 +124,8 @@ require __DIR__ . '/vendor/autoload.php';
 
 use Kode\Process\Kode;
 
-Kode::worker('udp://0.0.0.0:9002', 1)
-    ->onMessage(function ($connection, $data) {
+Kode::serve('udp://0.0.0.0:9002', ['workers' => 1], 'swoole')
+    ->on('message', function ($connection, $data) {
         echo "收到数据: {$data}\n";
         $connection->send("已收到: {$data}");
     })
@@ -149,8 +148,8 @@ require __DIR__ . '/vendor/autoload.php';
 
 use Kode\Process\Kode;
 
-Kode::worker('http://0.0.0.0:8080', 4)
-    ->onMessage(function ($connection, $request) {
+Kode::serve('http://0.0.0.0:8080', ['workers' => 4])
+    ->on('message', function ($connection, $request) {
         Kode::go(function () use ($connection) {
             $result = fetchDataFromDatabase();
             $connection->send(json_encode($result));
@@ -169,8 +168,8 @@ require __DIR__ . '/vendor/autoload.php';
 
 use Kode\Process\Kode;
 
-Kode::worker('http://0.0.0.0:8080', 4)
-    ->onMessage(function ($connection, $request) {
+Kode::serve('http://0.0.0.0:8080', ['workers' => 4])
+    ->on('message', function ($connection, $request) {
         $items = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
         $results = Kode::batch($items, function ($item) {
@@ -187,52 +186,44 @@ Kode::worker('http://0.0.0.0:8080', 4)
 
 ## 示例七、多端口监听
 
+`Kode::serve()` 一次只监听一个地址；多端口请创建多个运行时，或一个运行时多次 `listen`：
+
 ```php
 <?php
 require __DIR__ . '/vendor/autoload.php';
 
 use Kode\Process\Kode;
 
-$app = Kode::app(['worker_count' => 4]);
+$rt = Kode::runtime();
 
-$app->listen('http://0.0.0.0:8080')
-    ->onMessage(fn($conn, $req) => $conn->send('HTTP Response'));
+$rt->listen('http://0.0.0.0:8080', ['workers' => 4])
+    ->on('message', fn($conn, $req) => $conn->send('HTTP Response'));
 
-$app->listen('websocket://0.0.0.0:8081')
-    ->onMessage(fn($conn, $data) => $conn->send($data));
+$rt->listen('websocket://0.0.0.0:8081', ['workers' => 4])
+    ->on('message', fn($conn, $data) => $conn->send($data));
 
-$app->listen('tcp://0.0.0.0:9000')
-    ->onMessage(fn($conn, $data) => $conn->send($data));
+$rt->listen('tcp://0.0.0.0:9000', ['workers' => 4])
+    ->on('message', fn($conn, $data) => $conn->send($data));
 
-$app->start();
+$rt->start();
 ```
 
 ---
 
-## 示例八、使用 Channel 分布式通讯
+## 示例八、worker 启动钩子
 
 ```php
 <?php
 require __DIR__ . '/vendor/autoload.php';
 
 use Kode\Process\Kode;
-use Kode\Process\Channel\Client;
 
-Kode::worker('websocket://0.0.0.0:8080', 4)
-    ->onWorkerStart(function ($worker) {
-        Client::connect('127.0.0.1', 2206);
-
-        Client::on('broadcast', function ($data) use ($worker) {
-            foreach ($worker->connections as $conn) {
-                $conn->send(json_encode($data));
-            }
-        });
+Kode::serve('websocket://0.0.0.0:8080', ['workers' => 4])
+    ->on('workerStart', function (int $workerId) {
+        echo "worker #{$workerId} 已启动\n";
     })
-    ->onMessage(function ($connection, $data) {
-        Client::publish('broadcast', [
-            'message' => $data,
-            'time' => date('H:i:s')
-        ]);
+    ->on('message', function ($connection, $data) {
+        $connection->send($data);
     })
     ->start();
 ```
@@ -254,17 +245,17 @@ QueueManager::getInstance()
         return ['status' => 'sent'];
     });
 
-Kode::worker('http://0.0.0.0:8080', 4)
-    ->onMessage(function ($connection, $request) {
+Kode::serve('http://0.0.0.0:8080', ['workers' => 4])
+    ->on('message', function ($connection, $request) {
         $jobId = QueueManager::getInstance()->dispatch('send_email', [
-            'to' => 'user@example.com',
+            'to'      => 'user@example.com',
             'subject' => 'Hello',
-            'body' => 'World'
+            'body'    => 'World',
         ]);
 
         $connection->send(json_encode([
-            'code' => 0,
-            'job_id' => $jobId
+            'code'   => 0,
+            'job_id' => $jobId,
         ]));
     })
     ->start();
@@ -272,7 +263,10 @@ Kode::worker('http://0.0.0.0:8080', 4)
 
 ---
 
-## 示例十、守护进程模式
+## 示例十、守护进程与 PID 文件
+
+运行时默认前台运行；守护化可借助 `nohup` / 进程管理器（systemd、supervisor）。
+进程信号仍由运行时处理：`SIGTERM` 优雅停机、`SIGUSR1` 平滑重载。
 
 ```php
 <?php
@@ -280,96 +274,39 @@ require __DIR__ . '/vendor/autoload.php';
 
 use Kode\Process\Kode;
 
-Kode::app([
-    'worker_count' => 4,
-    'daemonize' => true,
-    'pid_file' => '/var/run/kode-process.pid',
-    'log_file' => '/var/log/kode-process.log',
+Kode::serve('http://0.0.0.0:8080', [
+    'workers'   => 4,
+    'name'      => 'demo-http',
+    'reusePort' => true,
 ])
-->listen('http://0.0.0.0:8080')
-->onMessage(fn($conn, $req) => $conn->send('Hello'))
-->start();
+    ->on('message', fn($conn, $req) => $conn->send('Hello'))
+    ->start();
 ```
 
 ### 信号控制
 
 | 操作 | 命令 |
 |------|------|
-| 启动 | `kode start` |
-| 停止 | `kode stop` |
-| 重载 | `kode reload` |
-| 查看状态 | `kode status` |
-
----
-
-## 示例十一、使用 WorkerPool 进程池
-
-```php
-<?php
-require __DIR__ . '/vendor/autoload.php';
-
-use Kode\Process\Worker\WorkerPool;
-use Kode\Process\Worker\WorkerFactory;
-
-$pool = new WorkerPool(4);
-
-$pool->setWorkerCallback(function ($taskId, $data) {
-    return ['result' => 'processed: ' . $data];
-});
-
-$pool->start();
-
-for ($i = 0; $i < 10; $i++) {
-    $worker = $pool->selectWorker();
-    if ($worker) {
-        echo "分配任务到 Worker {$worker->getId()}\n";
-    }
-}
-
-$pool->stop();
-```
-
----
-
-## 示例十二、自动扩缩容
-
-```php
-<?php
-require __DIR__ . '/vendor/autoload.php';
-
-use Kode\Process\Worker\WorkerPool;
-
-$pool = new WorkerPool(4);
-
-$pool->setWorkerCallback(function ($taskId, $data) {
-    return ['result' => $data];
-});
-
-$pool->start();
-
-$pool->scale(8);
-echo "扩容到 8 个 Worker\n";
-
-$pool->scale(2);
-echo "缩容到 2 个 Worker\n";
-
-$pool->stop();
-```
+| 启动 | `php demo.php`（建议配合 nohup / systemd） |
+| 停止 | `kill -TERM $PID` |
+| 重载 | `kill -USR1 $PID` |
 
 ---
 
 ## 支持的协议前缀
 
-| 前缀 | 协议 | 示例 |
-|------|------|------|
-| `http://` | HTTP 协议 | `http://0.0.0.0:8080` |
-| `https://` | HTTPS 协议 | `https://0.0.0.0:443` |
-| `websocket://` | WebSocket 协议 | `websocket://0.0.0.0:8081` |
-| `ws://` | WebSocket 协议（简写） | `ws://0.0.0.0:8081` |
-| `tcp://` | TCP 原始协议 | `tcp://0.0.0.0:9000` |
-| `text://` | 文本+换行符协议 | `text://0.0.0.0:9001` |
-| `udp://` | UDP 协议 | `udp://0.0.0.0:9002` |
-| `ssl://` | SSL/TLS 协议 | `ssl://0.0.0.0:443` |
+| 前缀 | 协议 | 运行时支持 |
+|------|------|-----------|
+| `http://` | HTTP 协议 | 全部 |
+| `https://` | HTTPS 协议 | 全部（需 ext-openssl） |
+| `websocket://` | WebSocket 协议 | 全部 |
+| `ws://` | WebSocket 协议（简写） | 全部 |
+| `tcp://` | TCP 原始协议 | 全部 |
+| `text://` | 文本+换行符协议 | 全部 |
+| `frame://` | 自定义长度前缀 | 全部 |
+| `unix://` | Unix Domain Socket | 全部 |
+| `udp://` | UDP 协议 | 仅 Swoole / Workerman |
+| `ssl://` | SSL/TLS 协议 | 全部（需 ext-openssl） |
 
 ---
 
@@ -379,30 +316,27 @@ $pool->stop();
 |------|------|------|
 | SIGTERM | 优雅停止 | `kill -TERM $PID` |
 | SIGINT | 优雅停止 | `Ctrl+C` |
-| SIGQUIT | 强制停止 | `kill -QUIT $PID` |
-| SIGHUP | 平滑重载 | `kill -HUP $PID` |
-| SIGUSR1 | 平滑重载 | `kill -USR1 $PID` |
-| SIGUSR2 | 打印状态 | `kill -USR2 $PID` |
+| SIGQUIT | 停机 | `kill -QUIT $PID` |
+| SIGUSR1 | 平滑重载（不中断连接） | `kill -USR1 $PID` |
+
+> Swoole / Workerman 运行时可能使用各自框架定义的额外信号；上表为两类运行时的通用行为。
 
 ---
 
-## Workerman 兼容模式
+## 兼容 Workerman
 
-如果你需要兼容 Workerman 代码，可以使用兼容层：
+若项目已基于 Workerman，可显式指定运行时复用其成熟能力，应用代码几乎不变：
 
 ```php
 <?php
 require __DIR__ . '/vendor/autoload.php';
 
-use Kode\Process\Compat\Worker;
+use Kode\Process\Kode;
 
-$worker = new Worker('http://0.0.0.0:8080');
-$worker->count = 4;
-$worker->onMessage = function ($connection, $request) {
-    $connection->send('hello world');
-};
-
-Worker::runAll();
+// 强制复用 Workerman（需 composer require workerman/workerman ^5.0）
+Kode::serve('http://0.0.0.0:8080', ['workers' => 4], 'workerman')
+    ->on('message', fn($conn, $req) => $conn->send('hello world'))
+    ->start();
 ```
 
-> **推荐**：新项目建议使用 `Kode::worker()` 统一方法，更简洁易用。
+> **推荐**：新项目直接用 `Kode::serve()`，由环境自动择优运行时，部署更灵活。

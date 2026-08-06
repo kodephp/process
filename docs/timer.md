@@ -83,14 +83,14 @@ new Crontab('30 8 * * *', fn() => print "早上 8:30 执行\n");
 use Kode\Process\Kode;
 use Kode\Process\Timer;
 
-Kode::worker('tcp://0.0.0.0:8080', 4)
-    ->onWorkerStart(function ($worker) {
-        if ($worker->id === 0) {
+Kode::serve('tcp://0.0.0.0:8080', ['workers' => 4])
+    ->on('workerStart', function (int $workerId) {
+        if ($workerId === 0) {
             Timer::add(60, fn() => cleanupExpiredData());
             Timer::add(3600, fn() => generateStatistics());
         }
     })
-    ->onMessage(fn($conn, $data) => $conn->send("收到: {$data}"))
+    ->on('message', fn($conn, $data) => $conn->send("收到: {$data}"))
     ->start();
 ```
 
@@ -103,20 +103,20 @@ require __DIR__ . '/vendor/autoload.php';
 use Kode\Process\Kode;
 use Kode\Process\Timer;
 
-Kode::worker('tcp://0.0.0.0:9000', 4)
-    ->onWorkerStart(function ($worker) {
-        if ($worker->id === 0) {
+Kode::serve('tcp://0.0.0.0:9000', ['workers' => 4])
+    ->on('workerStart', function (int $workerId) {
+        if ($workerId === 0) {
             Timer::add(60, fn() => print "[" . date('H:i:s') . "] 清理任务\n");
         }
 
-        Timer::add(10, fn() => print "Worker {$worker->id} 心跳\n");
+        Timer::add(10, fn() => print "Worker {$workerId} 心跳\n");
     })
-    ->onMessage(fn($conn, $data) => $conn->send("收到: {$data}"))
+    ->on('message', fn($conn, $data) => $conn->send("收到: {$data}"))
     ->start();
 ```
 
 ## 注意事项
 
-1. **只能在回调中添加定时器** - 推荐在 `onWorkerStart` 中设置
+1. **只能在回调中添加定时器** - 推荐在 `workerStart` 事件中设置
 2. **繁重任务会阻塞** - 建议放到单独的 Worker 进程
-3. **多进程注意并发** - 判断 `$worker->id` 避免重复执行
+3. **多进程注意并发** - 判断 `workerStart` 回调的 `$workerId` 避免重复执行

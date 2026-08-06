@@ -1,37 +1,49 @@
 # Kode Process
 
-**高性能 PHP 进程管理器 | 分布式 | 协程 | 多协议**
+**PHP 8.3+ 多进程编排内核 · Swoole / Workerman 运行时兼容层**
 
 [![PHP Version](https://img.shields.io/badge/PHP-8.3+-777BB4?style=flat-square&logo=php)](https://php.net)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green?style=flat-square)](LICENSE)
 
 ## 简介
 
-Kode Process 是一款专为高并发场景设计的高性能 PHP 进程管理器，支持分布式集群、Fiber 协程、多协议解析。
+Kode Process 是一个「进程编排内核 + 运行时兼容层」：你只写一套 API，底层运行时由环境自动择优——
 
-> **v3.0 起最低要求 PHP 8.3**。若仍在 PHP 8.1 / 8.2 上运行，请继续使用 `^2.9`。
+- 装了 **Swoole** → 用 Swoole 跑（最快，全 C 实现，自动择优时最高优先级）
+- 否则用 **Workerman** 跑（纯 PHP 依赖，已写入 `require`，**开箱即用**，Linux 上 `ext-event` 加速）
+
+> **为什么是「兼容层」而不是「又一个更快的网络框架」？**
+> 我们通过五维硬门槛（吞吐 ≥ Workerman×1.30、P99、稳定性、零错误、内存）实测了自研网络 I/O 内核，
+> 结论是相对 Workerman 吞吐比仅 **1.010×**（PHP 用户态只占全链路 ~13%，Amdahl 上限 +14.9%，30% 在数学上不可达）。
+> 重造 I/O 栈没有收益，因此本包**不自带服务器实现**，只做 Swoole / Workerman 的兼容适配层：
+> 应用面向 `RuntimeInterface` 编程，即可在两者间无缝切换，不引入相互竞争的 I/O 栈。
+> 详见 [docs/gate-report.md](docs/gate-report.md) 与 [docs/runtime.md](docs/runtime.md)。
+
+> **最低要求 PHP 8.3**。若仍在 PHP 8.1 / 8.2 上运行，请使用旧版 `^2.9`。
 
 ## 特性
 
 | 特性 | 说明 |
 |------|------|
-| 🚀 **极简 API** | `Kode::worker()` 一行启动，自动检测协议 |
-| 📡 **多协议** | HTTP、WebSocket、TCP、UDP、Text、SSL |
-| 🌐 **分布式** | Channel 通讯、GlobalData 共享、负载均衡 |
-| ⚡ **协程** | Fiber 协程支持，百万级并发 |
-| 🧵 **多线程并行** | 真正的 CPU 多线程（需 ZTS + ext-parallel），与协程无缝桥接 |
-| 🔄 **平滑重载** | 热更新代码，不中断连接 |
-| ⏱️ **定时器** | 一次性、永久、Cron 表达式 |
-| 📢 **广播** | 全局广播、群组广播、定向发送 |
-| 🔒 **安全** | SSL/TLS、连接认证、进程隔离 |
-| 📊 **监控** | 心跳检测、状态监控、进程管理 |
-| 🔧 **兼容** | Workerman 零成本迁移 |
+| 🔌 **一套 API，两种运行时** | Swoole / Workerman 自动择优，应用代码无需改动 |
+| 🧱 **进程编排内核** | 复用宿主的 pre-fork 模型、监督重启、平滑重载、优雅停机、信号管理 |
+| 🔁 **统一事件循环** | `Kode::loop()` 基于 `ext-event` / `ext-ev` 加速，`stream_select` 零扩展兜底 |
+| 🌐 **多协议** | HTTP、WebSocket、TCP、Text、Unix Socket、SSL（UDP 取决于宿主运行时） |
+| 🗄️ **共享数据（零安装兜底）** | 同主机多进程共享表，apcu → sysvshm 自动择优；也可复用 Swoole/Workerman 表 |
+| 🧵 **多线程并行** | 真正的 CPU 多线程（需 ZTS + ext-parallel），与协程桥接 |
+| 🪶 **协程** | 委托 `kode/fibers`，单线程 I/O 并发 |
+| ⏱️ **定时器** | 一次性、周期、Cron |
+| 📨 **队列** | 委托 `kode/queue`，内存 / 同步 / Redis / 数据库多后端 |
+| 🔒 **SSL/TLS** | 通过监听选项配置，随宿主运行时生效 |
+| 🩺 **部署自检** | `Kode::diagnose()` 一键列出可用运行时 / 事件循环 / 共享表后端 |
 
 ## 安装
 
 ```bash
 composer require kode/process
 ```
+
+`workerman/workerman` 是纯 PHP 依赖、已写入 `require`，安装后即开箱可用；需要更高吞吐时再装 `ext-swoole` 即可自动择优到它。
 
 ## 快速开始
 
@@ -43,10 +55,8 @@ require __DIR__ . '/vendor/autoload.php';
 
 use Kode\Process\Kode;
 
-Kode::worker('http://0.0.0.0:8080', 4)
-    ->onMessage(function ($conn, $request) {
-        $conn->send('Hello World!');
-    })
+Kode::serve('http://0.0.0.0:8080', ['workers' => 8])
+    ->on('message', fn($conn, $req) => $conn->send('Hello World!'))
     ->start();
 ```
 
@@ -58,8 +68,8 @@ require __DIR__ . '/vendor/autoload.php';
 
 use Kode\Process\Kode;
 
-Kode::worker('websocket://0.0.0.0:8081', 4)
-    ->onMessage(fn($conn, $data) => $conn->send($data))
+Kode::serve('websocket://0.0.0.0:8081', ['workers' => 4])
+    ->on('message', fn($conn, $data) => $conn->send($data))
     ->start();
 ```
 
@@ -71,132 +81,126 @@ require __DIR__ . '/vendor/autoload.php';
 
 use Kode\Process\Kode;
 
-Kode::worker('tcp://0.0.0.0:9000', 4)
-    ->onMessage(fn($conn, $data) => $conn->send('Echo: ' . $data))
+Kode::serve('tcp://0.0.0.0:9000', ['workers' => 4])
+    ->on('message', fn($conn, $data) => $conn->send('Echo: ' . $data))
     ->start();
 ```
 
-## 命令行工具
+`Kode::serve()` 内部调用 `Runtime::auto()` 选择最优运行时。若想显式指定：
 
-```bash
-# 启动服务
-kode start
-
-# 停止服务
-kode stop
-
-# 平滑重载
-kode reload
-
-# 查看状态
-kode status
-
-# 版本信息
-kode info
+```php
+// 强制用某个运行时（swoole | workerman）
+Kode::serve('http://0.0.0.0:8080', ['workers' => 8], 'swoole')
+    ->on('message', fn($conn) => $conn->send('Hello'))
+    ->start();
 ```
 
-## 支持的协议
+## 事件与连接
 
-| 协议 | 地址格式 | 说明 |
+运行时通过事件回调驱动业务，连接对象统一为 `Kode\Process\Runtime\ConnectionInterface`：
+
+| 事件 | 回调签名 | 说明 |
 |------|----------|------|
-| HTTP | `http://0.0.0.0:8080` | HTTP 服务器 |
-| WebSocket | `websocket://0.0.0.0:8081` | WebSocket 服务器 |
-| TCP | `tcp://0.0.0.0:9000` | 原始 TCP |
-| Text | `text://0.0.0.0:9001` | 文本+换行符 |
-| UDP | `udp://0.0.0.0:9002` | UDP 服务器 |
-| SSL | `ssl://0.0.0.0:443` | SSL/TLS 加密 |
+| `workerStart` | `(int $workerId)` | worker 就绪 |
+| `workerStop` | `(int $workerId)` | worker 退出 |
+| `connect` | `(ConnectionInterface $conn)` | 新连接建立 |
+| `message` | `(ConnectionInterface $conn, mixed $data)` | 收到一条完整报文 |
+| `close` | `(ConnectionInterface $conn)` | 连接关闭 |
+| `error` | `(?ConnectionInterface $conn, \Throwable $e)` | 连接或运行时错误 |
 
-## 分布式集群
-
-### 架构
-
-```
-                    ┌─────────────┐
-                    │   Nginx     │
-                    │  负载均衡   │
-                    └──────┬──────┘
-                           │
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-   ┌────┴────┐        ┌────┴────┐        ┌────┴────┐
-   │ Server A │        │ Server B │        │ Server C │
-   │ Worker 1-4│        │ Worker 1-4│        │ Worker 1-4│
-   └────┬────┘        └────┬────┘        └────┬────┘
-        │                  │                  │
-        └──────────────────┼──────────────────┘
-                           │
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-   ┌────┴────┐        ┌────┴────┐        ┌────┴────┐
-   │ Channel │        │GlobalData│        │  Redis  │
-   │  :2206  │        │  :2207   │        │  :6379  │
-   └─────────┘        └──────────┘        └─────────┘
-```
-
-### Channel 分布式通讯
+`ConnectionInterface` 提供与底层无关的操作：
 
 ```php
-use Kode\Process\Channel\Client;
-
-Client::connect('192.168.1.100', 2206);
-
-Client::on('broadcast', function ($data) {
-    echo "收到广播: " . json_encode($data) . "\n";
-});
-
-Client::publish('broadcast', [
-    'type' => 'message',
-    'content' => 'Hello everyone!'
-]);
+$conn->send(string $data, bool $raw = false): bool;   // 发送；raw=true 跳过协议编码
+$conn->close(?string $data = null): void;              // 关闭（可带最后一段数据）
+$conn->id(): int;                                       // 本 worker 内唯一连接 ID
+$conn->remoteAddress(): string;                        // 对端 ip:port
+$conn->localAddress(): string;                         // 本端 ip:port
+$conn->isAlive(): bool;                                // 是否仍可用
+$conn->native(): mixed;                                // 原生对象（Swoole=int fd / Workerman=TcpConnection）
+$conn->setContext(string $key, mixed $v): void;        // 关联会话上下文
+$conn->getContext(string $key, mixed $default = null): mixed;
 ```
 
-### GlobalData 数据共享
+### 能力探测
 
-> **选型建议**：若应用已基于 Swoole / Workerman，优先用它们自带的共享表（`Swoole\Table` / `Workerman\Table`），成熟稳定、无需额外维护。本库 `SharedTable::auto()`（或等价的 `GlobalData::auto()`）是「不引入 Swoole / Workerman 时」的**零安装、零依赖兜底**（apcu → PHP 内置共享内存）；当应用已运行在 Swoole / Workerman 之上，可 `make('swoole')` / `make('workerman')` 复用其共享表做兼容共存。详见 [docs/global-data.md](docs/global-data.md)。「GlobalData」概念与名称来自 Workerman 的 GlobalData 组件，跨主机共享才使用下面的网络 `Client`。
-
-```php
-use Kode\Process\GlobalData\Client;
-
-$client = new Client('192.168.1.100:2207');
-
-$client->online_count = 0;
-$client->increment('online_count', 1);
-
-echo $client->online_count;
-```
-
-### 分布式锁
+不同运行时的能力不同，请用 `supports()` 做优雅降级：
 
 ```php
-use Kode\Process\GlobalData\Client;
+$rt = Kode::runtime();
 
-$lock = new Client('192.168.1.100:2207');
-
-$key = 'order_lock_123';
-$lock->$key = time() + 10;
-
-if ($lock->$key < time()) {
-    unset($lock->$key);
-    $lock->$key = time() + 10;
+if ($rt->supports(\Kode\Process\Runtime\Capability::HotReload)) {
+    $rt->reload();           // 平滑重载（Workerman / Swoole 支持）
 }
 ```
 
-## 协程支持
+能力枚举见 `Kode\Process\Runtime\Capability`：协程、共享表、Task 进程、UDP、Unix Socket、
+SSL、平滑重载、SO_REUSEPORT、WebSocket、定时器、异步 I/O。
+
+## 运行时择优与自检
+
+```php
+use Kode\Process\Runtime;
+
+$rt = Runtime::auto();                       // 自动择优（swoole → workerman）
+$rt = Runtime::make('workerman');            // 显式指定
+$rt = Runtime::make(\Kode\Process\Runtime\RuntimeType::Swoole);
+
+Runtime::available();                        // 当前环境按权重降序的可用运行时
+Runtime::preferred();                        // 最优运行时类型
+Runtime::isSupported('workerman');           // 该运行时是否可用
+
+print_r(Kode::diagnose());                   // 部署前一键自检（含 Linux 上 ext-event 安装建议）
+```
+
+`Kode::diagnose()` 返回可用运行时、各自版本与优先级、当前事件循环驱动，以及共享表后端；
+在 Linux 且未安装 `ext-event` / `ext-ev` 时会给出安装建议（Workerman 官方也推荐 Linux 用 event 循环）。
+
+## 共享数据（零安装兜底）
+
+跨进程共享数据，无需引入 Swoole / Workerman：
 
 ```php
 use Kode\Process\Kode;
 
-Kode::worker('http://0.0.0.0:8080', 4)
-    ->onMessage(function ($conn, $request) {
-        Kode::go(function () use ($conn) {
-            $result = fetchDataFromApi();
-            $conn->send(json_encode($result));
-        });
-    })
-    ->start();
+$table = Kode::table();          // 自动择优：apcu → sysvshm（零安装）
+$table->set('online', 0);
+$table->increment('online', 1);
 
-// 批量处理
+echo $table->get('online');
+```
+
+若应用已运行在 Swoole / Workerman 之上，可复用其共享表做兼容共存：
+
+```php
+use Kode\Process\SharedTable;
+
+$table = SharedTable::make('swoole');    // 直接复用 Swoole\Table
+$table = SharedTable::make('workerman'); // 直接复用 Workerman\Table
+```
+
+> **选型建议**：能上 Swoole / Workerman 就优先用它们的表（成熟稳定、免维护）。
+> 本库 `SharedTable::auto()` 是「不引入这两者时」的**零安装、零依赖兜底**。
+> 详见 [docs/global-data.md](docs/global-data.md)。
+
+## 并发原语
+
+```php
+use Kode\Process\Kode;
+
+// 协程（单线程 I/O 并发，委托 kode/fibers）
+Kode::go(function () {
+    $result = fetchDataFromApi();
+    echo json_encode($result);
+});
+
 $results = Kode::batch([1, 2, 3, 4, 5], fn($i) => $i * 2, 3);
+
+// 多线程并行（CPU 密集，需 ZTS + ext-parallel）
+if (Kode::supportsParallel()) {
+    $future = Kode::parallel(fn($x) => heavyCompute($x), 42);
+    $result = Kode::awaitParallel($future);
+}
 ```
 
 ## 定时器
@@ -207,18 +211,6 @@ use Kode\Process\Timer;
 Timer::add(2.5, fn() => echo "每 2.5 秒执行\n");
 Timer::once(10, fn() => echo "10 秒后执行一次\n");
 Timer::cron('* * * * *', fn() => echo "每分钟执行\n");
-```
-
-## 广播系统
-
-```php
-use Kode\Process\Broadcast\Broadcaster;
-
-$broadcaster = Broadcaster::getInstance();
-
-$broadcaster->broadcast('全局消息');
-$broadcaster->broadcastToGroup('room_1', '群组消息');
-$broadcaster->sendToUid('user_123', '私人消息');
 ```
 
 ## 队列系统
@@ -233,78 +225,99 @@ QueueManager::getInstance()
     });
 
 QueueManager::getInstance()->dispatch('send_email', [
-    'to' => 'user@example.com',
+    'to'      => 'user@example.com',
     'subject' => 'Hello',
-    'body' => 'World'
+    'body'    => 'World',
 ]);
 ```
 
+队列由 `kode/queue` 提供，支持内存 / 同步 / Redis / 数据库多后端。详见 [docs/queue.md](docs/queue.md)。
+
 ## SSL/TLS
+
+通过监听选项配置，随宿主运行时生效（需 `ext-openssl`）：
 
 ```php
 use Kode\Process\Kode;
 
-Kode::app([
-    'worker_count' => 4,
-    'ssl' => [
+Kode::serve('ssl://0.0.0.0:443', [
+    'workers' => 4,
+    'ssl'     => [
         'local_cert' => '/path/to/cert.pem',
-        'local_pk' => '/path/to/key.pem',
-    ]
+        'local_pk'   => '/path/to/key.pem',
+    ],
 ])
-->listen('ssl://0.0.0.0:443')
-->onMessage(fn($conn, $data) => $conn->send('Secure response'))
+->on('message', fn($conn, $data) => $conn->send('Secure response'))
 ->start();
 ```
 
-## 性能对比
+## 命令行工具
 
-| 指标 | Kode Process | Workerman | 提升 |
-|------|-------------|-----------|------|
-| HTTP QPS | 55,000+ | 45,000+ | **+22%** |
-| WebSocket 连接 | 120,000+ | 100,000+ | **+20%** |
-| Fiber 创建 | 139,000/s | ~100,000/s | **+39%** |
-| 内存/进程 | ~8MB | ~10MB | **-20%** |
+`bin/kode` 是便捷启动器，运行你提供的服务脚本（脚本内调用 `Kode::serve(...)->start()`）：
 
-> 详见 [性能压测](docs/benchmark.md)
+```bash
+kode start             # 启动 server.php
+kode start app.php     # 启动指定脚本
+kode stop              # 停止（读取 PID 文件）
+kode reload            # 平滑重载
+kode status            # 查看状态
+kode info              # 版本信息
+```
+
+运行中的服务也可直接用信号控制：
+
+| 信号 | 作用 |
+|------|------|
+| `SIGTERM` | 优雅停机 |
+| `SIGUSR1` | 平滑重载（Workerman / Swoole，不中断连接） |
+| `SIGINT` / `SIGQUIT` | 停机 |
 
 ## 文档
 
+- [运行时兼容层（架构与 API）](docs/runtime.md)
+- [事件循环（Reactor）](docs/reactor.md)
 - [快速开始](docs/quick-start.md)
-- [Worker 详解](docs/worker.md)
+- [入门示例](docs/getting-started/simple-example.md)
+- [特性一览](docs/getting-started/feature.md)
 - [协议系统](docs/protocol.md)
-- [分布式集群](docs/distributed.md)
-- [协程系统](docs/fiber.md)
+- [共享数据](docs/global-data.md)
 - [并行（多线程）](docs/parallel.md)
 - [定时器](docs/timer.md)
-- [广播系统](docs/broadcast.md)
 - [队列系统](docs/queue.md)
+- [信号管理](docs/signal.md)
+- [性能压测](docs/performance.md)
+- [五维硬门槛判定报告](docs/gate-report.md)
 - [生产部署](docs/deployment.md)
+- [安装](docs/install.md)
 
 ## 项目结构
 
 ```
 src/
-├── Kode.php                    # 静态入口类
-├── Application.php             # 应用主类
-├── Version.php                 # 版本信息
-├── Protocol/                    # 协议系统
-│   ├── ProtocolInterface.php
-│   ├── HttpProtocol.php
-│   ├── WebSocketProtocol.php
-│   └── ...
-├── Channel/                     # Channel 分布式通讯
-│   ├── Server.php
-│   └── Client.php
-├── GlobalData/                  # GlobalData 全局数据
-│   ├── Server.php
-│   └── Client.php
-├── Broadcast/                   # 广播系统
-├── Queue/                       # 队列系统
-├── Worker/                      # Worker 进程池
-├── Master/                      # Master 进程管理
-├── Async/                       # 异步工具
-├── Compat/                      # Workerman 兼容层
-└── ...
+├── Kode.php                  # 静态门面：一行起服务
+├── Runtime.php               # 运行时门面：一套 API 两种实现（Swoole / Workerman）
+├── Version.php               # 版本信息
+├── Timer.php                 # 定时器（顶层类）
+├── Runtime/                  # 运行时兼容层
+│   ├── RuntimeInterface.php
+│   ├── ConnectionInterface.php
+│   ├── Capability.php        # 能力枚举
+│   ├── RuntimeType.php       # 运行时类型（含优先级）
+│   └── Driver/
+│       ├── SwooleRuntime.php     # 宿主 Swoole 适配器
+│       └── WorkermanRuntime.php  # 宿主 Workerman 适配器
+├── Reactor/                  # 统一事件循环层（Kode::loop()）
+│   ├── LoopFactory.php       # 自动择优
+│   ├── LoopInterface.php
+│   ├── EventLoop.php         # ext-event
+│   ├── EvLoop.php            # ext-ev
+│   └── SelectLoop.php        # stream_select 兜底
+├── SharedTable.php           # 多后端共享表门面
+├── GlobalData/               # 网络 GlobalData（兼容 Workerman 概念）
+├── Parallel/                 # 多线程并行（ZTS + ext-parallel）
+├── Protocol/                 # 协议编解码
+├── Signal/                   # 信号管理
+└── ...                       # 进程管理、IPC、任务、监控等编排内核
 ```
 
 ## 测试

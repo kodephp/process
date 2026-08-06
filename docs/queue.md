@@ -140,8 +140,8 @@ QueueManager::getInstance()
         return ['status' => 'sent'];
     });
 
-Kode::worker('http://0.0.0.0:8080', 4)
-    ->onMessage(function ($connection, $request) {
+Kode::serve('http://0.0.0.0:8080', ['workers' => 4])
+    ->on('message', function ($connection, $request) {
         $jobId = QueueManager::getInstance()->dispatch('send_email', [
             'to' => 'user@example.com',
             'subject' => 'Hello',

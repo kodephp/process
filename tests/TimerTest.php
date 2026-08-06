@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Kode\Process\Tests;
 
-use Kode\Process\Compat\Timer;
+use Kode\Process\Timer;
 use PHPUnit\Framework\TestCase;
 
 final class TimerTest extends TestCase

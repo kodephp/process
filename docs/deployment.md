@@ -348,33 +348,45 @@ check_process "channel-server.php"
 ### Worker 数量
 
 ```php
-// 根据 CPU 核心数设置
-$worker->count = cpu_get_count();
+use Kode\Process\Kode;
 
-// 或手动设置
-$worker->count = 4;  // 4 核 CPU
+// 根据 CPU 核心数设置（通过 listen 选项的 workers 控制）
+$workers = function_exists('swoole_cpu_num') ? swoole_cpu_num() : ((int) shell_exec('nproc') ?: 4);
+
+Kode::serve('http://0.0.0.0:8080', ['workers' => $workers])
+    ->on('message', fn($conn, $req) => $conn->send('Hello'))
+    ->start();
 ```
 
 ### 内存限制
 
 ```php
-// 设置最大请求数后重启
-$worker->maxRequests = 10000;
+use Kode\Process\Kode;
 
-// 设置内存限制
-$worker->maxMemory = 128 * 1024 * 1024;  // 128MB
+// 设置最大请求数后自动重启 worker，防止内存泄漏
+Kode::serve('http://0.0.0.0:8080', ['workers' => 4, 'maxRequest' => 10000])
+    ->on('message', fn($conn, $req) => $conn->send('Hello'))
+    ->start();
+
+// 进程级内存上限仍由 PHP 自身控制
+ini_set('memory_limit', '128M');
 ```
 
-### 连接限制
+### 连接超时
 
 ```php
-// 设置最大连接数
-$worker->maxConnections = 10000;
+use Kode\Process\Kode;
+use Kode\Process\Timer;
 
-// 设置连接超时
-$worker->onConnect = function ($connection) {
-    $connection->timeout = 60;  // 60 秒
-};
+Kode::serve('tcp://0.0.0.0:9000', ['workers' => 4])
+    ->on('connect', function ($connection) {
+        $connection->setContext('timeout', Timer::add(60, fn() => $connection->close('timeout')));
+    })
+    ->on('message', function ($connection, $data) {
+        Timer::del($connection->getContext('timeout'));
+        $connection->send("收到: {$data}");
+    })
+    ->start();
 ```
 
 ## 故障排查

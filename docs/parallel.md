@@ -242,6 +242,6 @@ try {
 
 ## 8. 相关文档
 
-- [协程系统（Fiber）](fiber.md) —— kode/fibers 的协程用法
+- [运行时兼容层（Runtime）](runtime.md) —— 一套 API 在 Swoole / Workerman 间可移植的架构与事件模型
 - [安装指南](install.md) —— 环境要求与依赖
 - [生产部署](deployment.md) —— 含「启用多线程并行（ZTS）」章节

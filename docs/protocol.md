@@ -1,5 +1,22 @@
 # 协议系统
 
+## 协议与运行时支持
+
+`Kode::serve()` 通过地址 scheme 自动选择协议。各运行时支持的协议略有差异：
+
+| 协议 | 地址格式 | Swoole | Workerman |
+|------|----------|:------:|:---------:|
+| HTTP | `http://0.0.0.0:8080` | ✅ | ✅ |
+| WebSocket | `websocket://0.0.0.0:8081` | ✅ | ✅ |
+| TCP | `tcp://0.0.0.0:9000` | ✅ | ✅ |
+| Text | `text://0.0.0.0:9001` | ✅ | ✅ |
+| 自定义长度前缀 | `frame://0.0.0.0:9002` | ✅ | ✅ |
+| Unix Socket | `unix:///tmp/app.sock` | ✅ | ✅ |
+| SSL | `ssl://0.0.0.0:443` | ✅ | ✅* |
+| UDP | `udp://0.0.0.0:9002` | ✅ | ✅ |
+
+> \* SSL 需要 `ext-openssl`。UDP 仅 Swoole / Workerman 运行时支持（本包不自带服务器，运行时二者必有其一）。
+
 ## 内置协议
 
 ### HTTP 协议
@@ -7,10 +24,10 @@
 ```php
 use Kode\Process\Kode;
 
-Kode::worker('http://0.0.0.0:8080', 4)
-    ->onMessage(function ($conn, $request) {
+Kode::serve('http://0.0.0.0:8080', ['workers' => 4])
+    ->on('message', function ($conn, $request) {
         $method = $request['method'];
-        $path = $request['path'];
+        $path   = $request['path'];
         $conn->send(json_encode(['code' => 0, 'path' => $path]));
     })
     ->start();
@@ -21,8 +38,8 @@ Kode::worker('http://0.0.0.0:8080', 4)
 ```php
 use Kode\Process\Kode;
 
-Kode::worker('websocket://0.0.0.0:8081', 4)
-    ->onMessage(fn($conn, $data) => $conn->send($data))
+Kode::serve('websocket://0.0.0.0:8081', ['workers' => 4])
+    ->on('message', fn($conn, $data) => $conn->send($data))
     ->start();
 ```
 
@@ -31,8 +48,8 @@ Kode::worker('websocket://0.0.0.0:8081', 4)
 ```php
 use Kode\Process\Kode;
 
-Kode::worker('text://0.0.0.0:9000', 4)
-    ->onMessage(fn($conn, $data) => $conn->send("收到: {$data}"))
+Kode::serve('text://0.0.0.0:9000', ['workers' => 4])
+    ->on('message', fn($conn, $data) => $conn->send("收到: {$data}"))
     ->start();
 ```
 
@@ -41,35 +58,38 @@ Kode::worker('text://0.0.0.0:9000', 4)
 ```php
 use Kode\Process\Kode;
 
-Kode::worker('tcp://0.0.0.0:9001', 4)
-    ->onMessage(fn($conn, $data) => $conn->send($data))
+Kode::serve('tcp://0.0.0.0:9001', ['workers' => 4])
+    ->on('message', fn($conn, $data) => $conn->send($data))
     ->start();
 ```
 
 ### UDP 协议
 
+> 仅 Swoole / Workerman 运行时支持（本包不自带服务器，运行时二者必有其一）。
+
 ```php
 use Kode\Process\Kode;
 
-Kode::worker('udp://0.0.0.0:9002', 1)
-    ->onMessage(fn($conn, $data) => $conn->send("UDP: {$data}"))
+Kode::serve('udp://0.0.0.0:9002', ['workers' => 1], 'swoole')
+    ->on('message', fn($conn, $data) => $conn->send("UDP: {$data}"))
     ->start();
 ```
 
 ### SSL 协议
 
+通过监听选项的 `ssl` 字段配置，需 `ext-openssl`：
+
 ```php
 use Kode\Process\Kode;
 
-Kode::app([
-    'worker_count' => 4,
-    'ssl' => [
+Kode::serve('ssl://0.0.0.0:443', [
+    'workers' => 4,
+    'ssl'     => [
         'local_cert' => '/path/to/cert.pem',
-        'local_pk' => '/path/to/key.pem',
-    ]
+        'local_pk'   => '/path/to/key.pem',
+    ],
 ])
-->listen('ssl://0.0.0.0:443')
-->onMessage(fn($conn, $data) => $conn->send('Secure response'))
+->on('message', fn($conn, $data) => $conn->send('Secure response'))
 ->start();
 ```
 
@@ -112,7 +132,7 @@ use Kode\Process\Protocol\ProtocolFactory;
 
 ProtocolFactory::register('json-nl', JsonNLProtocol::class);
 
-Kode::worker('json-nl://0.0.0.0:9000', 4)
-    ->onMessage(fn($conn, $data) => $conn->send($data))
+Kode::serve('json-nl://0.0.0.0:9000', ['workers' => 4])
+    ->on('message', fn($conn, $data) => $conn->send($data))
     ->start();
 ```

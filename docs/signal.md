@@ -54,89 +54,57 @@ kill -SIGHUP <pid>
 kill -SIGUSR1 <pid>
 ```
 
-## 在 Worker 中使用
+## 在服务中使用
 
-### 示例：优雅关闭
+> 运行时的 `SIGTERM` / `SIGINT` 已由 `Kode::serve()` 自动处理为**优雅停机**，
+> `SIGUSR1` 自动处理为**进程级平滑重载**。下面的示例展示如何在 worker 中注册
+> **自定义信号**（如状态打印、应用级缓存刷新），与运行时默认行为共存。
+
+### 示例：状态打印（SIGUSR2）
 
 ```php
 <?php
 require __DIR__ . '/vendor/autoload.php';
 
-use Kode\Process\Compat\Worker;
+use Kode\Process\Kode;
 use Kode\Process\Signal\SignalHandler;
 
-$worker = new Worker('tcp://0.0.0.0:8080');
-$worker->count = 4;
+Kode::serve('tcp://0.0.0.0:8080', ['workers' => 4])
+    ->on('workerStart', function (int $workerId) {
+        $handler = new SignalHandler();
 
-$worker->onWorkerStart = function ($worker) {
-    $handler = new SignalHandler();
-    
-    // 注册 SIGTERM 处理器
-    $handler->on(SIGTERM, function () use ($worker) {
-        echo "Worker {$worker->id} 收到终止信号\n";
-        
-        // 停止接受新连接
-        $worker->pauseAccept();
-        
-        // 等待现有连接处理完成
-        $timeout = 30;
-        $start = time();
-        
-        while (count($worker->connections) > 0 && (time() - $start) < $timeout) {
-            sleep(1);
-        }
-        
-        // 关闭所有连接
-        foreach ($worker->connections as $conn) {
-            $conn->close();
-        }
-        
-        // 退出进程
-        exit(0);
-    });
-};
-
-$worker->onMessage = function ($connection, $data) {
-    $connection->send('Hello');
-};
-
-Worker::runAll();
+        // SIGUSR2：打印当前 worker 状态
+        $handler->on(SIGUSR2, function () use ($workerId) {
+            echo "Worker {$workerId} 内存: " . memory_get_usage(true) / 1024 / 1024 . " MB\n";
+        });
+    })
+    ->on('message', fn($conn, $data) => $conn->send('Hello'))
+    ->start();
 ```
 
-### 示例：热重载
+### 示例：应用级缓存刷新（SIGUSR1）
 
 ```php
 <?php
 require __DIR__ . '/vendor/autoload.php';
 
-use Kode\Process\Compat\Worker;
+use Kode\Process\Kode;
 use Kode\Process\Signal\SignalHandler;
 
-$worker = new Worker('http://0.0.0.0:8080');
+Kode::serve('http://0.0.0.0:8080', ['workers' => 4])
+    ->on('workerStart', function (int $workerId) {
+        $handler = new SignalHandler();
 
-$worker->onWorkerStart = function ($worker) {
-    $handler = new SignalHandler();
-    
-    // SIGUSR1 触发代码重载
-    $handler->on(SIGUSR1, function () use ($worker) {
-        echo "Worker {$worker->id} 重载代码\n";
-        
-        // 清除 OPcache
-        if (function_exists('opcache_reset')) {
-            opcache_reset();
-        }
-        
-        // 重载业务代码
-        $files = glob(__DIR__ . '/src/*.php');
-        foreach ($files as $file) {
-            require_once $file;
-        }
-        
-        echo "代码重载完成\n";
-    });
-};
-
-Worker::runAll();
+        // 进程级平滑重载由运行时完成；此处做应用级缓存刷新
+        $handler->on(SIGUSR1, function () use ($workerId) {
+            echo "Worker {$workerId} 刷新应用缓存\n";
+            if (function_exists('opcache_reset')) {
+                opcache_reset();
+            }
+        });
+    })
+    ->on('message', fn($conn, $req) => $conn->send('Hello'))
+    ->start();
 ```
 
 ## 信号分发器
@@ -176,15 +144,17 @@ kode info             # 版本信息
 
 ## 底层信号说明
 
-`kode` 命令底层使用信号实现：
+`kode` 命令底层使用信号实现（Workerman / Swoole 运行时均遵循此行为）：
 
 | 信号 | 说明 | 操作 |
 |------|------|------|
 | SIGTERM | 优雅停止 | `kill -TERM $PID` |
 | SIGINT | 优雅停止 | `Ctrl+C` |
-| SIGHUP | 平滑重载 | `kill -HUP $PID` |
-| SIGUSR1 | 平滑重载 | `kill -USR1 $PID` |
-| SIGUSR2 | 打印状态 | `kill -USR2 $PID` |
+| SIGQUIT | 停机 | `kill -QUIT $PID` |
+| SIGUSR1 | 平滑重载（不中断连接） | `kill -USR1 $PID` |
+
+> Swoole / Workerman 运行时可能使用各自框架定义的额外信号；自定义信号（如 SIGUSR2）可
+> 通过 `SignalHandler` 注册做应用级钩子。
 
 ## 注意事项
 
@@ -199,69 +169,47 @@ kode info             # 版本信息
 <?php
 require __DIR__ . '/vendor/autoload.php';
 
-use Kode\Process\Compat\Worker;
+use Kode\Process\Kode;
 use Kode\Process\Signal\SignalHandler;
-use Kode\Process\Compat\Timer;
-
-$worker = new Worker('tcp://0.0.0.0:9000');
-$worker->count = 4;
-$worker->name = 'SignalDemo';
+use Kode\Process\Timer;
 
 // 全局状态
 $isShuttingDown = false;
 
-$worker->onWorkerStart = function ($worker) use (&$isShuttingDown) {
-    $handler = new SignalHandler();
-    
-    // SIGTERM: 优雅关闭
-    $handler->on(SIGTERM, function () use ($worker, &$isShuttingDown) {
-        echo "Worker {$worker->id} 开始优雅关闭\n";
-        $isShuttingDown = true;
-        
-        // 通知所有连接
-        foreach ($worker->connections as $conn) {
-            $conn->send(json_encode(['type' => 'shutdown', 'message' => '服务器即将关闭']));
+Kode::serve('tcp://0.0.0.0:9000', ['workers' => 4, 'name' => 'SignalDemo'])
+    ->on('workerStart', function (int $workerId) use (&$isShuttingDown) {
+        $handler = new SignalHandler();
+
+        // SIGUSR1：应用级配置重载（进程级平滑重载由运行时自动完成）
+        $handler->on(SIGUSR1, function () use ($workerId) {
+            echo "Worker {$workerId} 重载配置\n";
+        });
+
+        // SIGUSR2：打印状态
+        $handler->on(SIGUSR2, function () use ($workerId) {
+            echo "Worker {$workerId} 内存: " . memory_get_usage(true) / 1024 / 1024 . " MB\n";
+        });
+
+        // 定时检查关闭状态（SIGTERM/SIGINT 已由运行时优雅停机）
+        Timer::add(1, function () use ($workerId, &$isShuttingDown) {
+            if ($isShuttingDown) {
+                echo "Worker {$workerId} 正在关闭\n";
+            }
+        });
+    })
+    ->on('connect', function ($connection) use (&$isShuttingDown) {
+        if ($isShuttingDown) {
+            $connection->send(json_encode(['type' => 'error', 'message' => '服务器正在关闭']));
+            $connection->close();
         }
-        
-        // 30秒后强制退出
-        Timer::add(30, function () use ($worker) {
-            echo "Worker {$worker->id} 强制退出\n";
-            exit(0);
-        }, [], false);
-    });
-    
-    // SIGUSR1: 重载配置
-    $handler->on(SIGUSR1, function () use ($worker) {
-        echo "Worker {$worker->id} 重载配置\n";
-        // 重载配置逻辑
-    });
-    
-    // SIGUSR2: 打印状态
-    $handler->on(SIGUSR2, function () use ($worker) {
-        echo "Worker {$worker->id} 状态:\n";
-        echo "  连接数: " . count($worker->connections) . "\n";
-        echo "  内存: " . memory_get_usage(true) / 1024 / 1024 . " MB\n";
-    });
-    
-    // 定时检查关闭状态
-    Timer::add(1, function () use ($worker, &$isShuttingDown) {
-        if ($isShuttingDown && count($worker->connections) === 0) {
-            echo "Worker {$worker->id} 所有连接已关闭，退出\n";
-            exit(0);
+    })
+    ->on('message', function ($connection, $data) use (&$isShuttingDown) {
+        if ($isShuttingDown) {
+            $connection->send(json_encode(['type' => 'error', 'message' => '服务器正在关闭']));
+            $connection->close();
+            return;
         }
-    });
-};
-
-$worker->onConnect = function ($connection) use (&$isShuttingDown) {
-    if ($isShuttingDown) {
-        $connection->send(json_encode(['type' => 'error', 'message' => '服务器正在关闭']));
-        $connection->close();
-    }
-};
-
-$worker->onMessage = function ($connection, $data) {
-    $connection->send("收到: {$data}");
-};
-
-Worker::runAll();
+        $connection->send("收到: {$data}");
+    })
+    ->start();
 ```

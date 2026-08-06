@@ -196,15 +196,15 @@ use Kode\Process\GlobalData\Client;
 
 $globalData = null;
 
-Kode::worker('websocket://0.0.0.0:8080', 4)
-    ->onWorkerStart(function () use (&$globalData) {
+Kode::serve('websocket://0.0.0.0:8080', ['workers' => 4])
+    ->on('workerStart', function (int $workerId) use (&$globalData) {
         $globalData = new Client('127.0.0.1:2207');
         $globalData->online_count = 0;
     })
-    ->onConnect(function ($conn) use (&$globalData) {
+    ->on('connect', function ($conn) use (&$globalData) {
         $globalData->increment('online_count', 1);
     })
-    ->onClose(function ($conn) use (&$globalData) {
+    ->on('close', function ($conn) use (&$globalData) {
         $globalData->decrement('online_count', 1);
     })
     ->start();

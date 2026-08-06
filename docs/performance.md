@@ -4,11 +4,15 @@
 
 ## 压测工具
 
-### 内置压测
+### 内置五维硬门槛压测
+
+本包提供可复现的压测框架，用于对比候选运行时与 Workerman / Swoole：
 
 ```bash
-php examples/18-benchmark-compare.php
+php benchmarks/gate/run-gate.php 3 8   # 3 轮，8 个压测连接并发
 ```
+
+判定标准与实测结论见 [五维硬门槛判定报告](gate-report.md)。
 
 ### ab (Apache Benchmark)
 
@@ -35,79 +39,79 @@ wrk -t 4 -c 100 -d 30s http://localhost:8080/
 ### 1. 进程数配置
 
 ```php
+use Kode\Process\Kode;
+
 // 根据 CPU 核心数设置
-$worker->count = cpu_get_count();
+$workers = function_exists('swoole_cpu_num')
+    ? swoole_cpu_num()
+    : ((int) shell_exec('nproc') ?: 4);
 
-// 或手动设置
-$worker->count = 4;
-
-// 获取 CPU 核心数
-function cpu_get_count(): int {
-    if (function_exists('swoole_cpu_num')) {
-        return swoole_cpu_num();
-    }
-    return (int) shell_exec('nproc') ?: 4;
-}
+// 通过 listen 选项的 workers 控制进程数
+Kode::serve('http://0.0.0.0:8080', ['workers' => $workers])
+    ->on('message', fn($conn, $req) => $conn->send('Hello'))
+    ->start();
 ```
 
 ### 2. 内存优化
 
 ```php
+use Kode\Process\Kode;
+use Kode\Process\Timer;
+
 // 设置内存限制
 ini_set('memory_limit', '512M');
 
-// 定期重启防止内存泄漏
-$worker->maxRequests = 10000;
-
-// 在 Worker 中检查内存
-$worker->onWorkerStart = function ($worker) {
-    Timer::add(60, function () use ($worker) {
-        $memory = memory_get_usage(true) / 1024 / 1024;
-        if ($memory > 256) {
-            echo "Worker {$worker->id} 内存过高: {$memory}MB\n";
-            // 可以选择重启
-        }
-    });
-};
+// 定期重启防止内存泄漏：maxRequest 选项让 worker 处理若干请求后自动重启
+Kode::serve('http://0.0.0.0:8080', ['workers' => 4, 'maxRequest' => 10000])
+    ->on('workerStart', function (int $workerId) {
+        Timer::add(60, function () use ($workerId) {
+            $memory = memory_get_usage(true) / 1024 / 1024;
+            if ($memory > 256) {
+                echo "Worker {$workerId} 内存过高: {$memory}MB\n";
+            }
+        });
+    })
+    ->on('message', fn($conn, $req) => $conn->send('Hello'))
+    ->start();
 ```
 
 ### 3. 连接优化
 
 ```php
-// 设置最大连接数
-$worker->maxConnections = 10000;
+use Kode\Process\Kode;
+use Kode\Process\Timer;
 
-// 设置连接超时
-$worker->onConnect = function ($connection) {
-    // 60 秒无活动则关闭
-    $connection->timeoutTimer = Timer::add(60, function () use ($connection) {
-        $connection->close('timeout');
-    });
-};
-
-$worker->onMessage = function ($connection, $data) {
-    // 重置超时
-    Timer::del($connection->timeoutTimer);
-    // ... 处理消息
-};
+Kode::serve('tcp://0.0.0.0:9000', ['workers' => 4])
+    ->on('connect', function ($connection) {
+        // 60 秒无活动则关闭
+        $connection->setContext('timeoutTimer', Timer::add(60, fn() => $connection->close('timeout')));
+    })
+    ->on('message', function ($connection, $data) {
+        // 重置超时
+        Timer::del($connection->getContext('timeoutTimer'));
+        // ... 处理消息
+    })
+    ->start();
 ```
 
 ### 4. IO 优化
 
 ```php
 // 使用协程处理 IO
-use Kode\Fibers\Fibers;
+use Kode\Process\Kode;
 
-$worker->onMessage = function ($connection, $data) {
-    Fibers::go(function () use ($connection, $data) {
-        // 异步处理
-        $result = asyncOperation($data);
-        $connection->send($result);
-    });
-};
+Kode::serve('http://0.0.0.0:8080', ['workers' => 4])
+    ->on('message', function ($connection, $data) {
+        Kode::go(function () use ($connection, $data) {
+            // 异步处理
+            $result = asyncOperation($data);
+            $connection->send($result);
+        });
+    })
+    ->start();
 
 // 批量处理
-$results = Fibers::batch($items, function ($item) {
+$results = Kode::batch($items, function ($item) {
     return processItem($item);
 }, 10);  // 并发 10
 ```
@@ -221,39 +225,32 @@ echo $monitor->display();
 
 ## 压测数据参考
 
-### 测试环境
+> **重要**：端到端吞吐主要由「所选运行时 + 操作系统内核网络栈」决定，而非本包的应用代码。
+> 五维硬门槛实测显示，在 PHP 事件驱动服务器领域，Workerman 5 + ext-event 已把 PHP 层压缩到
+> 约 13%，余下 87% 是内核网络栈的固有成本——任何新实现（含全 C 的 Swoole）都撞在同一堵墙上。
+> 因此本包不承诺「比 Workerman 更快」，而是提供「一套 API 在 Swoole / Workerman 间可移植」的进程编排内核。
+> 具体实测数字与判定方法见 [五维硬门槛判定报告](gate-report.md)。
+
+### 测试环境（示例）
 - PHP 8.3
-- 4 核心 CPU
-- 8GB 内存
+- 4~11 核心 CPU
+- 8GB+ 内存
 
-### HTTP 服务
+### 可优化的方向
 
-| 指标 | 数值 |
+| 方向 | 说明 |
 |------|------|
-| QPS | 50,000+ |
-| 延迟 | < 1ms |
-| 内存/进程 | ~10MB |
-
-### WebSocket 服务
-
-| 指标 | 数值 |
-|------|------|
-| 连接数 | 100,000+ |
-| 消息/秒 | 100,000+ |
-| 内存/连接 | ~1KB |
-
-### Fiber 协程
-
-| 指标 | 数值 |
-|------|------|
-| 创建速度 | 139,000+/秒 |
-| 上下文切换 | 188,000+/秒 |
+| 运行时选择 | 装了 Swoole 优先用 Swoole（自动择优）；否则用 Workerman（纯 PHP，开箱即用），Linux 上装 `ext-event` 吞吐更高 |
+| 进程数 | 通常等于 CPU 核心数；IO 密集型可略高 |
+| 协议 | 二进制 / 长度前缀协议优于 JSON 文本 |
+| 协程 | IO 密集用 `Kode::go` / `Kode::batch` 提升并发 |
+| 系统 | OPcache + JIT + 文件描述符 / 内核参数调优 |
 
 ## 最佳实践
 
 1. **合理设置进程数** - 通常等于 CPU 核心数
 2. **避免阻塞操作** - 使用协程处理 IO
-3. **控制内存使用** - 定期重启 Worker
+3. **控制内存使用** - 通过 `maxRequest` 定期重启 Worker
 4. **监控性能指标** - 及时发现问题
 5. **优化数据库查询** - 使用连接池、缓存
 6. **使用 OPcache** - 生产环境必须开启

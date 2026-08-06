@@ -14,11 +14,11 @@ use Kode\Process\Exceptions\ProcessException;
  */
 final class Version
 {
-    public const int MAJOR = 3;
-    public const int MINOR = 5;
+    public const int MAJOR = 4;
+    public const int MINOR = 0;
     public const int PATCH = 0;
-    public const string VERSION = '3.5.0';
-    public const int VERSION_ID = 30500;
+    public const string VERSION = '4.0.0';
+    public const int VERSION_ID = 40000;
 
     /** 本库要求的最低 PHP 版本 */
     public const string MINIMUM_PHP_VERSION = '8.3.0';
@@ -29,13 +29,15 @@ final class Version
 
     /** 可选扩展及其用途 */
     public const array OPTIONAL_EXTENSIONS = [
+        'event' => 'Reactor 首选事件循环驱动（libevent）',
+        'ev' => 'Reactor 备选事件循环驱动（libev）',
+        'apcu' => 'SharedTable 零安装后端（优先于 sysvshm）',
+        'sysvshm' => 'SharedTable 零安装后端 / 共享内存 IPC',
         'sysvmsg' => 'System V 消息队列 IPC',
-        'sysvshm' => '共享内存 IPC',
         'sysvsem' => '信号量同步',
         'parallel' => '多线程并行处理（需要 ZTS 线程安全版 PHP + ext-parallel）',
-        'pthreads' => '多线程（仅 PHP < 8，已弃用，请改用 parallel）',
-        'swoole' => 'Swoole 协程进程管理',
-        'swow' => 'Swow 协程引擎',
+        'swoole' => 'Swoole 运行时适配器',
+        'openssl' => 'SSL/TLS 监听',
     ];
 
     /**
