@@ -143,7 +143,7 @@ if ($rt->supports(Capability::HotReload)) {
 | 能力 | Swoole | Workerman |
 |---|:-:|:-:|
 | `Coroutine` 原生协程 | ✅ | ❌ |
-| `TaskWorker` Task 进程 | ✅ | ❌ |
+| `TaskWorker` Task 工作进程 | ✅ | ❌ |
 | `AsyncIo` 异步文件/DNS | ✅ | ❌ |
 | `UdpServer` | ✅ | ✅ |
 | `SharedTable` | ✅ | ✅ |

@@ -146,9 +146,6 @@ root hard nofile 65535
 
 cd /var/www/kode-process
 
-# 启动 Channel 服务
-php channel-server.php start -d
-
 # 启动 GlobalData 服务
 php global-data-server.php start -d
 
@@ -170,7 +167,6 @@ cd /var/www/kode-process
 
 php http-server.php stop
 php websocket-server.php stop
-php channel-server.php stop
 php global-data-server.php stop
 
 echo "所有服务已停止"

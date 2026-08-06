@@ -4,7 +4,7 @@
 
 - **PHP**: >= 8.3
 - **扩展**: pcntl, posix, sockets
-- **可选扩展**: sysvmsg, sysvshm, sysvsem, pthreads, parallel, swoole
+- **可选扩展**: sysvmsg, sysvshm, sysvsem, parallel, swoole
 
 > v3.0 起最低要求 PHP 8.3；PHP 8.1 / 8.2 环境请使用 `^2.9`。
 

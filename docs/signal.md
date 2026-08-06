@@ -20,22 +20,23 @@
 ```php
 use Kode\Process\Signal\SignalHandler;
 
-$handler = new SignalHandler();
+// 推荐用单例：同一进程内共享已注册的信号监听器
+$handler = SignalHandler::getInstance();
 
 // 注册 SIGINT 处理器
-$handler->on(SIGINT, function () {
+$handler->register(SIGINT, function () {
     echo "收到 SIGINT 信号，准备退出\n";
     exit(0);
 });
 
 // 注册 SIGTERM 处理器
-$handler->on(SIGTERM, function () {
+$handler->register(SIGTERM, function () {
     echo "收到 SIGTERM 信号，优雅关闭\n";
     gracefulShutdown();
 });
 
 // 注册 SIGHUP 处理器（重载配置）
-$handler->on(SIGHUP, function () {
+$handler->register(SIGHUP, function () {
     echo "收到 SIGHUP 信号，重载配置\n";
     reloadConfig();
 });
@@ -71,10 +72,10 @@ use Kode\Process\Signal\SignalHandler;
 
 Kode::serve('tcp://0.0.0.0:8080', ['workers' => 4])
     ->on('workerStart', function (int $workerId) {
-        $handler = new SignalHandler();
+        $handler = SignalHandler::getInstance();
 
         // SIGUSR2：打印当前 worker 状态
-        $handler->on(SIGUSR2, function () use ($workerId) {
+        $handler->register(SIGUSR2, function () use ($workerId) {
             echo "Worker {$workerId} 内存: " . memory_get_usage(true) / 1024 / 1024 . " MB\n";
         });
     })
@@ -93,10 +94,10 @@ use Kode\Process\Signal\SignalHandler;
 
 Kode::serve('http://0.0.0.0:8080', ['workers' => 4])
     ->on('workerStart', function (int $workerId) {
-        $handler = new SignalHandler();
+        $handler = SignalHandler::getInstance();
 
         // 进程级平滑重载由运行时完成；此处做应用级缓存刷新
-        $handler->on(SIGUSR1, function () use ($workerId) {
+        $handler->register(SIGUSR1, function () use ($workerId) {
             echo "Worker {$workerId} 刷新应用缓存\n";
             if (function_exists('opcache_reset')) {
                 opcache_reset();
@@ -178,15 +179,15 @@ $isShuttingDown = false;
 
 Kode::serve('tcp://0.0.0.0:9000', ['workers' => 4, 'name' => 'SignalDemo'])
     ->on('workerStart', function (int $workerId) use (&$isShuttingDown) {
-        $handler = new SignalHandler();
+        $handler = SignalHandler::getInstance();
 
         // SIGUSR1：应用级配置重载（进程级平滑重载由运行时自动完成）
-        $handler->on(SIGUSR1, function () use ($workerId) {
+        $handler->register(SIGUSR1, function () use ($workerId) {
             echo "Worker {$workerId} 重载配置\n";
         });
 
         // SIGUSR2：打印状态
-        $handler->on(SIGUSR2, function () use ($workerId) {
+        $handler->register(SIGUSR2, function () use ($workerId) {
             echo "Worker {$workerId} 内存: " . memory_get_usage(true) / 1024 / 1024 . " MB\n";
         });
 

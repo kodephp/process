@@ -26,7 +26,7 @@ Kode Process 是一个「进程编排内核 + 运行时兼容层」：你只写�
 | 特性 | 说明 |
 |------|------|
 | 🔌 **一套 API，两种运行时** | Swoole / Workerman 自动择优，应用代码无需改动 |
-| 🧱 **进程编排内核** | 复用宿主的 pre-fork 模型、监督重启、平滑重载、优雅停机、信号管理 |
+| 🧱 **进程编排内核** | 复用宿主的 master-worker 模型、监督重启、平滑重载、优雅停机、信号管理 |
 | 🔁 **统一事件循环** | `Kode::loop()` 基于 `ext-event` / `ext-ev` 加速，`stream_select` 零扩展兜底 |
 | 🌐 **多协议** | HTTP、WebSocket、TCP、Text、Unix Socket、SSL（UDP 取决于宿主运行时） |
 | 🗄️ **共享数据（零安装兜底）** | 同主机多进程共享表，apcu → sysvshm 自动择优；也可复用 Swoole/Workerman 表 |
@@ -134,7 +134,7 @@ if ($rt->supports(\Kode\Process\Runtime\Capability::HotReload)) {
 }
 ```
 
-能力枚举见 `Kode\Process\Runtime\Capability`：协程、共享表、Task 进程、UDP、Unix Socket、
+能力枚举见 `Kode\Process\Runtime\Capability`：协程、共享表、Task 工作进程、UDP、Unix Socket、
 SSL、平滑重载、SO_REUSEPORT、WebSocket、定时器、异步 I/O。
 
 ## 运行时择优与自检
@@ -274,21 +274,18 @@ kode info              # 版本信息
 
 ## 文档
 
+- [安装](docs/install.md)
+- [快速开始](docs/quick-start.md)
 - [运行时兼容层（架构与 API）](docs/runtime.md)
 - [事件循环（Reactor）](docs/reactor.md)
-- [快速开始](docs/quick-start.md)
-- [入门示例](docs/getting-started/simple-example.md)
-- [特性一览](docs/getting-started/feature.md)
 - [协议系统](docs/protocol.md)
 - [共享数据](docs/global-data.md)
 - [并行（多线程）](docs/parallel.md)
 - [定时器](docs/timer.md)
 - [队列系统](docs/queue.md)
 - [信号管理](docs/signal.md)
-- [性能压测](docs/performance.md)
-- [五维硬门槛判定报告](docs/gate-report.md)
 - [生产部署](docs/deployment.md)
-- [安装](docs/install.md)
+- [五维硬门槛判定报告](docs/gate-report.md)
 
 ## 项目结构
 
@@ -317,7 +314,7 @@ src/
 ├── Parallel/                 # 多线程并行（ZTS + ext-parallel）
 ├── Protocol/                 # 协议编解码
 ├── Signal/                   # 信号管理
-└── ...                       # 进程管理、IPC、任务、监控等编排内核
+└── ...                       # 进程管理、IPC、监控等编排内核
 ```
 
 ## 测试
