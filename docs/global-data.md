@@ -2,25 +2,38 @@
 
 本库提供**两套独立**的跨进程数据共享能力：
 
-1. **本地多进程共享表（`SharedTable`）** —— 同主机、fork 出来的多进程之间共享计数/配置/状态，**零安装**即可用（已装 Swoole/APCu/旧版 Workerman 时自动启用对应高性能后端）。这是绝大多数场景的首选。
+1. **本地多进程共享表（`SharedTable`）** —— 同主机、fork 出来的多进程之间共享计数/配置/状态，**零安装、零依赖**即可用（只依赖 PHP 内置的 System V 共享内存或常见 APCu 扩展）。这是「不引入 Swoole / Workerman 时」的兜底方案。
 2. **网络 GlobalData（`Server` + `Client`）** —— 跨**多台主机**共享数据，见文末「网络模型」一节。
 
-> **命名说明**：本库既提供了 `Kode\Process\GlobalData\GlobalData` 门面（向后兼容、同时暴露本地表与网络客户端），也单独提供了 `Kode\Process\SharedTable` 门面——**只负责本地多进程共享表、不依赖网络**。如果你只想要「同主机的多进程共享数据」，直接用 `SharedTable` 即可，不必经过 `GlobalData`。
+> **关于命名**：「GlobalData」这个**概念与名称来自 Workerman 的 GlobalData 组件**。本库的网络版 `Server` / `Client` 是同一思路的兼容实现（独立进程 + TCP，可跨主机）；如果你只用本地多进程共享，直接用 `SharedTable` 即可，不必经过 `GlobalData` 门面。
 
 ---
 
 # 一、本地多进程共享表（`SharedTable`）
 
-`SharedTable` 对外提供**一套语义**（`TableInterface`），内部按「已装什么用什么」自动挑选最快后端。
+`SharedTable` 对外提供**一套语义**（`TableInterface`），内部按「零安装优先」择优。
 
-| 后端 | 依赖 | 何时被 `auto()` 选中 | 特点 |
-|------|------|---------------------|------|
-| `swoole` | `ext-swoole` | 首选（已装 swoole 时） | 性能最高；**必须在 fork 之前创建** |
-| `apcu`   | `ext-apcu`（CLI 需 `apc.enable_cli=1`） | 次选 | 运行期任意时刻可创建，适合 FPM / 动态拉起的 worker |
-| `workerman` | `Workerman\Table`（仅旧版 Workerman v3 + ext-swoole） | 仅当该类存在 | `Workerman\Table` ≡ `Swoole\Table` 子类，表现与 Swoole 持平 |
-| `sysvshm` | `ext-sysvshm` + `ext-sysvsem`（PHP 内置） | 兜底 | **零安装**，开箱即用，跨进程语义完整 |
+## 本库定位：Swoole / Workerman 之外的「第三选择」
 
-设计原则：**零安装优先**。本库从不要求你安装 Swoole / APCu / Workerman，只在它们恰好存在时顺带用上；否则一律走 PHP 内置 System V 共享内存。
+Swoole、Workerman 运行多年、生态成熟稳定。**若你的应用已经基于它们，应优先使用它们自带的共享表**（`Swoole\Table` / `Workerman\Table`）——不必引入本库的维护负担。本库内置共享表的真正价值，是**在你不打算引入 Swoole / Workerman 时**提供一套**零安装、零依赖**的兜底：
+
+| 后端 | 依赖 | 角色 | 特点 |
+|------|------|------|------|
+| `apcu` | `ext-apcu`（CLI 需 `apc.enable_cli=1`） | 零安装兜底之一 | 运行期任意时刻可创建，适合 FPM / 动态拉起的 worker |
+| `sysvshm` | `ext-sysvshm` + `ext-sysvsem`（PHP 内置） | 零安装兜底之一 | **零安装**，开箱即用，跨进程语义完整 |
+
+`SharedTable::auto()` 默认只在这两类零安装后端间择优。
+
+## 与 Swoole / Workerman 的兼容
+
+当应用**已经**跑在 Swoole / Workerman 之上，可显式调用 `make('swoole')` / `make('workerman')`，让同一套 `TableInterface` 语义直接**复用它们的共享表**，做到「不引入第二个依赖」的兼容共存：
+
+| 后端 | 依赖 | 角色 | 特点 |
+|------|------|------|------|
+| `swoole` | `ext-swoole` | 兼容适配器（可选） | 性能最高；**必须在 fork 之前创建** |
+| `workerman` | `Workerman\Table`（仅旧版 Workerman v3 + ext-swoole） | 兼容适配器（可选） | `Workerman\Table` ≡ `Swoole\Table` 子类，表现与 Swoole 持平 |
+
+设计原则：**零安装优先**。本库从不要求你安装 Swoole / APCu / Workerman，只在它们恰好存在时通过 `make()` 顺带兼容；否则一律走 PHP 内置 System V 共享内存。
 
 > `GlobalData` 门面（`Kode\Process\GlobalData\GlobalData`）的本地表方法**全部委托给 `SharedTable`**，二者语义完全一致；`GlobalData` 额外暴露 `client()` 用于跨主机网络共享。下文以 `SharedTable` 为例，`GlobalData::xxx()` 同样可用。
 
@@ -29,15 +42,16 @@
 ```php
 use Kode\Process\SharedTable;
 
-// 自动挑选当前环境可用的最快后端（swoole → apcu → workerman → sysvshm）
+// 自动挑选当前环境可用的零安装后端（apcu → sysvshm）
 $table = SharedTable::auto();
 
-// 或显式指定
+// 或显式指定；运行在 Swoole / Workerman 之上时复用其共享表（兼容适配器）
 $table = SharedTable::make(SharedTable::BACKEND_SHM, key: 0x4B4F4445, size: 4 * 1024 * 1024);
+$table = SharedTable::make(SharedTable::BACKEND_SWOOLE); // 仅当应用已用 swoole 时
 
 // 自检当前可用后端
-SharedTable::available();   // 例如 ['swoole', 'sysvshm']
-SharedTable::preferred();   // 例如 'swoole'
+SharedTable::available();   // 例如 ['sysvshm', 'swoole']（零安装兜底在前）
+SharedTable::preferred();   // 例如 'sysvshm'
 SharedTable::supports(SharedTable::BACKEND_APCU); // bool
 SharedTable::diagnose();    // 各后端可用性明细
 ```
@@ -279,7 +293,7 @@ $data = $client->getMulti(['k1', 'k2']);
 
 # 三、注意事项
 
-1. **本地共享表**：原子操作（`increment` / `cas`）跨进程安全；fork 场景下 Swoole/共享内存表必须在 fork 前由父进程创建，子进程继承其内存。macOS 的 System V 共享内存总量很小（约 4MB），生产部署建议在 Linux 上运行，或安装 Swoole/APCu 启用更大容量的后端。
+1. **选型建议**：若应用已经基于 Swoole / Workerman，优先用它们自带的共享表（`Swoole\Table` / `Workerman\Table`），成熟稳定、无需额外维护；本库本地表是「不引入 Swoole / Workerman 时」的零安装兜底。**本地共享表**的原子操作（`increment` / `cas`）跨进程安全；fork 场景下 Swoole/共享内存表必须在 fork 前由父进程创建，子进程继承其内存。macOS 的 System V 共享内存总量很小（约 4MB），生产部署建议在 Linux 上运行。
 2. **网络延迟** - 网络模型每次操作都有网络开销，避免频繁调用。
 3. **数据大小** - 不要存储过大的数据，影响性能。
 4. **连接管理** - 网络模型在 `onWorkerStart` 中创建连接。

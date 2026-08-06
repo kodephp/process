@@ -16,13 +16,13 @@ final class VersionTest extends TestCase
 
     public function testVersionId(): void
     {
-        $this->assertSame(30400, Version::getId());
+        $this->assertSame(30500, Version::getId());
     }
 
     public function testVersionComponents(): void
     {
         $this->assertSame(3, Version::getMajor());
-        $this->assertSame(4, Version::getMinor());
+        $this->assertSame(5, Version::getMinor());
         $this->assertGreaterThanOrEqual(0, Version::getPatch());
     }
 
@@ -108,8 +108,8 @@ final class VersionTest extends TestCase
     {
         $info = Version::getInfo();
 
-        $this->assertSame('3.4.0', $info['version']);
-        $this->assertSame(30400, $info['version_id']);
+        $this->assertSame('3.5.0', $info['version']);
+        $this->assertSame(30500, $info['version_id']);
         $this->assertSame('8.3.0', $info['minimum_php']);
         $this->assertTrue($info['php_supported']);
         $this->assertIsArray($info['features']);
@@ -137,14 +137,14 @@ final class VersionTest extends TestCase
 
     public function testVersionComparison(): void
     {
-        $this->assertTrue(Version::isEqualTo('3.4.0'));
+        $this->assertTrue(Version::isEqualTo('3.5.0'));
         $this->assertTrue(Version::isGreaterThan('2.9.0'));
-        $this->assertTrue(Version::isLessThan('3.5.0'));
+        $this->assertTrue(Version::isLessThan('3.6.0'));
         $this->assertFalse(Version::isGreaterThan('4.0.0'));
     }
 
     public function testToString(): void
     {
-        $this->assertSame('3.4.0', (string) new Version());
+        $this->assertSame('3.5.0', (string) new Version());
     }
 }

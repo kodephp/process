@@ -248,9 +248,11 @@ if (!$havePcntl) {
 // 4) 结论
 // ---------------------------------------------------------------------------
 echo "--- 结论 ---\n";
-echo "  * 多进程共享数据场景下，本库 SharedTable 自动择优（本机选中 " . SharedTable::preferred() . "），\n";
+echo "  * 多进程共享数据场景下，本库 SharedTable 自动择优（本机选中零安装兜底 " . SharedTable::preferred() . "），\n";
 echo "    其跨进程可见性与原子自增已通过 fork 子进程写、父进程校验验证（上方 OK）。\n";
-echo "  * 原生 Swoole\\Table 与本库 Swoole 后端对比，差异即本库适配层开销（单进程微基准可见）。\n";
+echo "  * 选型提醒：若应用已基于 Swoole / Workerman，优先用它们自带的共享表（成熟稳定）；\n";
+echo "    本库内置表是「不引入 Swoole / Workerman 时」的零安装兜底，并非与之竞争性能。\n";
+echo "  * 原生 Swoole\\Table 与本库 Swoole 兼容适配器对比，差异即本库适配层开销（单进程微基准可见）。\n";
 echo "  * 零安装兜底的 SysV shm 后端无需任何扩展即可跨进程工作，是「不装 Swoole 也能用」的关键。\n";
 echo "  * Workerman 现代版本无原生共享内存表；需要跨进程共享时走网络 GlobalData/Redis，\n";
 echo "    或（旧版 + ext-swoole）直接用 Swoole\\Table——因此 Swoole 数字可代表 Workerman 表。\n";

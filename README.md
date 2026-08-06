@@ -152,7 +152,7 @@ Client::publish('broadcast', [
 
 ### GlobalData 数据共享
 
-> 同主机的多进程共享优先使用**零安装的本地共享表**：`SharedTable::auto()`（或等价的 `GlobalData::auto()`）会自动挑选最快可用后端（已装 Swoole → APCu → Workerman → PHP 内置共享内存），详见 [docs/global-data.md](docs/global-data.md)。跨主机共享才使用下面的网络 `Client`。
+> **选型建议**：若应用已基于 Swoole / Workerman，优先用它们自带的共享表（`Swoole\Table` / `Workerman\Table`），成熟稳定、无需额外维护。本库 `SharedTable::auto()`（或等价的 `GlobalData::auto()`）是「不引入 Swoole / Workerman 时」的**零安装、零依赖兜底**（apcu → PHP 内置共享内存）；当应用已运行在 Swoole / Workerman 之上，可 `make('swoole')` / `make('workerman')` 复用其共享表做兼容共存。详见 [docs/global-data.md](docs/global-data.md)。「GlobalData」概念与名称来自 Workerman 的 GlobalData 组件，跨主机共享才使用下面的网络 `Client`。
 
 ```php
 use Kode\Process\GlobalData\Client;

@@ -4,7 +4,7 @@
     "type": "library",
     "keywords": ["php", "process", "thread", "worker", "ipc", "signal", "pool", "fiber", "coroutine", "multiprocessing", "queue"],
     "license": "Apache-2.0",
-    "version": "3.4.0",
+    "version": "3.5.0",
     "authors": [
         {
             "name": "KodePHP Team",
@@ -59,7 +59,7 @@
     "prefer-stable": true,
     "extra": {
         "branch-alias": {
-            "dev-main": "3.5-dev"
+            "dev-main": "3.6-dev"
         }
     }
 }
