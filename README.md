@@ -12,12 +12,12 @@ Kode Process 是一个「进程编排内核 + 运行时兼容层」：你只写�
 - 装了 **Swoole** → 用 Swoole 跑（最快，全 C 实现，自动择优时最高优先级）
 - 否则用 **Workerman** 跑（纯 PHP 依赖，已写入 `require`，**开箱即用**，Linux 上 `ext-event` 加速）
 
-> **为什么是「兼容层」而不是「又一个更快的网络框架」？**
-> 我们通过五维硬门槛（吞吐 ≥ Workerman×1.30、P99、稳定性、零错误、内存）实测了自研网络 I/O 内核，
-> 结论是相对 Workerman 吞吐比仅 **1.010×**（PHP 用户态只占全链路 ~13%，Amdahl 上限 +14.9%，30% 在数学上不可达）。
-> 重造 I/O 栈没有收益，因此本包**不自带服务器实现**，只做 Swoole / Workerman 的兼容适配层：
-> 应用面向 `RuntimeInterface` 编程，即可在两者间无缝切换，不引入相互竞争的 I/O 栈。
-> 详见 [docs/gate-report.md](docs/gate-report.md) 与 [docs/runtime.md](docs/runtime.md)。
+> **为什么当前默认是「兼容层」？**
+> 我们通过五维硬门槛实测过自研网络 I/O 内核：相对 Workerman 吞吐比仅 **1.010×**
+> （PHP 用户态只占全链路 ~13%，Amdahl 上限 +14.9%，原定 30% 门槛在数学上不可达，已撤销）。
+> 因此本包**默认不内置服务器实现**，只做 Swoole / Workerman 的兼容适配层：应用面向 `RuntimeInterface` 编程，
+> 即可在两者间无缝切换。自研内核在「兼容 Workerman / Swoole 多进程 + 功能更广更健壮」前提下仍是**可选方向**，
+> 可在现有框架内作为可插拔的第三种 `Runtime` 实现接入。详见 [docs/gate-report.md](docs/gate-report.md) 与 [docs/runtime.md](docs/runtime.md)。
 
 > **最低要求 PHP 8.3**。若仍在 PHP 8.1 / 8.2 上运行，请使用旧版 `^2.9`。
 
