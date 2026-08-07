@@ -1,6 +1,6 @@
 # 运行时兼容层（Runtime）
 
-> 一套 API，两种实现：Swoole / Workerman。
+> 一套 API，三种实现：Swoole / Workerman / Native（自研，纯 PHP 零扩展）。
 
 ## 为什么是"兼容层"而不是"自研内核"
 
@@ -38,7 +38,10 @@ Kode::serve('http://0.0.0.0:8080', ['workers' => 8])
     ->start();
 ```
 
-`Kode::serve()` 会自动择优：**swoole(100) → workerman(90)**。
+`Kode::serve()` 会自动择优：**swoole(100) → workerman(90) → native(80)**。
+
+> Native 优先级最低，仅在显式指定 `Kode::serve($addr, $opts, 'native')` 时选用。
+> 它不依赖任何 PHP 扩展，但吞吐贴近 Workerman（不追求超越，详见 gate-report.md 的 Amdahl 上限分析）。
 
 显式指定运行时：
 
@@ -69,15 +72,18 @@ $rt->isRunning(): bool
 
 ### 地址格式
 
-| 前缀 | 说明 | Swoole | Workerman |
-|---|---|:-:|:-:|
-| `tcp://host:port` | 裸 TCP，不分包 | ✅ | ✅ |
-| `http://host:port` | HTTP/1.1 | ✅ | ✅ |
-| `websocket://` / `ws://` | WebSocket | ✅ | ✅ |
-| `text://host:port` | 文本 + 换行分包 | ❌ | ✅ |
-| `frame://host:port` | 长度前缀分包 | ❌ | ✅ |
-| `udp://host:port` | UDP | ✅ | ✅ |
-| `unix:///path.sock` | Unix Domain Socket | ✅ | ✅ |
+| 前缀 | 说明 | Swoole | Workerman | Native |
+|---|---|:-:|:-:|:-:|
+| `tcp://host:port` | 裸 TCP，不分包 | ✅ | ✅ | ✅ |
+| `http://host:port` | HTTP/1.1 | ✅ | ✅ | ✅ |
+| `websocket://` / `ws://` | WebSocket | ✅ | ✅ | ✅ |
+| `text://host:port` | 文本 + 换行分包 | ❌ | ✅ | ✅ |
+| `frame://host:port` | 长度前缀分包 | ❌ | ✅ | ❌ |
+| `udp://host:port` | UDP | ✅ | ✅ | ❌ |
+| `unix:///path.sock` | Unix Domain Socket | ✅ | ✅ | ✅ |
+
+> Native 暂不支持 `udp` 透传与 `ssl`（v4.2.0）。`http` / `websocket` 在 Native 下跑在 TCP 之上，
+> 由本包 Protocol 系统在连接层解析。
 
 ### listen 选项
 
@@ -112,8 +118,8 @@ $rt->listen('http://0.0.0.0:8080', [
 
 ### 连接抽象
 
-两种运行时的"连接"原生表示各不相同（Swoole 是 `int $fd`，Workerman 是
-`TcpConnection`），`ConnectionInterface` 把它们收敛为同一套操作：
+三种运行时的"连接"原生表示各不相同（Swoole 是 `int $fd`，Workerman 是
+`TcpConnection`，Native 是流套接字资源），`ConnectionInterface` 把它们收敛为同一套操作：
 
 ```php
 $conn->id(): int
@@ -142,19 +148,33 @@ if ($rt->supports(Capability::HotReload)) {
 }
 ```
 
-| 能力 | Swoole | Workerman |
-|---|:-:|:-:|
-| `Coroutine` 原生协程 | ✅ | ❌ |
-| `TaskWorker` Task 工作进程 | ✅ | ❌ |
-| `AsyncIo` 异步文件/DNS | ✅ | ❌ |
-| `UdpServer` | ✅ | ✅ |
-| `SharedTable` | ✅ | ✅ |
-| `UnixSocket` | ✅ | ✅ |
-| `Ssl` | ✅ | ✅ |
-| `HotReload` | ✅ | ✅ |
-| `ReusePort` | ✅ | ✅ |
-| `WebSocket` | ✅ | ✅ |
-| `Timer` | ✅ | ✅ |
+| 能力 | Swoole | Workerman | Native |
+|---|:-:|:-:|:-:|
+| `Coroutine` 原生协程 | ✅ | ❌ | ❌ |
+| `TaskWorker` Task 工作进程 | ✅ | ❌ | ❌ |
+| `AsyncIo` 异步文件/DNS | ✅ | ❌ | ✅ |
+| `UdpServer` | ✅ | ✅ | ❌ |
+| `SharedTable` | ✅ | ✅ | ✅ |
+| `UnixSocket` | ✅ | ✅ | ✅ |
+| `Ssl` | ✅ | ✅ | ❌ |
+| `HotReload` | ✅ | ✅ | ✅ |
+| `ReusePort` | ✅ | ✅ | ✅ |
+| `WebSocket` | ✅ | ✅ | ✅ |
+| `Timer` | ✅ | ✅ | ✅ |
+
+### 自研 Native 运行时（第三种实现）
+
+`native` 是本包内置的**自研**运行时，纯 PHP 实现、零扩展依赖（仅需 `ext-pcntl` /
+`ext-posix`，CLI 环境自带），作为可插拔的第三种 `Runtime` 接入：
+
+- **master-worker（prefork）多进程**：`Kode::serve($addr, ['workers' => N], 'native')` 会由 master
+  进程 fork 出 N 个 worker，每个 worker 跑一个基于 `Reactor\SelectLoop` 的事件循环；
+- **信号与生命周期**：master 负责 `SIGTERM/SIGINT` 优雅停机、`SIGUSR1` 平滑重载（逐个回收并
+  refork worker）、`SIGCHLD` 监督重启；worker 关闭连接、触发 `workerStop`；
+- **协议系统复用**：HTTP / WebSocket / Text / TCP / Unix 全部走本包 `Protocol` 协议栈，
+  `message` 事件语义与 Swoole / Workerman 完全一致（HTTP 传响应数组、WebSocket 传帧数据等）；
+- **设计取舍**：吞吐目标为「持平 Workerman」（Amdahl 上限 +14.9%，30% 门槛已撤销），
+  差异化价值在零扩展、功能可控、与现有 `Kode` 门面无缝衔接。SSL / UDP 透传为后续增强项。
 
 ## 环境自检
 
@@ -171,6 +191,7 @@ print_r(Runtime::diagnose());
     'runtimes'       => [
         'swoole'    => ['available'=>true,  'version'=>'6.2.2', 'priority'=>100, 'preferred'=>true],
         'workerman' => ['available'=>true,  'version'=>'5.2.2', 'priority'=>90,  'preferred'=>false],
+        'native'    => ['available'=>true,  'version'=>'4.2.0', 'priority'=>80,  'preferred'=>false],
     ],
     'recommendation' => null,  // Linux 且未装 ext-event 时为安装建议字符串
 ]

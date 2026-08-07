@@ -158,3 +158,17 @@ PHP 协议层单请求成本 1,279 ns ≈ **1.28 μs**，而端到端单请求�
   为现实目标，不再追求虚假的高百分比。
 - **依赖边界（澄清）**：`kode/runtime`、`kode/fibers`、`kode/queue` 等均为**独立 Composer 包**，
   由调用方按需在 `composer.json` 启用，本包不内置、不强制引入，保持轻量。
+
+## 九、补充：Native 自研内核已落地为第三种 Runtime（2026-08-07）
+
+依据第八节的修订方向，`native` 自研运行时已在 **v4.2.0** 实现，作为可插拔的第三种 `Runtime`：
+
+- **实现形态**：纯 PHP 的 master-worker（prefork）多进程服务器，基于 `Reactor\SelectLoop` 事件循环
+  + `Protocol` 协议系统，**零扩展依赖**（仅需 `ext-pcntl` / `ext-posix`，CLI 自带）。
+- **兼容约束**：复用 `RuntimeInterface` 与 `Kode::serve()` 门面，HTTP/WebSocket/Text/TCP/Unix 的
+  `message` 语义与 Swoole / Workerman 完全一致；master 负责 `SIGTERM/SIGINT` 优雅停机、
+  `SIGUSR1` 平滑重载、`SIGCHLD` 监督重启。
+- **指标定位**：吞吐目标「持平 Workerman」（Amdahl 上限 +14.9%，30% 门槛已撤销）；差异化价值在
+  零扩展、功能可控、与现有门面无缝衔接。SSL / UDP 透传为后续增强项。
+- **启用方式**：`Kode::serve($addr, $opts, 'native')`。优先级最低（80），`Runtime::auto()` 仅在
+  Swoole / Workerman 均不可用时才回退到它（实际 Workerman 在 require 中恒可用，故默认不会自动选 Native）。

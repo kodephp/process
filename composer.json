@@ -4,7 +4,7 @@
     "type": "library",
     "keywords": ["php", "process", "runtime", "reactor", "event-loop", "worker", "ipc", "signal", "pool", "swoole", "workerman", "multiprocessing", "queue"],
     "license": "Apache-2.0",
-    "version": "4.1.0",
+    "version": "4.2.0",
     "authors": [
         {
             "name": "KodePHP Team",
@@ -59,7 +59,7 @@
     "prefer-stable": true,
     "extra": {
         "branch-alias": {
-            "dev-main": "4.1.x-dev"
+            "dev-main": "4.2.x-dev"
         }
     }
 }

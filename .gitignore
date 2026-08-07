@@ -27,3 +27,10 @@ composer.lock
 # 仅本地保留，不入库
 CHANGELOG.md
 CHANGELOG
+
+# 基准测试运行期产物
+/benchmarks/gate/vendor/
+/benchmarks/gate/*.log
+/benchmarks/gate/*.pid
+/benchmarks/gate/gate-*.txt
+/benchmarks/gate/gate-*.json

@@ -7,31 +7,36 @@ namespace Kode\Process;
 use InvalidArgumentException;
 use Kode\Process\Runtime\Driver\SwooleRuntime;
 use Kode\Process\Runtime\Driver\WorkermanRuntime;
+use Kode\Process\Runtime\Driver\NativeRuntime;
 use Kode\Process\Runtime\Exception\RuntimeNotSupportedException;
 use Kode\Process\Runtime\RuntimeInterface;
 use Kode\Process\Runtime\RuntimeType;
 
 /**
- * 运行时门面：一套 API，两种实现（Swoole / Workerman）。
+ * 运行时门面：一套 API，三种实现（Swoole / Workerman / Native 自研）。
  *
  * ```php
  * use Kode\Process\Runtime;
  *
- * $rt = Runtime::auto();                                  // 自动择优（swoole 优先，否则 workerman）
+ * $rt = Runtime::auto();                                  // 自动择优（swoole → workerman）
  * $rt->listen('http://0.0.0.0:8080', ['workers' => 8])
  *    ->on('message', fn($conn, $req) => $conn->send('Hello'))
  *    ->start();
+ *
+ * // 也可显式选用自研 Native 运行时（纯 PHP、零扩展依赖）
+ * $rt = Runtime::make('native');
  * ```
  *
- * 择优顺序：swoole(100) → workerman(90)。
+ * 择优顺序：swoole(100) → workerman(90) → native(80)。
  *
  * 设计立场（依据 docs/gate-report.md 的五维硬门槛判定）：
- * 自研网络 I/O 内核相对 Workerman 的吞吐比仅 1.010×（门槛 1.30×），PHP 用户态开销
- * 只占全链路 ~13%，Amdahl 上限 +14.9%——重造一套 I/O 栈没有收益。
- * 因此本包**不自带服务器实现**，只做 Swoole / Workerman 的兼容适配层：
- * 应用面向 {@see RuntimeInterface} 编程，即可在两者间无缝切换，
- * 不引入第二套相互竞争的 I/O 实现。Workerman 是纯 PHP 依赖（已写入 require），
- * 因此包开箱即用；需要更高吞吐时再装 ext-swoole 即可自动择优到它。
+ * 自研网络 I/O 内核相对 Workerman 的吞吐比仅 1.010×（原定 30% 门槛在数学上不可达，
+ * 已撤销；Amdahl 上限 +14.9%）。因此默认形态是 Swoole / Workerman 兼容适配层，
+ * 但本包同时内置一套**自研（Native）运行时**——纯 PHP 的 master-worker 多进程服务器，
+ * 基于 Reactor\SelectLoop 事件循环 + Protocol 协议系统，零扩展依赖，可作为可插拔的
+ * 第三种实现。应用面向 {@see RuntimeInterface} 编程，即可在三者间无缝切换。
+ * Workerman 是纯 PHP 依赖（已写入 require），因此包开箱即用；
+ * 需要更高吞吐时再装 ext-swoole 即可自动择优到它。
  */
 final class Runtime
 {
@@ -43,6 +48,7 @@ final class Runtime
     private const DRIVERS = [
         'swoole'    => SwooleRuntime::class,
         'workerman' => WorkermanRuntime::class,
+        'native'    => NativeRuntime::class,
     ];
 
     /** @var array<string, class-string<RuntimeInterface>> 运行期注册的自定义驱动 */

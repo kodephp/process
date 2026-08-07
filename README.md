@@ -1,6 +1,6 @@
 # Kode Process
 
-**PHP 8.3+ 多进程编排内核 · Swoole / Workerman 运行时兼容层**
+**PHP 8.3+ 多进程编排内核 · Swoole / Workerman / Native 运行时兼容层**
 
 [![PHP Version](https://img.shields.io/badge/PHP-8.3+-777BB4?style=flat-square&logo=php)](https://php.net)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green?style=flat-square)](LICENSE)
@@ -25,7 +25,7 @@ Kode Process 是一个「进程编排内核 + 运行时兼容层」：你只写�
 
 | 特性 | 说明 |
 |------|------|
-| 🔌 **一套 API，两种运行时** | Swoole / Workerman 自动择优，应用代码无需改动 |
+| 🔌 **一套 API，三种运行时** | Swoole / Workerman 自动择优，亦可显式选用自研 Native（纯 PHP、零扩展） |
 | 🧱 **进程编排内核** | 复用宿主的 master-worker 模型、监督重启、平滑重载、优雅停机、信号管理 |
 | 🔁 **统一事件循环** | `Kode::loop()` 基于 `ext-event` / `ext-ev` 加速，`stream_select` 零扩展兜底 |
 | 🌐 **多协议** | HTTP、WebSocket、TCP、Text、Unix Socket、SSL（UDP 取决于宿主运行时） |
@@ -89,8 +89,13 @@ Kode::serve('tcp://0.0.0.0:9000', ['workers' => 4])
 `Kode::serve()` 内部调用 `Runtime::auto()` 选择最优运行时。若想显式指定：
 
 ```php
-// 强制用某个运行时（swoole | workerman）
+// 强制用某个运行时（swoole | workerman | native）
 Kode::serve('http://0.0.0.0:8080', ['workers' => 8], 'swoole')
+    ->on('message', fn($conn) => $conn->send('Hello'))
+    ->start();
+
+// 显式选用自研 Native 运行时（纯 PHP、零扩展依赖、master-worker 多进程）
+Kode::serve('http://0.0.0.0:8080', ['workers' => 8], 'native')
     ->on('message', fn($conn) => $conn->send('Hello'))
     ->start();
 ```
@@ -142,8 +147,9 @@ SSL、平滑重载、SO_REUSEPORT、WebSocket、定时器、异步 I/O。
 ```php
 use Kode\Process\Runtime;
 
-$rt = Runtime::auto();                       // 自动择优（swoole → workerman）
+$rt = Runtime::auto();                       // 自动择优（swoole → workerman → native）
 $rt = Runtime::make('workerman');            // 显式指定
+$rt = Runtime::make('native');               // 自研运行时（纯 PHP 零扩展）
 $rt = Runtime::make(\Kode\Process\Runtime\RuntimeType::Swoole);
 
 Runtime::available();                        // 当前环境按权重降序的可用运行时
@@ -323,7 +329,7 @@ kode info              # 版本信息
 ```
 src/
 ├── Kode.php                  # 静态门面：一行起服务
-├── Runtime.php               # 运行时门面：一套 API 两种实现（Swoole / Workerman）
+├── Runtime.php               # 运行时门面：一套 API 三种实现（Swoole / Workerman / Native）
 ├── Version.php               # 版本信息
 ├── Timer.php                 # 定时器（顶层类）
 ├── Runtime/                  # 运行时兼容层
