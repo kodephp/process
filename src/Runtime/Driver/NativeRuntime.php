@@ -672,6 +672,21 @@ final class NativeRuntime extends AbstractRuntime
             $conn->setBuffer(substr($buf, $len));
 
             $message = $protoClass::decode($frame, $conn);
+
+            // WebSocket 控制帧由运行时自动处理，保持与 Swoole / Workerman 一致：
+            // 对端 ping → 自动回 pong；对端 pong → 静默忽略。
+            // 用户 on('message') 只收到应用消息（text / binary / close），无需自己处理保活。
+            if ($scheme === 'websocket' && is_array($message)) {
+                $type = $message['type'] ?? null;
+                if ($type === 'ping') {
+                    $conn->sendRaw(WebSocketProtocol::encodePong($message['data'] ?? ''));
+                    continue;
+                }
+                if ($type === 'pong') {
+                    continue;
+                }
+            }
+
             $this->fire('message', $conn, $message);
             $this->countRequest();
 

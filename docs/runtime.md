@@ -89,6 +89,8 @@ $rt->isRunning(): bool
 > Native 下 `http` / `websocket` / `text` / `frame` 均跑在 TCP 之上，
 > 由本包 `Protocol` 协议栈在连接层解析，`message` 事件语义与 Swoole / Workerman 一致。
 
+**WebSocket 控制帧自动处理**：three 运行时行为一致——对端 `ping` 由运行时**自动回 `pong`**，对端 `pong` **静默忽略**，用户 `on('message')` 只收到应用消息（`text` / `binary` / `close`），无需自行处理保活。该逻辑在 `NativeRuntime::handleClientRead` 内统一处理；Swoole / Workerman 由各自引擎层自动完成，因此切换运行时时业务代码零改动。
+
 ### listen 选项
 
 ```php

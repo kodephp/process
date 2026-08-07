@@ -206,4 +206,181 @@ PHP;
         file_put_contents($file, $code);
         return $file;
     }
+
+    /**
+     * WebSocket 自动 ping/pong：真实起 Native WS 服务，验证
+     *  - 对端 ping → 服务端自动回 pong（opcode 0xA、未掩码、载荷一致）
+     *  - ping 不泄漏到用户 on('message')
+     *  - 文本消息正常回显
+     *  - 对端 pong → 服务端静默忽略，连接保持存活
+     */
+    public function testNativeWebSocketAutoPingPong(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port   = $this->findFreePort();
+        $script = $this->writeWsServerScript($port);
+        $proc   = proc_open([PHP_BINARY, $script, (string)$port], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native WS 服务器子进程');
+        $this->waitForPort($port, 4.0);
+
+        try {
+            $fp = $this->wsConnect($port);
+            $this->wsHandshake($fp);
+
+            // 1) 发掩码 ping，期望服务端自动回 pong，且不泄漏到用户回调
+            fwrite($fp, $this->wsMaskedFrame(0x9, 'hb'));
+            $gotPong = false;
+            for ($i = 0; $i < 10; $i++) {
+                $frame = $this->wsReadFrame($fp);
+                if ($frame === null) {
+                    break;
+                }
+                if ($frame['opcode'] === 0xA) {
+                    $this->assertSame('hb', $frame['payload'], 'pong 载荷应与 ping 一致');
+                    $gotPong = true;
+                    break;
+                }
+                if ($frame['opcode'] === 0x1) {
+                    $this->assertStringNotContainsString(
+                        '"type":"ping"',
+                        $frame['payload'],
+                        'ping 不应泄漏到用户 on(message)'
+                    );
+                }
+            }
+            $this->assertTrue($gotPong, '服务端未对 ping 自动回 pong');
+
+            // 2) 文本消息正常回显（用户回调只收应用消息）
+            fwrite($fp, $this->wsMaskedFrame(0x1, 'hello'));
+            $gotEcho = false;
+            for ($i = 0; $i < 10; $i++) {
+                $frame = $this->wsReadFrame($fp);
+                if ($frame === null) {
+                    break;
+                }
+                if ($frame['opcode'] === 0x1 && str_contains($frame['payload'], 'hello')) {
+                    $gotEcho = true;
+                    break;
+                }
+            }
+            $this->assertTrue($gotEcho, '文本消息未正确回显');
+
+            // 3) 发 pong 帧，服务端静默忽略；再发文本确认连接存活
+            fwrite($fp, $this->wsMaskedFrame(0xA, 'x'));
+            fwrite($fp, $this->wsMaskedFrame(0x1, 'still-alive'));
+            $alive = false;
+            for ($i = 0; $i < 10; $i++) {
+                $frame = $this->wsReadFrame($fp);
+                if ($frame === null) {
+                    break;
+                }
+                if ($frame['opcode'] === 0x1 && str_contains($frame['payload'], 'still-alive')) {
+                    $alive = true;
+                    break;
+                }
+            }
+            $this->assertTrue($alive, '服务端未静默忽略 pong，连接异常');
+
+            fclose($fp);
+        } finally {
+            $status = proc_get_status($proc);
+            $pid = $status['pid'] ?? null;
+            if ($pid !== null && $pid > 0) {
+                @posix_kill($pid, SIGTERM);
+                usleep(300_000);
+                $still = proc_get_status($proc);
+                if ($still['running']) {
+                    @posix_kill($pid, SIGKILL);
+                }
+            }
+            proc_close($proc);
+            @unlink($script);
+        }
+    }
+
+    private function wsConnect(int $port): mixed
+    {
+        $fp = @fsockopen('127.0.0.1', $port, $errno, $errstr, 2.0);
+        $this->assertNotFalse($fp, "WS 连接失败: {$errstr} ({$errno})");
+        return $fp;
+    }
+
+    private function wsHandshake($fp): void
+    {
+        $key = base64_encode(random_bytes(16));
+        $req = "GET / HTTP/1.1\r\n"
+            . "Host: 127.0.0.1\r\n"
+            . "Upgrade: websocket\r\n"
+            . "Connection: Upgrade\r\n"
+            . "Sec-WebSocket-Key: {$key}\r\n"
+            . "Sec-WebSocket-Version: 13\r\n\r\n";
+        fwrite($fp, $req);
+
+        $buf = '';
+        while (!str_contains($buf, "\r\n\r\n") && ($chunk = fread($fp, 1024)) !== '') {
+            $buf .= $chunk;
+        }
+        $this->assertStringContainsString('101', $buf, 'WS 握手未返回 101');
+    }
+
+    private function wsMaskedFrame(int $opcode, string $payload): string
+    {
+        $mask   = random_bytes(4);
+        $len    = strlen($payload);
+        $header = chr(0x80 | $opcode) . chr(0x80 | $len);
+        $masked = $payload ^ str_repeat($mask, intdiv($len, 4) + 1);
+        return $header . $mask . $masked;
+    }
+
+    private function wsReadFrame($fp): ?array
+    {
+        $b0 = $this->readExact($fp, 1);
+        if ($b0 === '') {
+            return null;
+        }
+        $b1  = $this->readExact($fp, 1);
+        $len = ord($b1) & 0x7F;
+        if ($len === 126) {
+            $len = unpack('n', $this->readExact($fp, 2))[1];
+        } elseif ($len === 127) {
+            $len = (int)unpack('J', $this->readExact($fp, 8))[1];
+        }
+        $payload = $len > 0 ? $this->readExact($fp, $len) : '';
+        return ['opcode' => ord($b0) & 0x0F, 'payload' => $payload];
+    }
+
+    private function readExact($fp, int $n): string
+    {
+        $buf = '';
+        while (strlen($buf) < $n) {
+            $chunk = fread($fp, $n - strlen($buf));
+            if ($chunk === '' || $chunk === false) {
+                break;
+            }
+            $buf .= $chunk;
+        }
+        return $buf;
+    }
+
+    private function writeWsServerScript(int $port): string
+    {
+        $autoload = realpath(__DIR__ . '/../vendor/autoload.php');
+        $code = <<<PHP
+<?php
+require '{$autoload}';
+use Kode\\Process\\Kode;
+
+Kode::serve('websocket://127.0.0.1:{$port}', ['workers' => 1], 'native')
+    ->on('message', function (\$conn, \$msg): void {
+        \$conn->send('recv:' . json_encode(\$msg, JSON_UNESCAPED_UNICODE));
+    })
+    ->start();
+PHP;
+        $file = tempnam(sys_get_temp_dir(), 'kode_ws_');
+        file_put_contents($file, $code);
+        return $file;
+    }
 }
