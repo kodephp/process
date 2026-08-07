@@ -85,6 +85,28 @@ final class ProtocolFactory
         return isset(self::$protocols[$name]) || isset(self::$customProtocols[$name]);
     }
 
+    /**
+     * 返回已注册协议的实现类（class-string），供运行时在 serve 路径实例化使用。
+     *
+     * 既支持以类字符串注册（{@see register('name', SomeProto::class)}），
+     * 也支持以实例注册（{@see register('name', $instance)}）——后者返回其真实类名。
+     */
+    public static function classFor(string $name): ?string
+    {
+        self::init();
+        $name = strtolower($name);
+
+        if (isset(self::$protocols[$name])) {
+            return get_class(self::$protocols[$name]);
+        }
+        if (isset(self::$customProtocols[$name])) {
+            $value = self::$customProtocols[$name];
+            return is_string($value) ? $value : get_class($value);
+        }
+
+        return null;
+    }
+
     public static function available(): array
     {
         self::init();

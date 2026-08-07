@@ -6,6 +6,7 @@ namespace Kode\Process\Runtime\Driver;
 
 use Kode\Process\Protocol\HttpProtocol;
 use Kode\Process\Protocol\LengthPrefix;
+use Kode\Process\Protocol\ProtocolFactory;
 use Kode\Process\Protocol\TcpProtocol;
 use Kode\Process\Protocol\TextProtocol;
 use Kode\Process\Protocol\WebSocketProtocol;
@@ -155,7 +156,11 @@ final class NativeRuntime extends AbstractRuntime
 
     protected function supportedSchemes(): array
     {
-        return ['tcp', 'http', 'websocket', 'text', 'frame', 'udp', 'unix', 'ssl'];
+        // 内置 scheme 永远支持；已通过 ProtocolFactory::register 注册的自定义协议同样一等公民。
+        return array_values(array_unique([
+            'tcp', 'http', 'websocket', 'text', 'frame', 'udp', 'unix', 'ssl',
+            ...ProtocolFactory::available(),
+        ]));
     }
 
     public function capabilities(): array
@@ -930,7 +935,7 @@ final class NativeRuntime extends AbstractRuntime
             'udp',
             'ssl',
             'unix'          => TcpProtocol::class,
-            default         => null,
+            default         => ProtocolFactory::classFor($scheme),
         };
     }
 

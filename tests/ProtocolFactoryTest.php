@@ -41,6 +41,26 @@ final class ProtocolFactoryTest extends TestCase
         $this->assertInstanceOf(TextProtocol::class, ProtocolFactory::create(ProtocolFactory::TEXT));
     }
 
+    public function testClassForReturnsClassStringForBuiltins(): void
+    {
+        // 以类字符串注册的协议，classFor 返回原类名（供运行时实例化）
+        $this->assertSame(HttpProtocol::class, ProtocolFactory::classFor(ProtocolFactory::HTTP));
+        $this->assertSame(WebSocketProtocol::class, ProtocolFactory::classFor('websocket'));
+    }
+
+    public function testClassForReturnsClassStringForInstanceRegistration(): void
+    {
+        // 以实例注册的协议，classFor 返回实例的真实类名
+        $instance = new TcpProtocol();
+        ProtocolFactory::register('tcp-instance', $instance);
+        $this->assertSame(TcpProtocol::class, ProtocolFactory::classFor('tcp-instance'));
+    }
+
+    public function testClassForReturnsNullForUnknown(): void
+    {
+        $this->assertNull(ProtocolFactory::classFor('no-such-proto' . uniqid()));
+    }
+
     public function testCreateIsCaseInsensitive(): void
     {
         $this->assertInstanceOf(HttpProtocol::class, ProtocolFactory::create('HTTP'));

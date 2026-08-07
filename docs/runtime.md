@@ -91,6 +91,41 @@ $rt->isRunning(): bool
 
 **WebSocket 控制帧自动处理**：three 运行时行为一致——对端 `ping` 由运行时**自动回 `pong`**，对端 `pong` **静默忽略**，用户 `on('message')` 只收到应用消息（`text` / `binary` / `close`），无需自行处理保活。该逻辑在 `NativeRuntime::handleClientRead` 内统一处理；Swoole / Workerman 由各自引擎层自动完成，因此切换运行时时业务代码零改动。
 
+## 自定义协议（一等公民）
+
+除内置 `tcp` / `http` / `websocket` / `text` / `frame` / `udp` / `unix` / `ssl` 外，你可以用 `ProtocolFactory::register()` 注册任意协议，然后像内置协议一样直接 `Kode::serve('yourproto://..')`。注册后即可作为 `address` scheme 使用，**无需改运行时选择、无需改业务代码**——与 Workerman / Swoole 的「自定义协议」能力对齐。
+
+自定义协议需实现 `Kode\Process\Protocol\ProtocolInterface`：
+
+```php
+interface ProtocolInterface
+{
+    public static function getName(): string;
+    public static function input(string $buffer, mixed $connection = null): int;   // 0=需更多数据, -1=协议错误, >0=整帧长度
+    public static function decode(string $buffer, mixed $connection = null): mixed;
+    public static function encode(mixed $data, mixed $connection = null): string;
+}
+```
+
+`NativeRuntime` 在收包时循环调用 `input()` 做分包，再用 `decode()` 还原消息、`encode()` 编码出站数据（连接 `send()` 时自动调用）。因此粘包 / 半包由协议自己负责，与内置协议完全一致。
+
+```php
+use Kode\Process\Kode;
+use Kode\Process\Protocol\ProtocolFactory;
+
+// 以类字符串注册（推荐）
+ProtocolFactory::register('echo', EchoProtocol::class);
+
+// 之后即可当作 scheme 使用：
+Kode::serve('echo://0.0.0.0:9000')
+    ->on('message', fn ($conn, $msg) => $conn->send(strtoupper($msg)))
+    ->start();
+```
+
+> 说明：注册的协议会进入 `NativeRuntime::supportedSchemes()`，并在 `protocolClassFor()` 中回退解析，
+> 所以 `Kode::serve` 的 scheme 校验与协议类选择都会认得它。Swoole / Workerman 运行时下自定义协议由各自引擎
+> （如 Workerman 的 `Worker->protocol`、Swoole 的裸 TCP + 手动分包）承接，业务层 `on('message')` 语义不变。
+
 ### listen 选项
 
 ```php

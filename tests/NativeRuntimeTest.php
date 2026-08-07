@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace Kode\Process\Tests;
 
 use Kode\Process\Kode;
+use Kode\Process\Protocol\ProtocolFactory;
 use Kode\Process\Runtime;
 use Kode\Process\Runtime\Capability;
 use Kode\Process\Runtime\Driver\NativeRuntime;
 use Kode\Process\Runtime\RuntimeType;
+use Kode\Process\Tests\Fixtures\EchoProtocol;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -19,6 +21,8 @@ use PHPUnit\Framework\TestCase;
  */
 final class NativeRuntimeTest extends TestCase
 {
+    private string $lineBuf = '';
+
     public function testIsAvailableReturnsBool(): void
     {
         $this->assertIsBool(NativeRuntime::isAvailable());
@@ -382,5 +386,123 @@ PHP;
         $file = tempnam(sys_get_temp_dir(), 'kode_ws_');
         file_put_contents($file, $code);
         return $file;
+    }
+
+    /**
+     * 自定义协议一等公民：注册后 Kode::serve('echo://..') 应能直接用它收发。
+     * 验证 ProtocolFactory::register 真正打通到 serve 路径（此前仅登记不生效）。
+     */
+    public function testNativeCustomProtocolServe(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        // 注册自定义协议（父进程注册，fork 后子进程可见）
+        ProtocolFactory::register('echo', EchoProtocol::class);
+
+        // 1) 静态断言：自定义协议已进入 supportedSchemes 且 protocolClassFor 能解析
+        $schemes = $this->invokeProtected(NativeRuntime::class, 'supportedSchemes', []);
+        $this->assertContains('echo', $schemes, '自定义协议未进入 supportedSchemes');
+        $cls = $this->invokePrivate(NativeRuntime::class, 'protocolClassFor', ['echo']);
+        $this->assertSame(EchoProtocol::class, $cls, 'protocolClassFor 未返回自定义协议类');
+
+        // 2) 端到端：真实起 Native 服务，客户端发 hello 收到 HELLO
+        $port   = $this->findFreePort();
+        $script = $this->writeCustomProtocolServerScript($port);
+        $proc   = proc_open([PHP_BINARY, $script], [], $pipes);
+        $this->assertIsResource($proc, '无法启动自定义协议服务器子进程');
+        $this->waitForPort($port, 4.0);
+
+        try {
+            $fp = @fsockopen('127.0.0.1', $port, $errno, $errstr, 2.0);
+            $this->assertNotFalse($fp, "自定义协议连接失败: {$errstr} ({$errno})");
+
+            fwrite($fp, "hello\n");
+            $resp = $this->readLine($fp);
+            $this->assertSame('HELLO', $resp, '自定义协议回显内容不符');
+
+            // 多发一帧验证连接保持（粘包/半包由 input() 分包）
+            fwrite($fp, "wor\nld\n");
+            $this->assertSame('WOR', $this->readLine($fp), '第二帧前半段回显不符');
+            $this->assertSame('LD', $this->readLine($fp), '第二帧后半段回显不符');
+
+            fclose($fp);
+        } finally {
+            $status = proc_get_status($proc);
+            $pid = $status['pid'] ?? null;
+            if ($pid !== null && $pid > 0) {
+                @posix_kill($pid, SIGTERM);
+                usleep(300_000);
+                $still = proc_get_status($proc);
+                if ($still['running']) {
+                    @posix_kill($pid, SIGKILL);
+                }
+            }
+            proc_close($proc);
+            @unlink($script);
+        }
+    }
+
+    private function readLine($fp): string
+    {
+        while (!str_contains($this->lineBuf, "\n")) {
+            $chunk = fread($fp, 1024);
+            if ($chunk === '' || $chunk === false) {
+                break;
+            }
+            $this->lineBuf .= $chunk;
+        }
+        $pos = strpos($this->lineBuf, "\n");
+        if ($pos === false) {
+            $line = $this->lineBuf;
+            $this->lineBuf = '';
+            return rtrim($line, "\n");
+        }
+        $line = substr($this->lineBuf, 0, $pos);
+        $this->lineBuf = substr($this->lineBuf, $pos + 1);
+        return $line;
+    }
+
+    private function writeCustomProtocolServerScript(int $port): string
+    {
+        $autoload = realpath(__DIR__ . '/../vendor/autoload.php');
+        $code = <<<PHP
+<?php
+require '{$autoload}';
+use Kode\\Process\\Kode;
+use Kode\\Process\\Protocol\\ProtocolFactory;
+use Kode\\Process\\Tests\\Fixtures\\EchoProtocol;
+
+ProtocolFactory::register('echo', EchoProtocol::class);
+
+Kode::serve('echo://127.0.0.1:{$port}', ['workers' => 1], 'native')
+    ->on('message', function (\$conn, \$msg): void {
+        \$conn->send(strtoupper((string)\$msg));
+    })
+    ->start();
+PHP;
+        $file = tempnam(sys_get_temp_dir(), 'kode_echo_');
+        file_put_contents($file, $code);
+        return $file;
+    }
+
+    private function invokeProtected(string $class, string $method, array $args): mixed
+    {
+        return $this->invokeMethod($class, $method, $args, false);
+    }
+
+    private function invokePrivate(string $class, string $method, array $args): mixed
+    {
+        return $this->invokeMethod($class, $method, $args, true);
+    }
+
+    private function invokeMethod(string $class, string $method, array $args, bool $private): mixed
+    {
+        $r = new \ReflectionMethod($class, $method);
+        $r->setAccessible(true);
+        // 取一个已构造的运行时实例用于非静态方法调用
+        $instance = (new \ReflectionClass($class))->newInstanceWithoutConstructor();
+        return $r->invokeArgs($instance, $args);
     }
 }
