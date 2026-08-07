@@ -56,6 +56,32 @@ final class Runtime
     /** @var array<string, class-string<RuntimeInterface>> 运行期注册的自定义驱动 */
     private static array $custom = [];
 
+    /**
+     * 各内置运行时在当前环境所需的 PHP 扩展与 Composer 包。
+     *
+     * 用于 {@see requirements()} 自检与 {@see make()} 的缺失提示——
+     * 运行时不可用时不只笼统报错，而是精确指出缺了哪个扩展 / 包。
+     *
+     * @var array<string, array{extensions:list<string>, package:?string, hint:string}>
+     */
+    private const RUNTIME_REQUIREMENTS = [
+        'native'    => [
+            'extensions' => ['pcntl', 'posix'],
+            'package'    => null,
+            'hint'       => '需要 PHP CLI SAPI + ext-pcntl + ext-posix',
+        ],
+        'swoole'    => [
+            'extensions' => ['swoole'],
+            'package'    => null,
+            'hint'       => '请安装 ext-swoole：pecl install swoole',
+        ],
+        'workerman' => [
+            'extensions' => ['pcntl', 'posix'],
+            'package'    => 'workerman/workerman',
+            'hint'       => '请执行 composer require workerman/workerman ^5.0',
+        ],
+    ];
+
     private function __construct()
     {
     }
@@ -90,9 +116,14 @@ final class Runtime
         $class = self::resolve($name);
 
         if (!$class::isAvailable()) {
+            $missing = self::missingExtensions($name);
+            $reason  = $missing === []
+                ? self::installHint($name)
+                : '缺失扩展：' . implode(', ', $missing) . '。' . self::installHint($name);
+
             throw RuntimeNotSupportedException::unavailable(
                 RuntimeType::tryFrom($name) ?? RuntimeType::Workerman,
-                self::installHint($name)
+                $reason
             );
         }
 
@@ -138,6 +169,67 @@ final class Runtime
         }
 
         return $class::isAvailable();
+    }
+
+    /**
+     * 部署前自检：列出每个运行时所需的 PHP 扩展 / Composer 包，
+     * 并标出当前环境缺失了哪些（「未启用则提示」的核心实现）。
+     *
+     * @return array<string, array{
+     *     available: bool,
+     *     extensions: list<string>,
+     *     missing_extensions: list<string>,
+     *     package: ?string,
+     *     missing_package: bool,
+     *     hint: string
+     * }>
+     */
+    public static function requirements(): array
+    {
+        $out = [];
+
+        foreach (self::allDrivers() as $name => $class) {
+            $req = self::RUNTIME_REQUIREMENTS[$name]
+                ?? ['extensions' => [], 'package' => null, 'hint' => '未知依赖'];
+
+            $missingExt = array_values(array_filter(
+                $req['extensions'],
+                static fn (string $ext): bool => !extension_loaded($ext)
+            ));
+
+            $missingPkg = false;
+            if ($req['package'] !== null) {
+                // Composer 包以顶层命名空间类存在性判定（如 Workerman\Worker）
+                $root = explode('/', $req['package'])[1] ?? $req['package'];
+                $missingPkg = !class_exists('\\' . str_replace(' ', '\\', ucwords(str_replace('-', ' ', $root))) . '\\Worker');
+            }
+
+            $out[$name] = [
+                'available'          => $class::isAvailable(),
+                'extensions'         => $req['extensions'],
+                'missing_extensions' => $missingExt,
+                'package'            => $req['package'],
+                'missing_package'    => $missingPkg,
+                'hint'               => $req['hint'],
+            ];
+        }
+
+        return $out;
+    }
+
+    /**
+     * 返回指定运行时当前缺失的 PHP 扩展名列表（空数组表示扩展齐备）。
+     *
+     * @return list<string>
+     */
+    public static function missingExtensions(string $name): array
+    {
+        $req = self::RUNTIME_REQUIREMENTS[$name] ?? ['extensions' => []];
+
+        return array_values(array_filter(
+            $req['extensions'],
+            static fn (string $ext): bool => !extension_loaded($ext)
+        ));
     }
 
     /**

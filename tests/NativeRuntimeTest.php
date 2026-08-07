@@ -35,6 +35,14 @@ final class NativeRuntimeTest extends TestCase
         $this->assertMatchesRegularExpression('/^\d+\.\d+\.\d+$/', (string)NativeRuntime::version());
     }
 
+    public function testDefaultReusePortFollowsPlatform(): void
+    {
+        // 经同机 A/B 实测：Linux 默认开启 SO_REUSEPORT 消除惊群；
+        // macOS/BSD 默认关闭（其 kqueue + 共享 socket 更高效）。
+        $expected = PHP_OS_FAMILY === 'Linux' && defined('SO_REUSEPORT');
+        $this->assertSame($expected, NativeRuntime::defaultReusePort());
+    }
+
     public function testSupportedSchemes(): void
     {
         $ref     = new \ReflectionMethod(NativeRuntime::class, 'supportedSchemes');

@@ -144,6 +144,16 @@ final class NativeRuntime extends AbstractRuntime
         return Version::VERSION;
     }
 
+    /**
+     * SO_REUSEPORT 的平台默认策略（见 {@see start()} 中的说明）。
+     *
+     * 抽成独立方法便于单元测试，也集中了「何时默认开启端口复用」的决策。
+     */
+    public static function defaultReusePort(): bool
+    {
+        return PHP_OS_FAMILY === 'Linux' && defined('SO_REUSEPORT');
+    }
+
     public function __construct()
     {
         if (!self::isAvailable()) {
@@ -201,7 +211,14 @@ final class NativeRuntime extends AbstractRuntime
         $listener = $this->requireListener();
         $opts     = $listener['options'];
 
-        $this->reusePort       = (bool)($opts['reusePort'] ?? false);
+        // SO_REUSEPORT 默认策略因平台而异（经同机 A/B 实测验证）：
+        //  - Linux：默认开启。每个 worker 拥有独立监听 socket，由内核将新连接直接分发到
+        //    某一 worker，彻底消除「fork 共享监听 socket 的惊群争抢」（否则高并发下 accept
+        //    会唤醒所有 worker 只留一个成功，上下文切换风暴导致 P99 飙升）。
+        //  - macOS / BSD：默认关闭。其 kqueue + 共享监听 socket 的实现反而比 SO_REUSEPORT
+        //    更高效（实测开启后吞吐下降约 1/3、尾部延迟更差），故沿用共享 socket 路径。
+        // 不支持 SO_REUSEPORT 的平台一律回退为共享 socket。
+        $this->reusePort       = (bool)($opts['reusePort'] ?? self::defaultReusePort());
         $this->workerCount     = max(1, (int)($opts['workers'] ?? 4));
         $this->taskWorkerCount = max(0, (int)($opts['taskWorkers'] ?? 0));
         $this->maxRequest      = max(0, (int)($opts['maxRequest'] ?? 0));

@@ -294,6 +294,47 @@ print_r(Kode\Process\Runtime::diagnose());
 ]
 ```
 
+### 扩展依赖检测（未启用则提示）
+
+`Runtime::requirements()` 报告每个运行时所需的 PHP 扩展 / Composer 包，并标出当前环境缺失了哪些。
+当某运行时不可用（如未装 `ext-swoole`）时，`Runtime::make('swoole')` 抛出的异常会**精确列出缺失的扩展名与安装命令**，而不是笼统报错：
+
+```php
+print_r(Kode\Process\Runtime::requirements());
+// native    => ['extensions'=>['pcntl','posix'], 'missing_extensions'=>[], ...]
+// swoole    => ['extensions'=>['swoole'],        'missing_extensions'=>[], ...]
+// workerman => ['extensions'=>['pcntl','posix'], 'package'=>'workerman/workerman', ...]
+```
+
+命令行 `kode check` 直接打印这份自检表，部署前一眼看清缺了哪个扩展：
+
+```bash
+php bin/kode check
+# Kode Process 运行时依赖自检
+#   native     [OK  ]  ext: pcntl, posix
+#   swoole     [OK  ]  ext: swoole
+#   workerman  [OK  ]  ext: pcntl, posix
+```
+
+## 进程管理命令（bin/kode）
+
+`bin/kode` 提供完整的服务生命周期管理，`start` 会自写 PID / 命令文件，使 stop / reload / status / restart 自洽：
+
+| 命令 | 作用 |
+|------|------|
+| `kode start <file>` | 启动服务（默认 `server.php`） |
+| `kode stop` | 停止服务 |
+| `kode restart <file>` | 平滑重启：停止旧进程后以 detached 新进程启动；不传 `file` 时沿用上次启动文件 |
+| `kode reload` | 平滑重载（信号 `HUP`） |
+| `kode status` | 查看运行状态 |
+| `kode check` | 运行时依赖自检（各运行时所需扩展 / 缺失提示） |
+| `kode info` | 版本信息 |
+
+> `restart` 内部先向旧 master 发 `SIGTERM` 并等待其退出，再用 `nohup ... &` 以脱离当前进程组的方式
+> 启动新进程，因此可在 CI / 部署脚本中安全调用，不会因调用方退出而连累新服务。
+
+
+
 ## 接入自定义运行时
 
 ```php

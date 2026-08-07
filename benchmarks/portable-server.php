@@ -27,9 +27,15 @@ $workers = (int)($argv[3] ?? 4);
 // ↓↓↓ 以下业务代码与运行时无关，切换 native/swoole/workerman 无需改动 ↓↓↓
 // ------------------------------------------------------------------
 
+// REUSE_PORT 环境变量可强制覆盖（用于受控 A/B 对比）；未设置时走运行时自适应默认
+// （Linux 默认开启 SO_REUSEPORT 消除惊群，macOS/BSD 默认关闭走高效共享 socket）。
+$reusePort = getenv('REUSE_PORT');
+$reusePortOpt = $reusePort === false ? null : (bool) (int) $reusePort;
+
 $server = Kode::serve("http://127.0.0.1:{$port}", [
     'workers' => $workers,
     'name'    => "bench-{$runtime}",
+    'reusePort' => $reusePortOpt,
 ], $runtime);
 
 $server->on('workerStart', function () use ($runtime, $server): void {

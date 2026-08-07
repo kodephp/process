@@ -178,4 +178,88 @@ final class RuntimeTest extends TestCase
 
         $this->assertNotNull($report['workerman']['version']);
     }
+
+    public function testRequirementsReportsKnownRuntimes(): void
+    {
+        $reqs = Runtime::requirements();
+
+        foreach (['native', 'swoole', 'workerman'] as $name) {
+            $this->assertArrayHasKey($name, $reqs, "requirements() 应含 {$name}");
+            $entry = $reqs[$name];
+
+            $this->assertIsBool($entry['available']);
+            $this->assertIsArray($entry['extensions']);
+            $this->assertIsArray($entry['missing_extensions']);
+            $this->assertIsBool($entry['missing_package']);
+            $this->assertIsString($entry['hint']);
+            $this->assertNotEmpty($entry['hint'], "{$name} 应有安装提示");
+        }
+
+        // 当前环境三类运行时均可用的前提下，缺失列表应为空
+        foreach ($reqs as $entry) {
+            if ($entry['available']) {
+                $this->assertSame([], $entry['missing_extensions']);
+            }
+        }
+    }
+
+    public function testRequirementsMarksWorkermanPackage(): void
+    {
+        $reqs = Runtime::requirements();
+
+        $this->assertSame('workerman/workerman', $reqs['workerman']['package']);
+        // 本机已装 workerman（composer require），故 missing_package 应为 false
+        $this->assertFalse($reqs['workerman']['missing_package']);
+    }
+
+    public function testMissingExtensionsReturnsConfiguredList(): void
+    {
+        // 本机可用，故返回空数组；结构应为 list<string>
+        $this->assertSame([], Runtime::missingExtensions('native'));
+        $this->assertSame([], Runtime::missingExtensions('swoole'));
+        $this->assertSame([], Runtime::missingExtensions('workerman'));
+        // 未知驱动无映射，返回空数组（不抛异常）
+        $this->assertSame([], Runtime::missingExtensions('road-runner'));
+    }
+
+    public function testMakeUnavailableIncludesMissingExtensionHint(): void
+    {
+        // 用最小桩驱动：实现 RuntimeInterface 但 isAvailable() 恒为 false，
+        // 验证 make() 抛出的异常消息包含安装提示（缺失扩展检测的可观测出口）。
+        $stub = new class () implements \Kode\Process\Runtime\RuntimeInterface {
+            public static function isAvailable(): bool { return false; }
+            public static function type(): \Kode\Process\Runtime\RuntimeType { return \Kode\Process\Runtime\RuntimeType::Workerman; }
+            public static function version(): ?string { return null; }
+            public function listen(string $address, array $options = []): static { return $this; }
+            public function on(string $event, callable $handler): static { return $this; }
+            public function start(): void {}
+            public function stop(bool $graceful = true): void {}
+            public function reload(): void {}
+            public function addTimer(float $interval, callable $callback, bool $periodic = true): int { return 0; }
+            public function delTimer(int $timerId): bool { return false; }
+            public function supports(\Kode\Process\Runtime\Capability $cap): bool { return false; }
+            public function capabilities(): array { return []; }
+            public function stats(): array { return []; }
+            public function isRunning(): bool { return false; }
+            public function workerId(): int { return 0; }
+            public function connections(): array { return []; }
+            public function broadcast(string $data, bool $raw = false): int { return 0; }
+            public function task(mixed $data): bool { return false; }
+        };
+
+        Runtime::register('stub-unavail', $stub::class);
+
+        try {
+            $thrown = null;
+            try {
+                Runtime::make('stub-unavail');
+            } catch (\Kode\Process\Runtime\Exception\RuntimeNotSupportedException $e) {
+                $thrown = $e;
+            }
+            $this->assertNotNull($thrown, '不可用运行时应抛出 RuntimeNotSupportedException');
+            $this->assertNotEmpty($thrown->getMessage());
+        } finally {
+            Runtime::reset();
+        }
+    }
 }
