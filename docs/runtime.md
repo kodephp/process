@@ -91,6 +91,8 @@ $rt->isRunning(): bool
 
 **WebSocket 控制帧自动处理**：three 运行时行为一致——对端 `ping` 由运行时**自动回 `pong`**，对端 `pong` **静默忽略**，用户 `on('message')` 只收到应用消息（`text` / `binary` / `close`），无需自行处理保活。该逻辑在 `NativeRuntime::handleClientRead` 内统一处理；Swoole / Workerman 由各自引擎层自动完成，因此切换运行时时业务代码零改动。
 
+**WebSocket 分片自动重组（RFC 6455 §5.4）**：超过单帧上限的大消息会被拆成多帧（FIN=0 首帧 + 续帧，FIN=1 末帧），三运行时均会在连接层将其**重组为一条完整消息**再派发到 `on('message')`，用户永远不会收到被拆碎的中间帧。重组缓冲挂在 `NativeConnection` 上，受 `WebSocketProtocol::MAX_PAYLOAD_LENGTH`（10 MiB）上限保护；协议错误（续帧无首帧、分片中途插入非续帧、超上限）将直接断开该连接。
+
 ## 自定义协议（一等公民）
 
 除内置 `tcp` / `http` / `websocket` / `text` / `frame` / `udp` / `unix` / `ssl` 外，你可以用 `ProtocolFactory::register()` 注册任意协议，然后像内置协议一样直接 `Kode::serve('yourproto://..')`。注册后即可作为 `address` scheme 使用，**无需改运行时选择、无需改业务代码**——与 Workerman / Swoole 的「自定义协议」能力对齐。

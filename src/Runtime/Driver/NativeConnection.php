@@ -49,6 +49,13 @@ final class NativeConnection implements ConnectionInterface
 
     private bool $bufferOverflow = false;
 
+    // WebSocket 分片重组缓冲（RFC 6455 §5.4），仅 websocket 连接使用
+    private string $wsFragmentBuffer = '';
+
+    private int $wsFragmentOpcode = 0;
+
+    private bool $wsFragmenting = false;
+
     private readonly int $connId;
 
     private float $lastActiveAt;
@@ -342,6 +349,59 @@ final class NativeConnection implements ConnectionInterface
     public function setSslReady(): void
     {
         $this->sslReady = true;
+    }
+
+    // ----------------------------------------------- WebSocket 分片重组
+
+    public function isFragmenting(): bool
+    {
+        return $this->wsFragmenting;
+    }
+
+    public function startFragment(int $opcode, string $data): void
+    {
+        $this->wsFragmenting    = true;
+        $this->wsFragmentOpcode = $opcode;
+        $this->wsFragmentBuffer = $data;
+    }
+
+    public function appendFragment(string $data): void
+    {
+        $this->wsFragmentBuffer .= $data;
+    }
+
+    public function fragmentSize(): int
+    {
+        return strlen($this->wsFragmentBuffer);
+    }
+
+    public function fragmentOpcode(): int
+    {
+        return $this->wsFragmentOpcode;
+    }
+
+    /**
+     * 结束重组：返回完整消息数组（type=message、opcode=原始、data=拼接、fin=1）并复位状态。
+     *
+     * @return array{type: string, opcode: int, data: string, fin: int}
+     */
+    public function finishFragment(): array
+    {
+        $message = [
+            'type'   => 'message',
+            'opcode' => $this->wsFragmentOpcode,
+            'data'   => $this->wsFragmentBuffer,
+            'fin'    => 1,
+        ];
+        $this->resetFragment();
+        return $message;
+    }
+
+    public function resetFragment(): void
+    {
+        $this->wsFragmenting    = false;
+        $this->wsFragmentOpcode = 0;
+        $this->wsFragmentBuffer = '';
     }
 
     // ------------------------------------------------------------ 运行期

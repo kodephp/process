@@ -4,7 +4,7 @@
     "type": "library",
     "keywords": ["php", "process", "runtime", "native", "reactor", "event-loop", "worker", "ipc", "signal", "pool", "swoole", "workerman", "multiprocessing", "queue", "cluster", "distributed", "snowflake", "load-balancer"],
     "license": "Apache-2.0",
-    "version": "5.1.4",
+    "version": "5.1.5",
     "authors": [
         {
             "name": "KodePHP Team",

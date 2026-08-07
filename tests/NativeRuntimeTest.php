@@ -313,6 +313,66 @@ PHP;
         }
     }
 
+    /**
+     * WebSocket 分片重组：真实起 Native WS 服务，把一条文本消息拆成 3 帧
+     * （FIN=0 text / FIN=0 continuation / FIN=1 continuation），验证服务端只
+     * 向用户回调派发一次完整消息，而非按帧碎片化派发（修复前的缺陷）。
+     */
+    public function testNativeWebSocketFragmentReassembly(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port   = $this->findFreePort();
+        $script = $this->writeWsServerScript($port);
+        $proc   = proc_open([PHP_BINARY, $script], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native WS 服务器子进程');
+        $this->waitForPort($port, 4.0);
+
+        try {
+            $fp = $this->wsConnect($port);
+            $this->wsHandshake($fp);
+
+            // 首帧 FIN=0 opcode=1(text) "Hello "
+            $frags  = $this->wsMaskedFrame(0x1, 'Hello ', false);
+            // 续帧 FIN=0 opcode=0(continuation) "wor"
+            $frags .= $this->wsMaskedFrame(0x0, 'wor', false);
+            // 末帧 FIN=1 opcode=0(continuation) "ld"
+            $frags .= $this->wsMaskedFrame(0x0, 'ld', true);
+            fwrite($fp, $frags);
+
+            // 必须只收到一条回显，且内容为完整重组后的 "Hello world"
+            $gotFull = false;
+            for ($i = 0; $i < 10; $i++) {
+                $frame = $this->wsReadFrame($fp);
+                if ($frame === null) {
+                    break;
+                }
+                if ($frame['opcode'] === 0x1 && str_contains($frame['payload'], 'Hello world')) {
+                    $gotFull = true;
+                    break;
+                }
+            }
+            $this->assertTrue($gotFull, '分片消息未被重组为完整消息派发');
+
+            fclose($fp);
+        } finally {
+            $status = proc_get_status($proc);
+            $pid = $status['pid'] ?? null;
+            if ($pid !== null && $pid > 0) {
+                @posix_kill($pid, SIGTERM);
+                usleep(300_000);
+                $still = proc_get_status($proc);
+                if ($still['running']) {
+                    @posix_kill($pid, SIGKILL);
+                }
+            }
+            proc_close($proc);
+            @unlink($script);
+        }
+    }
+
     private function wsConnect(int $port): mixed
     {
         $fp = @fsockopen('127.0.0.1', $port, $errno, $errstr, 2.0);
@@ -338,11 +398,12 @@ PHP;
         $this->assertStringContainsString('101', $buf, 'WS 握手未返回 101');
     }
 
-    private function wsMaskedFrame(int $opcode, string $payload): string
+    private function wsMaskedFrame(int $opcode, string $payload, bool $fin = true): string
     {
+        $finBit = $fin ? 0x80 : 0x00;
         $mask   = random_bytes(4);
         $len    = strlen($payload);
-        $header = chr(0x80 | $opcode) . chr(0x80 | $len);
+        $header = chr($finBit | $opcode) . chr(0x80 | $len);
         $masked = $payload ^ str_repeat($mask, intdiv($len, 4) + 1);
         return $header . $mask . $masked;
     }

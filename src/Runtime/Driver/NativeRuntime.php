@@ -707,6 +707,18 @@ final class NativeRuntime extends AbstractRuntime
                 if ($type === 'pong') {
                     continue;
                 }
+                if ($type === 'message') {
+                    $reassembled = $this->reassemblyWebSocketFragment($conn, $message);
+                    if ($reassembled === null) {
+                        // 协议错误：reassemblyWebSocketFragment 已关闭连接
+                        return;
+                    }
+                    if ($reassembled === false) {
+                        // 分片尚未收齐，等待更多帧，不向业务派发
+                        continue;
+                    }
+                    $message = $reassembled;
+                }
             }
 
             $this->fire('message', $conn, $message);
@@ -726,6 +738,65 @@ final class NativeRuntime extends AbstractRuntime
                 return;
             }
         }
+    }
+
+    /**
+     * WebSocket 分片重组（RFC 6455 §5.4）
+     *
+     * 单帧消息原样返回；多帧分片（FIN=0 首帧 + 续帧）累积到连接对象，
+     * 收到 FIN=1 的续帧后拼成完整消息返回。控制帧（ping/pong/close）
+     * 由调用方在外部先行处理，不会进入此处。
+     *
+     * @return array|false|null 完整消息数组（派发）；false=分片未收齐（等待更多帧）；
+     *                           null=协议错误（连接已关闭）
+     */
+    private function reassemblyWebSocketFragment(NativeConnection $conn, array $message): array|false|null
+    {
+        $fin    = (int)($message['fin'] ?? 1);
+        $opcode = (int)($message['opcode'] ?? WebSocketProtocol::OPCODE_TEXT);
+
+        // 独立完整帧（FIN=1 且非续帧）：分片中途不得插入非续帧
+        if ($fin === 1 && $opcode !== WebSocketProtocol::OPCODE_CONTINUATION) {
+            if ($conn->isFragmenting()) {
+                $this->closeConnection($conn);
+                return null;
+            }
+            return $message;
+        }
+
+        // 中间分片（FIN=0）
+        if ($fin === 0) {
+            if ($opcode === WebSocketProtocol::OPCODE_CONTINUATION) {
+                if (!$conn->isFragmenting()) {        // 续帧但无首帧
+                    $this->closeConnection($conn);
+                    return null;
+                }
+                $conn->appendFragment($message['data'] ?? '');
+            } else {                                   // 首帧（text/binary）
+                if ($conn->isFragmenting()) {         // 上一个分片未结束
+                    $this->closeConnection($conn);
+                    return null;
+                }
+                $conn->startFragment($opcode, $message['data'] ?? '');
+            }
+            if ($conn->fragmentSize() > WebSocketProtocol::MAX_PAYLOAD_LENGTH) {
+                $this->closeConnection($conn);
+                return null;
+            }
+            return false;                             // 等待更多分片
+        }
+
+        // 末帧（FIN=1 且为续帧）
+        if (!$conn->isFragmenting()) {
+            $this->closeConnection($conn);
+            return null;
+        }
+        $conn->appendFragment($message['data'] ?? '');
+        if ($conn->fragmentSize() > WebSocketProtocol::MAX_PAYLOAD_LENGTH) {
+            $this->closeConnection($conn);
+            return null;
+        }
+        return $conn->finishFragment();
     }
 
     /**
