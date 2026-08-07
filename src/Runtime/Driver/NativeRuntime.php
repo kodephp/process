@@ -170,7 +170,6 @@ final class NativeRuntime extends AbstractRuntime
             Capability::ReusePort,
             Capability::WebSocket,
             Capability::Timer,
-            Capability::AsyncIo,
         ];
     }
 

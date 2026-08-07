@@ -208,7 +208,7 @@ if ($rt->supports(Capability::Coroutine)) {
 |---|:-:|:-:|:-:|
 | `Coroutine` 原生协程 | ❌ | ✅ | ❌ |
 | `TaskWorker` Task 工作进程 | ✅ | ✅ | ❌ |
-| `AsyncIo` 异步 I/O | ✅ | ✅ | ❌ |
+| `AsyncIo` 异步 I/O | ❌ | ✅ | ❌ |
 | `UdpServer` | ✅ | ✅ | ✅ |
 | `Ssl` | ✅ | ✅ | ✅ |
 | `SharedTable` | ✅ | ✅ | ✅ |
@@ -218,8 +218,9 @@ if ($rt->supports(Capability::Coroutine)) {
 | `WebSocket` | ✅ | ✅ | ✅ |
 | `Timer` | ✅ | ✅ | ✅ |
 
-> Native 唯一不提供的是**原生协程**——那需要 C 层栈切换，纯 PHP 做不到。
-> 需要协程时用 `kode/fibers`（Fiber 协作式调度）或直接接入 Swoole。
+> Native 不提供**原生协程**与**原生异步 I/O**——二者都需要 C 层支持，纯 PHP 事件循环做不到
+> （Native 的 SelectLoop 只做非阻塞套接字调度，并非 OS 级异步 I/O）。
+> 需要协程时用 `kode/fibers`（Fiber 协作式调度），需要原生异步 I/O（如异步文件 / DNS）时直接接入 Swoole。
 
 ## 自研 Native 运行时详解
 

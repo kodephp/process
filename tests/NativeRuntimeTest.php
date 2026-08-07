@@ -53,8 +53,9 @@ final class NativeRuntimeTest extends TestCase
         ) {
             $this->assertContains($expected, $caps, "缺少能力 {$expected}");
         }
-        // 纯 PHP 实现，不谎报协程能力
+        // 纯 PHP 实现，不谎报协程与原生异步 I/O 能力
         $this->assertNotContains('Coroutine', $caps);
+        $this->assertNotContains('AsyncIo', $caps);
     }
 
     public function testRegisteredAsDriver(): void
