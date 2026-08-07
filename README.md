@@ -1,23 +1,24 @@
 # Kode Process
 
-**PHP 8.3+ 多进程编排内核 · Swoole / Workerman / Native 运行时兼容层**
+**PHP 8.3+ 多进程编排内核 · 自研 Native 默认运行时 · Swoole / Workerman 可插拔 · 内置分布式集群能力**
 
 [![PHP Version](https://img.shields.io/badge/PHP-8.3+-777BB4?style=flat-square&logo=php)](https://php.net)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green?style=flat-square)](LICENSE)
 
 ## 简介
 
-Kode Process 是一个「进程编排内核 + 运行时兼容层」：你只写一套 API，底层运行时由环境自动择优——
+Kode Process 是一个「进程编排内核 + 多运行时兼容层」：你只写一套 API，底层运行时由环境自动择优，也可显式切换，**业务代码零改动**——
 
-- 装了 **Swoole** → 用 Swoole 跑（最快，全 C 实现，自动择优时最高优先级）
-- 否则用 **Workerman** 跑（纯 PHP 依赖，已写入 `require`，**开箱即用**，Linux 上 `ext-event` 加速）
+- **默认自研 Native 运行时**（纯 PHP、零扩展依赖、master-worker 多进程），装好即用，无需任何 C 扩展
+- 装了 **Swoole** → 可显式接入（最快，全 C 实现，原生协程），业务代码一行不改
+- 装了 **Workerman** → 纯 PHP 依赖，已写入 `require`，**开箱即用**，Linux 上 `ext-event` 加速
 
-> **为什么当前默认是「兼容层」？**
-> 我们通过五维硬门槛实测过自研网络 I/O 内核：相对 Workerman 吞吐比仅 **1.010×**
-> （PHP 用户态只占全链路 ~13%，Amdahl 上限 +14.9%，原定 30% 门槛在数学上不可达，已撤销）。
-> 因此本包**默认不内置服务器实现**，只做 Swoole / Workerman 的兼容适配层：应用面向 `RuntimeInterface` 编程，
-> 即可在两者间无缝切换。自研内核在「兼容 Workerman / Swoole 多进程 + 功能更广更健壮」前提下仍是**可选方向**，
-> 可在现有框架内作为可插拔的第三种 `Runtime` 实现接入。详见 [docs/gate-report.md](docs/gate-report.md) 与 [docs/runtime.md](docs/runtime.md)。
+切换运行时（`native` / `swoole` / `workerman`）只需改一个参数，协议、连接 API、编排原语全部一致。
+
+> **关于「自研 vs 兼容层」**：早期曾以「相对 Workerman 吞吐提升 30%」作为自研内核的硬门槛，实测仅 **1.010×**。
+> 但 PHP 用户态只占全链路约 13%，Amdahl 上限仅 +14.9%，该门槛在数学上不可达，故结论已撤回。
+> v5.0.0 起**自研 Native 运行时成为默认形态**，并补齐分布式协调能力（服务发现、分布式锁、Leader 选举、负载均衡、分布式 ID、限流、集群 RPC），
+> 同时保留 Swoole / Workerman 作为可插拔的高性能运行时。详见 [docs/runtime.md](docs/runtime.md) 与 [docs/cluster.md](docs/cluster.md)。
 
 > **最低要求 PHP 8.3**。若仍在 PHP 8.1 / 8.2 上运行，请使用旧版 `^2.9`。
 
@@ -25,17 +26,18 @@ Kode Process 是一个「进程编排内核 + 运行时兼容层」：你只写�
 
 | 特性 | 说明 |
 |------|------|
-| 🔌 **一套 API，三种运行时** | Swoole / Workerman 自动择优，亦可显式选用自研 Native（纯 PHP、零扩展） |
+| 🔌 **一套 API，三种运行时** | 默认自研 Native（纯 PHP、零扩展），Swoole / Workerman 自动择优或显式选用，业务代码零改动 |
 | 🧱 **进程编排内核** | 复用宿主的 master-worker 模型、监督重启、平滑重载、优雅停机、信号管理 |
 | 🔁 **统一事件循环** | `Kode::loop()` 基于 `ext-event` / `ext-ev` 加速，`stream_select` 零扩展兜底 |
 | 🌐 **多协议** | HTTP、WebSocket、TCP、Text、Unix Socket、SSL（UDP 取决于宿主运行时） |
 | 🗄️ **共享数据（零安装兜底）** | 同主机多进程共享表，apcu → sysvshm 自动择优；也可复用 Swoole/Workerman 表 |
+| 🕸️ **分布式集群** | 服务发现、分布式锁、Leader 选举、负载均衡（5 策略）、分布式 ID(Snowflake)、限流、集群 RPC；可零依赖（包内 GlobalData）或基于 Redis |
 | 🧵 **多线程并行** | 真正的 CPU 多线程（需 ZTS + ext-parallel），与协程桥接 |
 | 🪶 **协程** | 委托 `kode/fibers`，单线程 I/O 并发 |
 | ⏱️ **定时器** | 一次性、周期、Cron |
 | 📨 **队列** | 委托 `kode/queue`，内存 / 同步 / Redis / 数据库多后端 |
 | 🔒 **SSL/TLS** | 通过监听选项配置，随宿主运行时生效 |
-| 🩺 **部署自检** | `Kode::diagnose()` 一键列出可用运行时 / 事件循环 / 共享表后端 / 并行(ZTS) 能力 |
+| 🩺 **部署自检** | `Kode::diagnose()` 一键列出可用运行时 / 事件循环 / 共享表后端 / 并行(ZTS) / 集群后端 能力 |
 
 ## 安装
 
@@ -147,7 +149,7 @@ SSL、平滑重载、SO_REUSEPORT、WebSocket、定时器、异步 I/O。
 ```php
 use Kode\Process\Runtime;
 
-$rt = Runtime::auto();                       // 自动择优（swoole → workerman → native）
+$rt = Runtime::auto();                       // 自动择优（native → swoole → workerman，native 优先）
 $rt = Runtime::make('workerman');            // 显式指定
 $rt = Runtime::make('native');               // 自研运行时（纯 PHP 零扩展）
 $rt = Runtime::make(\Kode\Process\Runtime\RuntimeType::Swoole);
@@ -159,8 +161,9 @@ Runtime::isSupported('workerman');           // 该运行时是否可用
 print_r(Kode::diagnose());                   // 部署前一键自检（含 Linux 上 ext-event 安装建议）
 ```
 
-`Kode::diagnose()` 返回可用运行时、各自版本与优先级、当前事件循环驱动、共享表后端，以及并行能力
-（是否 ZTS、是否可用、后端类型）；在 Linux 且未安装 `ext-event` / `ext-ev` 时会给出安装建议
+`Kode::diagnose()` 返回可用运行时、各自版本与优先级、当前事件循环驱动、共享表后端、并行能力
+（是否 ZTS、是否可用、后端类型），以及集群后端（可用协调存储、已加入节点）；
+在 Linux 且未安装 `ext-event` / `ext-ev` 时会给出安装建议
 （Workerman 官方也推荐 Linux 用 event 循环）。
 
 ## 共享数据（零安装兜底）
@@ -209,6 +212,52 @@ if (Kode::supportsParallel()) {
     $result = Kode::awaitParallel($future);
 }
 ```
+
+## 分布式集群
+
+v5.0.0 内置轻量分布式协调能力，覆盖单主机到多主机场景。所有原语通过统一的协调存储抽象（`StoreInterface`）驱动，
+可**零依赖**使用包内 GlobalData 后端，或对接 **Redis** 实现跨主机协调：
+
+```php
+use Kode\Process\Kode;
+
+// 服务注册与发现
+$node = Kode::join(['address' => 'http://10.0.0.1:8080', 'weight' => 100]);
+$nodes = Kode::cluster()->nodes();          // 当前在线节点
+$peers = Kode::cluster()->peers();          // 排除自身的其他节点
+
+// 分布式锁
+$lock = Kode::lock('order:' . $id, ttl: 30.0);
+if ($lock->acquire()) {
+    try { /* 临界区 */ } finally { $lock->release(); }
+}
+
+// Leader 选举（集群内只有一个节点 isLeader() 为 true）
+$elect = Kode::election('scheduler');
+$elect->tick();                             // 周期性调用，自动竞选 / 续租 / 让位
+if ($elect->isLeader()) { runScheduler(); }
+
+// 负载均衡（round-robin / weighted / least-conn / consistent-hash / random）
+$balancer = Kode::balancer('least-conn', $nodes, service: 'api');
+$target = $balancer->next();
+
+// 分布式 ID（Snowflake，含 WorkerId 自动分配）
+$id = Kode::snowflake()->id();
+
+// 限流（令牌桶，跨进程/跨主机共享计数）
+Kode::limiter()->consume('api:ip:' . $ip, 1, limit: 100, window: 60);
+```
+
+集群后端如需跨主机复用 Redis：
+
+```php
+use Kode\Process\Cluster;
+use Kode\Process\Cluster\Store\RedisStore;
+
+Cluster::useStore(new RedisStore(['host' => '127.0.0.1', 'port' => 6379]));
+```
+
+详见 [docs/cluster.md](docs/cluster.md)。
 
 ## 定时器
 
@@ -322,14 +371,16 @@ kode info              # 版本信息
 - [队列系统](docs/queue.md)
 - [信号管理](docs/signal.md)
 - [生产部署](docs/deployment.md)
-- [五维硬门槛判定报告](docs/gate-report.md)
+- [分布式集群](docs/cluster.md)
+- [压测数据](docs/benchmark.md)
 
 ## 项目结构
 
 ```
 src/
-├── Kode.php                  # 静态门面：一行起服务
-├── Runtime.php               # 运行时门面：一套 API 三种实现（Swoole / Workerman / Native）
+├── Kode.php                  # 静态门面：一行起服务 + 集群/并行/定时器/信号等编排原语
+├── Runtime.php               # 运行时门面：一套 API 三种实现（Native / Swoole / Workerman）
+├── Cluster.php               # 集群门面：注册发现/锁/选举/负载/ID/限流/RPC 统一入口
 ├── Version.php               # 版本信息
 ├── Timer.php                 # 定时器（顶层类）
 ├── Runtime/                  # 运行时兼容层
@@ -338,8 +389,18 @@ src/
 │   ├── Capability.php        # 能力枚举
 │   ├── RuntimeType.php       # 运行时类型（含优先级）
 │   └── Driver/
+│       ├── NativeRuntime.php     # 自研纯 PHP master-worker（默认，零扩展）
 │       ├── SwooleRuntime.php     # 宿主 Swoole 适配器
 │       └── WorkermanRuntime.php  # 宿主 Workerman 适配器
+├── Cluster/                  # 分布式协调子系统
+│   ├── Store/                # 统一协调存储抽象（Redis / GlobalData / File 三后端）
+│   ├── Registry/             # 服务注册与发现
+│   ├── Lock/                 # 分布式锁
+│   ├── Election/             # Leader 选举
+│   ├── Balancer/             # 负载均衡（5 策略）
+│   ├── Snowflake.php         # 分布式 ID
+│   ├── RateLimiter.php       # 限流
+│   └── Rpc/                  # 集群 RPC（帧编解码 + Server/Client）
 ├── Reactor/                  # 统一事件循环层（Kode::loop()）
 │   ├── LoopFactory.php       # 自动择优
 │   ├── LoopInterface.php

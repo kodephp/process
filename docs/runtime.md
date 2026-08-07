@@ -1,69 +1,72 @@
-# 运行时兼容层（Runtime）
+# 运行时（Runtime）
 
-> 一套 API，三种实现：Swoole / Workerman / Native（自研，纯 PHP 零扩展）。
+> 一套 API，三种实现：**Native（自研，默认）** / Swoole / Workerman。
+> 业务代码只面向 `RuntimeInterface`，**切换底层无需改动任何一行代码**。
 
-## 为什么是"兼容层"而不是"自研内核"
+## 默认自研，可选接入
 
-v4.0.0 之前，本包自带一套网络 I/O 内核（`Kode\Process\Server` + `Compat\Worker`）。
-我们用五维硬门槛做了正式判定（完整报告见 [gate-report.md](./gate-report.md)）：
+本包**默认使用自研的 Native 运行时**——纯 PHP 的 master-worker 多进程服务器，
+零扩展依赖（仅需 CLI 自带的 `ext-pcntl` / `ext-posix`）即可跑起生产级服务。
 
-| 门槛 | 要求 | 实测 | 结果 |
-|---|---|---|---|
-| G1 吞吐 | ≥ Workerman（Amdahl 上限 +14.9%） | **1.010×** | ✅ |
-| G2 尾延迟 | P99 ≤ Workerman | 持平 | ✅ |
-| G3 稳定性 | 3 轮中位数 RSD < 5% | 通过 | ✅ |
-| G4 正确性 | 0 错误 | 通过 | ✅ |
-| G5 内存 | ≤ Workerman × 1.5 | 通过 | ✅ |
-
-指标层面五项全过。瓶颈归因显示 **PHP 用户态只占全链路约 13%**，85.9% 的 CPU 在内核态
-（`accept` / `read` / `write` 系统调用）。按 Amdahl 定律，即使把 PHP 那 13% 优化到 0，
-上限也只有 **+14.9%**——原定 30% 门槛在数学上不可达，已撤销；自研只需持平 Workerman 即达标。
-
-**当前默认形态：不重造 I/O 栈，本包也不自带服务器实现。** 网络层交给已经久经生产验证的
-Swoole / Workerman，本包只做一层薄适配，让业务代码在两者间零改动切换。
-自研内核在「兼容 Workerman / Swoole 多进程 + 功能更广更健壮」前提下仍是**可选方向**，
-可作为可插拔的第三种 `Runtime` 实现接入，无需推翻现有架构。
-同时专注它们不覆盖的部分（进程编排、共享表、IPC、信号、定时器、统一事件循环）。
-
-> `Workerman` 是纯 PHP 依赖、已写入 `require`，因此本包**开箱即用**；
-> 装了 `ext-swoole` 时 `Runtime::auto()` 自动择优到它（优先级更高）。
-
-## 快速开始
+Swoole / Workerman 作为**可选接入**保留：已有相应技术栈的项目可以一行切过去，
+直接复用宿主生态（Swoole 协程、Workerman 组件），而业务代码完全不用改。
 
 ```php
 use Kode\Process\Kode;
 
+// 默认走自研 Native
 Kode::serve('http://0.0.0.0:8080', ['workers' => 8])
     ->on('message', fn($conn, $req) => $conn->send('Hello, World!'))
     ->start();
 ```
 
-`Kode::serve()` 会自动择优：**swoole(100) → workerman(90) → native(80)**。
+切换底层只改第三个参数，**上面的业务回调一字不动**：
 
-> Native 优先级最低，仅在显式指定 `Kode::serve($addr, $opts, 'native')` 时选用。
-> 它不依赖任何 PHP 扩展，但吞吐贴近 Workerman（不追求超越，详见 gate-report.md 的 Amdahl 上限分析）。
+```php
+Kode::serve('http://0.0.0.0:8080', ['workers' => 8], 'swoole')    // 接入 Swoole
+Kode::serve('http://0.0.0.0:8080', ['workers' => 8], 'workerman') // 接入 Workerman
+```
 
-显式指定运行时：
+择优权重：**native(100) → swoole(90) → workerman(80)**。
+`Runtime::auto()` 默认选中 Native；传偏好列表可覆盖：
 
 ```php
 use Kode\Process\Runtime;
+use Kode\Process\Runtime\RuntimeType;
 
-$rt = Runtime::make('workerman');          // 或 RuntimeType::Workerman
-$rt = Runtime::auto([RuntimeType::Workerman]); // 偏好列表，命中第一个可用的
+$rt = Runtime::auto();                          // → native
+$rt = Runtime::auto(['swoole', 'workerman']);   // 命中第一个可用的
+$rt = Runtime::make(RuntimeType::Workerman);    // 显式指定
 ```
 
-## 完整 API
+> **为什么默认自研？** 零依赖、能力可控、与 `Kode` 门面（共享表 / IPC / 信号 / 定时器）
+> 无缝衔接，且吞吐与 Workerman 同一量级（见 [benchmark.md](./benchmark.md)）。
+> 在这个负载区间，端到端吞吐主要受内核网络栈约束，PHP 用户态只占全链路的小头，
+> 因此"自研 vs 成熟框架"的差距远小于直觉——真正的选型依据是生态与能力，而非 QPS。
+
+## 统一 API
 
 ```php
 $rt = Runtime::auto();
 
+// 生命周期
 $rt->listen(string $address, array $options = []): static
 $rt->on(string $event, callable $handler): static
 $rt->start(): void
 $rt->stop(bool $graceful = true): void
 $rt->reload(): void
+
+// 定时器
 $rt->addTimer(float $interval, callable $cb, bool $periodic = true): int
 $rt->delTimer(int $timerId): bool
+
+// 进程与连接（三运行时统一，v5.0.0 新增）
+$rt->workerId(): int                                  // 当前 worker 序号
+$rt->connections(): array                             // 本 worker 的活跃连接
+$rt->broadcast(string $data, bool $raw = false): int  // 广播，返回送达数
+$rt->task(mixed $data): bool                          // 投递异步任务
+
+// 自省
 $rt->supports(Capability $cap): bool
 $rt->capabilities(): array
 $rt->stats(): array
@@ -72,47 +75,75 @@ $rt->isRunning(): bool
 
 ### 地址格式
 
-| 前缀 | 说明 | Swoole | Workerman | Native |
+| 前缀 | 说明 | Native | Swoole | Workerman |
 |---|---|:-:|:-:|:-:|
 | `tcp://host:port` | 裸 TCP，不分包 | ✅ | ✅ | ✅ |
-| `http://host:port` | HTTP/1.1 | ✅ | ✅ | ✅ |
+| `http://host:port` | HTTP/1.1（含 keep-alive） | ✅ | ✅ | ✅ |
 | `websocket://` / `ws://` | WebSocket | ✅ | ✅ | ✅ |
-| `text://host:port` | 文本 + 换行分包 | ❌ | ✅ | ✅ |
-| `frame://host:port` | 长度前缀分包 | ❌ | ✅ | ❌ |
-| `udp://host:port` | UDP | ✅ | ✅ | ❌ |
+| `text://host:port` | 文本 + 换行分包 | ✅ | ❌ | ✅ |
+| `frame://host:port` | 长度前缀分包 | ✅ | ❌ | ✅ |
+| `udp://host:port` | UDP | ✅ | ✅ | ✅ |
 | `unix:///path.sock` | Unix Domain Socket | ✅ | ✅ | ✅ |
+| `ssl://host:port` | TLS | ✅ | ✅ | ✅ |
 
-> Native 暂不支持 `udp` 透传与 `ssl`（v4.2.0）。`http` / `websocket` 在 Native 下跑在 TCP 之上，
-> 由本包 Protocol 系统在连接层解析。
+> Native 下 `http` / `websocket` / `text` / `frame` 均跑在 TCP 之上，
+> 由本包 `Protocol` 协议栈在连接层解析，`message` 事件语义与 Swoole / Workerman 一致。
 
 ### listen 选项
 
 ```php
 $rt->listen('http://0.0.0.0:8080', [
+    // ---- 三运行时通用 ----
     'workers'    => 8,          // worker 进程数
     'name'       => 'my-app',   // 进程名
     'reusePort'  => true,       // SO_REUSEPORT 内核级负载均衡
-    'maxRequest' => 100000,     // 处理满 N 个请求后重启该 worker（对抗内存增长）
+    'maxRequest' => 100000,     // 处理满 N 个请求后回收该 worker（对抗内存增长）
     'backlog'    => 65535,      // accept 队列长度
     'ssl'        => ['local_cert' => '/path/server.pem', 'local_pk' => '/path/server.key'],
-    'mode'       => 'process',  // 仅 Swoole：切到 SWOOLE_PROCESS（默认 BASE，吞吐高约 8%）
+    'taskWorkers' => 4,         // Task 工作进程数（Native / Swoole）
+
+    // ---- Native 专有 ----
+    'loop'          => 'event', // 事件循环：event / ev / select（默认自动择优）
+    'daemonize'     => true,    // 守护进程（double-fork + setsid）
+    'pidFile'       => '/var/run/app.pid',
+    'logFile'       => '/var/log/app.log',
+    'user'          => 'www',   // 降权运行
+    'group'         => 'www',
+    'heartbeat'     => 60,      // 空闲连接回收秒数，0 关闭
+    'keepAlive'     => true,    // HTTP keep-alive，默认开
+    'maxSendBuffer' => 8388608, // 单连接发送缓冲上限，超出即断开（背压）
+    'stopTimeout'   => 10,      // 优雅停机最长等待秒数
+
+    // ---- Swoole 专有 ----
+    'mode'       => 'process',  // 切到 SWOOLE_PROCESS（默认 BASE，吞吐高约 8%）
+
+    // ---- Workerman 专有 ----
+    'workermanCli' => true,     // 保留 Workerman 原生 CLI（start/stop/reload/status）
 ]);
 ```
 
-> **Linux 性能提示**：Workerman 在 Linux 上用 `ext-event` 事件循环吞吐显著更高
-> （Workerman 官方也推荐）。未安装时会由 `Runtime::diagnose()` / `WorkermanRuntime::eventLoopRecommendation()`
-> 给出 `pecl install event` 的安装建议；Swoole 自带事件循环不受此影响。
+> **事件循环**：Native 通过 `LoopFactory` 自动择优 `ext-event` → `ext-ev` → `stream_select`。
+> 装了 `ext-event` 就自动走 C 层多路复用，高连接数下是数量级差异。
+> Workerman 同理（官方也推荐 `pecl install event`），未安装时
+> `Runtime::diagnose()` 会给出安装建议。
+
+> **Workerman 的 argv 约定已被屏蔽**：Workerman 原生会把 `$argv[1]` 解析成
+> `start`/`stop`/`reload` 子命令，参数不合法就打印用法并退出。这会破坏"切换运行时
+> 不改代码"的承诺（Native / Swoole 都不解析 argv），因此本包默认注入合成 argv。
+> 确实需要 Workerman 原生 CLI 时传 `'workermanCli' => true`。
 
 ### 事件
 
-| 事件 | 签名 |
-|---|---|
-| `workerStart` | `fn(int $workerId)` |
-| `workerStop` | `fn(int $workerId)` |
-| `connect` | `fn(ConnectionInterface $conn)` |
-| `message` | `fn(ConnectionInterface $conn, mixed $data)` |
-| `close` | `fn(ConnectionInterface $conn)` |
-| `error` | `fn(?ConnectionInterface $conn, Throwable $e)` |
+| 事件 | 签名 | 说明 |
+|---|---|---|
+| `workerStart` | `fn(int $workerId)` | worker 启动 |
+| `workerStop` | `fn(int $workerId)` | worker 退出 |
+| `connect` | `fn(ConnectionInterface $conn)` | 新连接建立 |
+| `message` | `fn(ConnectionInterface $conn, mixed $data)` | 收到完整报文 |
+| `close` | `fn(ConnectionInterface $conn)` | 连接关闭 |
+| `error` | `fn(?ConnectionInterface $conn, Throwable $e)` | 异常收敛点 |
+| `task` | `fn(mixed $data, int $fromWorkerId): mixed` | 在 task 进程中执行 |
+| `finish` | `fn(mixed $result)` | task 结果回到投递方 |
 
 > 任一回调抛出的异常都会被收敛到 `error` 处理器，不会打挂整个 worker。
 
@@ -133,6 +164,34 @@ $conn->setContext(string $k, mixed $v): void
 $conn->getContext(string $k, mixed $default = null): mixed
 ```
 
+## 异步任务（Task）
+
+把耗时操作甩给独立的 task 进程，避免阻塞 I/O 循环：
+
+```php
+$rt = Kode::serve('http://0.0.0.0:8080', [
+    'workers'     => 4,
+    'taskWorkers' => 4,
+]);
+
+$rt->on('message', function ($conn, $req) use ($rt) {
+    $rt->task(['type' => 'report', 'uid' => 42]);   // 立即返回，不阻塞
+    $conn->send('accepted');
+});
+
+$rt->on('task', function (mixed $data, int $fromWorkerId): string {
+    return heavyJob($data);      // 跑在 task 进程里
+});
+
+$rt->on('finish', function (mixed $result): void {
+    // 回到原 worker 进程
+});
+```
+
+> **优雅降级**：未配置 `taskWorkers` 的运行时（如 Workerman）或未启动时，
+> `task()` 会**就地同步执行**并照常触发 `finish`，而不是抛异常。
+> 这样同一份业务代码切到任何运行时都能跑通，只是并发模型不同。
+
 ## 能力探测
 
 不同运行时能力集不同，**应通过 `supports()` 做优雅降级，不要假定能力一定存在**：
@@ -143,55 +202,55 @@ use Kode\Process\Runtime\Capability;
 if ($rt->supports(Capability::Coroutine)) {
     // Swoole 独有：原生协程
 }
-if ($rt->supports(Capability::HotReload)) {
-    $rt->reload();
-}
 ```
 
-| 能力 | Swoole | Workerman | Native |
+| 能力 | Native | Swoole | Workerman |
 |---|:-:|:-:|:-:|
-| `Coroutine` 原生协程 | ✅ | ❌ | ❌ |
-| `TaskWorker` Task 工作进程 | ✅ | ❌ | ❌ |
-| `AsyncIo` 异步文件/DNS | ✅ | ❌ | ✅ |
-| `UdpServer` | ✅ | ✅ | ❌ |
+| `Coroutine` 原生协程 | ❌ | ✅ | ❌ |
+| `TaskWorker` Task 工作进程 | ✅ | ✅ | ❌ |
+| `AsyncIo` 异步 I/O | ✅ | ✅ | ❌ |
+| `UdpServer` | ✅ | ✅ | ✅ |
+| `Ssl` | ✅ | ✅ | ✅ |
 | `SharedTable` | ✅ | ✅ | ✅ |
 | `UnixSocket` | ✅ | ✅ | ✅ |
-| `Ssl` | ✅ | ✅ | ❌ |
-| `HotReload` | ✅ | ✅ | ✅ |
+| `HotReload` 平滑重载 | ✅ | ✅ | ✅ |
 | `ReusePort` | ✅ | ✅ | ✅ |
 | `WebSocket` | ✅ | ✅ | ✅ |
 | `Timer` | ✅ | ✅ | ✅ |
 
-### 自研 Native 运行时（第三种实现）
+> Native 唯一不提供的是**原生协程**——那需要 C 层栈切换，纯 PHP 做不到。
+> 需要协程时用 `kode/fibers`（Fiber 协作式调度）或直接接入 Swoole。
 
-`native` 是本包内置的**自研**运行时，纯 PHP 实现、零扩展依赖（仅需 `ext-pcntl` /
-`ext-posix`，CLI 环境自带），作为可插拔的第三种 `Runtime` 接入：
+## 自研 Native 运行时详解
 
-- **master-worker（prefork）多进程**：`Kode::serve($addr, ['workers' => N], 'native')` 会由 master
-  进程 fork 出 N 个 worker，每个 worker 跑一个基于 `Reactor\SelectLoop` 的事件循环；
-- **信号与生命周期**：master 负责 `SIGTERM/SIGINT` 优雅停机、`SIGUSR1` 平滑重载（逐个回收并
-  refork worker）、`SIGCHLD` 监督重启；worker 关闭连接、触发 `workerStop`；
-- **协议系统复用**：HTTP / WebSocket / Text / TCP / Unix 全部走本包 `Protocol` 协议栈，
-  `message` 事件语义与 Swoole / Workerman 完全一致（HTTP 传响应数组、WebSocket 传帧数据等）；
-- **设计取舍**：吞吐目标为「持平 Workerman」（Amdahl 上限 +14.9%，30% 门槛已撤销），
-  差异化价值在零扩展、功能可控、与现有 `Kode` 门面无缝衔接。SSL / UDP 透传为后续增强项。
+- **master-worker（prefork）**：master fork 出 N 个 worker + M 个 task 进程，
+  `pcntl_wait(WNOHANG)` 循环守护，子进程异常退出立即 refork。
+- **可插拔事件循环**：`ext-event` → `ext-ev` → `stream_select` 自动择优，也可用
+  `'loop' => 'select'` 强制指定。
+- **异步发送缓冲 + 背压**：`send()` 未写完的字节进缓冲区，注册 `onWritable` 续写；
+  堆积超过 `maxSendBuffer` 即断开该连接，防止慢客户端拖垮内存。
+- **信号语义**：`SIGTERM`/`SIGINT` 优雅停机（受 `stopTimeout` 约束），
+  `SIGUSR1` 平滑重载（逐个回收并 refork worker，连接不中断）。
+- **HTTP keep-alive**：遵循请求的 `Connection` 头，`Connection: close` 时
+  发送完成后再关闭（`closeAfterFlush()`），不会截断响应。
+- **运维能力**：`daemonize` 守护化、`pidFile`、进程改名、`user`/`group` 降权、
+  `maxRequest` 请求数回收、`heartbeat` 空闲连接回收。
+- **协议复用**：HTTP / WebSocket / Text / LengthPrefix / TCP 全部走本包 `Protocol` 协议栈。
 
 ## 环境自检
 
 ```php
-use Kode\Process\Runtime;
-
-print_r(Runtime::diagnose());
+print_r(Kode\Process\Runtime::diagnose());
 ```
 
 ```
 [
-    'preferred'      => 'swoole',
+    'preferred'      => 'native',
     'loop'           => ['event' => ['supported'=>true,'priority'=>100,'preferred'=>true], ...],
     'runtimes'       => [
-        'swoole'    => ['available'=>true,  'version'=>'6.2.2', 'priority'=>100, 'preferred'=>true],
-        'workerman' => ['available'=>true,  'version'=>'5.2.2', 'priority'=>90,  'preferred'=>false],
-        'native'    => ['available'=>true,  'version'=>'4.2.0', 'priority'=>80,  'preferred'=>false],
+        'native'    => ['available'=>true,  'version'=>'5.0.0', 'priority'=>100, 'preferred'=>true],
+        'swoole'    => ['available'=>true,  'version'=>'6.2.2', 'priority'=>90,  'preferred'=>false],
+        'workerman' => ['available'=>true,  'version'=>'5.2.2', 'priority'=>80,  'preferred'=>false],
     ],
     'recommendation' => null,  // Linux 且未装 ext-event 时为安装建议字符串
 ]
@@ -204,17 +263,28 @@ Runtime::register('roadrunner', MyRoadRunnerRuntime::class);  // 需实现 Runti
 $rt = Runtime::make('roadrunner');
 ```
 
-## 从 v3.x 迁移
+## 迁移说明
 
-| v3.x | v4.0.0 |
+### v4.x → v5.0.0
+
+| 变化 | 说明 |
+|---|---|
+| 默认运行时 | `auto()` 由 swoole 优先改为 **native 优先** |
+| 保持旧行为 | 显式写 `Runtime::auto(['swoole', 'workerman'])` |
+| 新增统一 API | `workerId()` / `connections()` / `broadcast()` / `task()` |
+| 新增事件 | `task` / `finish` |
+| HTTP 响应 | `$conn->send('文本')` 现在会自动补全状态行与 `Content-Length`（此前直接裸发） |
+| Workerman argv | 默认不再解析 `$argv` 子命令，需要时传 `'workermanCli' => true` |
+
+### v3.x → v4.x
+
+| v3.x | v4.x |
 |---|---|
 | `Kode\Process\Compat\Worker` | `Runtime::make('workerman')` 或 `Runtime::auto()` |
 | `Kode\Process\Server` | `Runtime::auto()` |
 | `Kode\Process\Application` | `Kode::serve()` |
 | `Kode::worker($addr, $n)` | `Kode::serve($addr, ['workers' => $n])` |
 | `Kode\Process\Compat\Timer` | `Kode\Process\Timer`（顶层，API 不变） |
-| `Kode::go()` / `Kode::batch()` | 保留，内部委托 `kode/fibers` |
 | `Kode\Process\Coroutine\*` | 用 `kode/fibers`，或 Swoole 原生协程 |
-| `Kode\Process\Cluster\*` | 移除（不属于进程内核职责） |
-| `Kode\Process\Integration\*` | 移除（框架集成应为独立包） |
-| `Kode\Process\Broadcast` / `Channel` | 移除（用网络版 GlobalData 或消息队列） |
+| `Kode\Process\Cluster\*` | v4.x 临时移除；**v5.0.0 重新引入**为 `Kode\Process\Cluster`（分布式协调子系统：服务发现 / 分布式锁 / Leader 选举 / 负载均衡 / 分布式 ID / 限流 / 集群 RPC），详见 [cluster.md](./cluster.md) |
+| `Kode\Process\Broadcast` / `Channel` | v4.x 移除；v5.0.0 以 `Cluster::broadcast()`（集群 RPC 广播）与网络版 GlobalData 替代 |

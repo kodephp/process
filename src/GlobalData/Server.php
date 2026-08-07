@@ -148,14 +148,106 @@ final class Server
             'cas' => $this->handleCas($request),
             'keys' => $this->handleKeys($request),
             'stats' => $this->handleStats(),
+            // 集群协调原语（单线程串行处理，天然原子）
+            'add' => $this->handleAdd($request),
+            'casdel' => $this->handleCasDelete($request),
+            'expire' => $this->handleExpire($request),
+            'mget' => $this->handleMget($request),
             default => ['success' => false, 'error' => 'Unknown action']
         };
+    }
+
+    /**
+     * 键是否已过期；过期则顺手清理。
+     */
+    private function isExpired(string $key): bool
+    {
+        if (!isset($this->data[$key])) {
+            return true;
+        }
+
+        $expire = $this->data[$key]['expire'] ?? 0;
+        if ($expire > 0 && $expire < time()) {
+            unset($this->data[$key]);
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * 仅当键不存在（或已过期）时写入——分布式锁与选举的原子基石。
+     */
+    private function handleAdd(array $request): array
+    {
+        $key = $request['key'] ?? '';
+        if (!$this->isExpired($key)) {
+            return ['success' => false, 'error' => 'Key exists'];
+        }
+
+        $ttl = (int) ($request['ttl'] ?? 0);
+        $this->data[$key] = [
+            'value'  => $request['value'] ?? null,
+            'expire' => $ttl > 0 ? time() + $ttl : 0,
+        ];
+
+        return ['success' => true];
+    }
+
+    /**
+     * 仅当当前值匹配时删除——用于安全释放锁，避免误删他人重新获得的锁。
+     */
+    private function handleCasDelete(array $request): array
+    {
+        $key = $request['key'] ?? '';
+        if ($this->isExpired($key)) {
+            return ['success' => false, 'error' => 'Key not found'];
+        }
+        if ($this->data[$key]['value'] !== ($request['old_value'] ?? null)) {
+            return ['success' => false, 'error' => 'Value mismatch'];
+        }
+
+        unset($this->data[$key]);
+
+        return ['success' => true];
+    }
+
+    /**
+     * 重设存活时间（锁续期 / 心跳保活）。
+     */
+    private function handleExpire(array $request): array
+    {
+        $key = $request['key'] ?? '';
+        if ($this->isExpired($key)) {
+            return ['success' => false, 'error' => 'Key not found'];
+        }
+
+        $ttl                        = (int) ($request['ttl'] ?? 0);
+        $this->data[$key]['expire'] = $ttl > 0 ? time() + $ttl : 0;
+
+        return ['success' => true];
+    }
+
+    /**
+     * 批量读取——服务发现列举节点时把 N 次往返压成 1 次。
+     */
+    private function handleMget(array $request): array
+    {
+        $values = [];
+        foreach ((array) ($request['keys'] ?? []) as $key) {
+            $key = (string) $key;
+            if (!$this->isExpired($key)) {
+                $values[$key] = $this->data[$key]['value'];
+            }
+        }
+
+        return ['success' => true, 'values' => $values];
     }
 
     private function handleGet(array $request): array
     {
         $key = $request['key'] ?? '';
-        if (!isset($this->data[$key])) {
+        if ($this->isExpired($key)) {
             return ['success' => true, 'value' => null, 'exists' => false];
         }
         return ['success' => true, 'value' => $this->data[$key]['value'], 'exists' => true];
@@ -174,15 +266,7 @@ final class Server
     private function handleIsset(array $request): array
     {
         $key = $request['key'] ?? '';
-        if (!isset($this->data[$key])) {
-            return ['success' => true, 'exists' => false];
-        }
-        $item = $this->data[$key];
-        if ($item['expire'] > 0 && $item['expire'] < time()) {
-            unset($this->data[$key]);
-            return ['success' => true, 'exists' => false];
-        }
-        return ['success' => true, 'exists' => true];
+        return ['success' => true, 'exists' => !$this->isExpired($key)];
     }
 
     private function handleUnset(array $request): array
@@ -195,17 +279,15 @@ final class Server
     {
         $key = $request['key'] ?? '';
         $step = (int) ($request['step'] ?? 1);
+        $ttl  = (int) ($request['ttl'] ?? 0);
 
-        if (!isset($this->data[$key])) {
-            $this->data[$key] = ['value' => $step, 'expire' => 0];
+        // 键不存在或已过期：以 step 为初值重建，并应用首次创建的 TTL（限流窗口靠它）
+        if ($this->isExpired($key)) {
+            $this->data[$key] = ['value' => $step, 'expire' => $ttl > 0 ? time() + $ttl : 0];
             return ['success' => true, 'value' => $step];
         }
 
         $item = $this->data[$key];
-        if ($item['expire'] > 0 && $item['expire'] < time()) {
-            $this->data[$key] = ['value' => $step, 'expire' => 0];
-            return ['success' => true, 'value' => $step];
-        }
         if (!is_numeric($item['value'])) {
             return ['success' => false, 'error' => 'Value is not numeric'];
         }
@@ -224,13 +306,20 @@ final class Server
     private function handleCas(array $request): array
     {
         $key = $request['key'] ?? '';
-        if (!isset($this->data[$key])) {
+        if ($this->isExpired($key)) {
             return ['success' => false, 'error' => 'Key not found'];
         }
         if ($this->data[$key]['value'] !== ($request['old_value'] ?? null)) {
             return ['success' => false, 'error' => 'Value mismatch', 'current' => $this->data[$key]['value']];
         }
         $this->data[$key]['value'] = $request['new_value'] ?? null;
+
+        // 允许 CAS 的同时刷新 TTL（锁续期场景）
+        if (array_key_exists('ttl', $request)) {
+            $ttl                        = (int) $request['ttl'];
+            $this->data[$key]['expire'] = $ttl > 0 ? time() + $ttl : 0;
+        }
+
         return ['success' => true];
     }
 
@@ -239,9 +328,13 @@ final class Server
         $pattern = $request['pattern'] ?? '*';
         $keys = [];
         foreach (array_keys($this->data) as $key) {
-            if ($pattern === '*' || fnmatch($pattern, $key)) {
-                $keys[] = $key;
+            if ($pattern !== '*' && !fnmatch($pattern, $key)) {
+                continue;
             }
+            if ($this->isExpired($key)) {
+                continue;
+            }
+            $keys[] = $key;
         }
         return ['success' => true, 'keys' => $keys];
     }

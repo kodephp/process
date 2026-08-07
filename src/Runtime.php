@@ -13,30 +13,32 @@ use Kode\Process\Runtime\RuntimeInterface;
 use Kode\Process\Runtime\RuntimeType;
 
 /**
- * 运行时门面：一套 API，三种实现（Swoole / Workerman / Native 自研）。
+ * 运行时门面：一套 API，三种实现（Native 自研 / Swoole / Workerman）。
  *
  * ```php
  * use Kode\Process\Runtime;
  *
- * $rt = Runtime::auto();                                  // 自动择优（swoole → workerman）
+ * $rt = Runtime::auto();                                  // 默认自研 Native，零扩展依赖
  * $rt->listen('http://0.0.0.0:8080', ['workers' => 8])
  *    ->on('message', fn($conn, $req) => $conn->send('Hello'))
  *    ->start();
  *
- * // 也可显式选用自研 Native 运行时（纯 PHP、零扩展依赖）
- * $rt = Runtime::make('native');
+ * // 已有 Swoole / Workerman 技术栈时显式接入，业务代码一行不用改
+ * $rt = Runtime::make('swoole');
+ * $rt = Runtime::make('workerman');
  * ```
  *
- * 择优顺序：swoole(100) → workerman(90) → native(80)。
+ * 择优顺序：native(100) → swoole(90) → workerman(80)。
  *
- * 设计立场（依据 docs/gate-report.md 的五维硬门槛判定）：
- * 自研网络 I/O 内核相对 Workerman 的吞吐比仅 1.010×（原定 30% 门槛在数学上不可达，
- * 已撤销；Amdahl 上限 +14.9%）。因此默认形态是 Swoole / Workerman 兼容适配层，
- * 但本包同时内置一套**自研（Native）运行时**——纯 PHP 的 master-worker 多进程服务器，
- * 基于 Reactor\SelectLoop 事件循环 + Protocol 协议系统，零扩展依赖，可作为可插拔的
- * 第三种实现。应用面向 {@see RuntimeInterface} 编程，即可在三者间无缝切换。
- * Workerman 是纯 PHP 依赖（已写入 require），因此包开箱即用；
- * 需要更高吞吐时再装 ext-swoole 即可自动择优到它。
+ * 设计立场：
+ * 本包**默认使用自研（Native）运行时**——纯 PHP 的 master-worker 多进程服务器，
+ * 基于可插拔事件循环（ext-event / ext-ev / stream_select 自动择优）+ Protocol 协议系统，
+ * 零扩展依赖即可运行，同时支持 TaskWorker、UDP、SSL、HTTP keep-alive、异步发送缓冲、
+ * 平滑重载、心跳回收、守护进程等生产级能力。
+ *
+ * Swoole / Workerman 作为**可选接入**保留，供已有技术栈的项目复用宿主生态。
+ * 三者实现同一套 {@see RuntimeInterface}（含 workerId / connections / broadcast / task），
+ * 应用面向接口编程，切换底层无需改动任何业务代码。
  */
 final class Runtime
 {
@@ -46,9 +48,9 @@ final class Runtime
      * @var array<string, class-string<RuntimeInterface>>
      */
     private const DRIVERS = [
+        'native'    => NativeRuntime::class,
         'swoole'    => SwooleRuntime::class,
         'workerman' => WorkermanRuntime::class,
-        'native'    => NativeRuntime::class,
     ];
 
     /** @var array<string, class-string<RuntimeInterface>> 运行期注册的自定义驱动 */
@@ -117,8 +119,9 @@ final class Runtime
 
         if ($best === null) {
             throw RuntimeNotSupportedException::unavailable(
-                RuntimeType::Workerman,
-                '请安装 Swoole（pecl install swoole）或 Workerman（composer require workerman/workerman）'
+                RuntimeType::Native,
+                '自研 Native 运行时需要 CLI SAPI 与 pcntl/posix 扩展；'
+                . '也可改用 Swoole（pecl install swoole）或 Workerman（composer require workerman/workerman）'
             );
         }
 

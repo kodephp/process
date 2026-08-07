@@ -36,26 +36,25 @@ final class NativeRuntimeTest extends TestCase
         $ref     = new \ReflectionMethod(NativeRuntime::class, 'supportedSchemes');
         $schemes = $ref->invoke(new NativeRuntime());
 
-        foreach (['tcp', 'http', 'websocket', 'text', 'unix'] as $expected) {
+        foreach (['tcp', 'http', 'websocket', 'text', 'frame', 'udp', 'unix', 'ssl'] as $expected) {
             $this->assertContains($expected, $schemes, "缺少协议 {$expected}");
         }
-        // 自研内核 v4.2.0 暂不支持 SSL / UDP 透传
-        $this->assertNotContains('ssl', $schemes);
-        $this->assertNotContains('udp', $schemes);
+        // 未实现的传输不应出现
+        $this->assertNotContains('http2', $schemes);
     }
 
     public function testCapabilitiesHonest(): void
     {
         $caps = array_map(static fn (Capability $c): string => $c->name, (new NativeRuntime())->capabilities());
 
-        foreach (['WebSocket', 'HotReload', 'ReusePort', 'Timer'] as $expected) {
+        foreach (
+            ['WebSocket', 'HotReload', 'ReusePort', 'Timer', 'TaskWorker', 'UdpServer', 'Ssl', 'UnixSocket']
+            as $expected
+        ) {
             $this->assertContains($expected, $caps, "缺少能力 {$expected}");
         }
-        // 纯 PHP 实现，不谎报协程 / UDP / SSL / Task 进程
+        // 纯 PHP 实现，不谎报协程能力
         $this->assertNotContains('Coroutine', $caps);
-        $this->assertNotContains('UdpServer', $caps);
-        $this->assertNotContains('Ssl', $caps);
-        $this->assertNotContains('TaskWorker', $caps);
     }
 
     public function testRegisteredAsDriver(): void
@@ -64,13 +63,55 @@ final class NativeRuntimeTest extends TestCase
         $this->assertInstanceOf(NativeRuntime::class, Runtime::make('native'));
     }
 
-    public function testPriorityBelowWorkerman(): void
+    public function testIsDefaultRuntime(): void
     {
-        $this->assertLessThan(RuntimeType::Workerman->priority(), RuntimeType::Native->priority());
+        // 自研 Native 为默认运行时，权重最高
+        $this->assertGreaterThan(RuntimeType::Swoole->priority(), RuntimeType::Native->priority());
+        $this->assertGreaterThan(RuntimeType::Workerman->priority(), RuntimeType::Native->priority());
+        $this->assertSame(RuntimeType::Native, Runtime::preferred());
+
         // Native 为本包自研实现，非第三方外部依赖
         $this->assertFalse(RuntimeType::Native->isExternal());
         $this->assertTrue(RuntimeType::Swoole->isExternal());
         $this->assertTrue(RuntimeType::Workerman->isExternal());
+    }
+
+    public function testUnifiedApiSurface(): void
+    {
+        $rt = new NativeRuntime();
+
+        // 三运行时共用的统一 API：切换底层无需改业务代码
+        $this->assertSame(0, $rt->workerId());
+        $this->assertSame([], $rt->connections());
+        $this->assertSame(0, $rt->broadcast('noop'));
+    }
+
+    public function testTaskDegradesToSyncWhenNoTaskWorker(): void
+    {
+        $rt     = new NativeRuntime();
+        $seen   = [];
+
+        $rt->on('task', function (mixed $data) use (&$seen): string {
+            $seen[] = $data;
+            return 'done:' . $data;
+        });
+        $rt->on('finish', function (mixed $result) use (&$seen): void {
+            $seen[] = $result;
+        });
+
+        // 未启动时无 task 进程，应就地同步执行并回调 finish
+        $this->assertTrue($rt->task('job'));
+        $this->assertSame(['job', 'done:job'], $seen);
+    }
+
+    public function testStatsExposesRuntimeShape(): void
+    {
+        $stats = (new NativeRuntime())->stats();
+
+        foreach (['runtime', 'workers', 'task_workers', 'worker_id', 'connections'] as $key) {
+            $this->assertArrayHasKey($key, $stats, "stats 缺少键 {$key}");
+        }
+        $this->assertSame('native', $stats['runtime']);
     }
 
     /**

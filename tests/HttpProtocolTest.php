@@ -177,9 +177,20 @@ final class HttpProtocolTest extends TestCase
 
     // --- encode() ---------------------------------------------------------
 
-    public function testEncodeStringPassthrough(): void
+    public function testEncodeBareStringWrapsAsResponse(): void
     {
-        $this->assertSame('raw', HttpProtocol::encode('raw'));
+        $response = HttpProtocol::encode('raw');
+
+        $this->assertStringStartsWith("HTTP/1.1 200 OK\r\n", $response);
+        $this->assertStringContainsString("Content-Length: 3\r\n", $response);
+        $this->assertStringEndsWith("\r\n\r\nraw", $response);
+    }
+
+    public function testEncodeCompleteResponsePassesThrough(): void
+    {
+        $full = "HTTP/1.1 404 Not Found\r\nContent-Length: 4\r\n\r\nbody";
+
+        $this->assertSame($full, HttpProtocol::encode($full));
     }
 
     public function testEncodeUnsupportedTypeReturnsEmptyString(): void

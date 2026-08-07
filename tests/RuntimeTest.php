@@ -6,6 +6,7 @@ namespace Kode\Process\Tests;
 
 use InvalidArgumentException;
 use Kode\Process\Runtime;
+use Kode\Process\Runtime\Driver\NativeRuntime;
 use Kode\Process\Runtime\Driver\SwooleRuntime;
 use Kode\Process\Runtime\Driver\WorkermanRuntime;
 use Kode\Process\Runtime\RuntimeInterface;
@@ -49,11 +50,21 @@ final class RuntimeTest extends TestCase
 
     public function testPreferredFollowsPriorityOrder(): void
     {
-        $expected = SwooleRuntime::isAvailable()
-            ? RuntimeType::Swoole
-            : RuntimeType::Workerman;
+        // 自研 Native 权重最高且零扩展依赖，在 CLI 下恒为默认运行时
+        $expected = NativeRuntime::isAvailable()
+            ? RuntimeType::Native
+            : (SwooleRuntime::isAvailable() ? RuntimeType::Swoole : RuntimeType::Workerman);
 
         $this->assertSame($expected, Runtime::preferred());
+    }
+
+    public function testAutoRespectsExplicitPreference(): void
+    {
+        // 显式偏好可覆盖默认择优，业务代码依旧面向 RuntimeInterface
+        $rt = Runtime::auto(['workerman']);
+
+        $this->assertInstanceOf(WorkermanRuntime::class, $rt);
+        $this->assertSame(RuntimeType::Workerman, $rt::type());
     }
 
     public function testAvailableIsSortedByPriorityDesc(): void

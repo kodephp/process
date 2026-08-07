@@ -116,8 +116,13 @@ final class HttpProtocol implements ProtocolInterface
     #[\Override]
     public static function encode(mixed $data, mixed $connection = null): string
     {
+        // 裸字符串视为响应体，自动补全状态行与必需头部。
+        // 已经是完整响应报文（以 "HTTP/" 开头）时原样透传，避免二次包装。
         if (is_string($data)) {
-            return $data;
+            if (str_starts_with($data, 'HTTP/')) {
+                return $data;
+            }
+            $data = ['body' => $data];
         }
 
         if (!is_array($data)) {

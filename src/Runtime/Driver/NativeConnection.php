@@ -4,39 +4,76 @@ declare(strict_types=1);
 
 namespace Kode\Process\Runtime\Driver;
 
-use Kode\Process\Protocol\ProtocolInterface;
+use Kode\Process\Reactor\LoopInterface;
 use Kode\Process\Runtime\ConnectionInterface;
 
 /**
- * 自研（Native）运行时连接适配。
+ * 自研（Native）运行时的连接对象。
  *
- * 基于纯 PHP 流套接字（stream_socket），不依赖任何扩展。
- * 编码/解码复用本包的 Protocol 协议系统，因此 send() 入参语义与
- * Swoole / Workerman 运行时保持一致（HTTP 传响应数组、WebSocket 传字符串等）。
+ * 基于纯 PHP 流套接字（stream_socket），不依赖任何扩展，但具备生产级连接语义：
+ *  - **异步发送缓冲**：一次 fwrite 写不完时挂到事件循环的可写监听上续写，
+ *    绝不阻塞 worker（对齐 Workerman TcpConnection 的 sendBuffer 行为）。
+ *  - **背压保护**：缓冲超过 maxSendBuffer 触发 bufferFull，避免慢客户端打爆内存。
+ *  - **延迟关闭**：closeAfterFlush() 把缓冲写净后再断开，适配 HTTP `Connection: close`。
+ *  - **UDP 无连接**：同一抽象承载 UDP 报文，send() 自动走 sendto。
+ *  - **活跃时间**：供运行时的空闲连接心跳回收使用。
+ *
+ * 编解码复用本包 Protocol 系统，因此 send() 的入参语义与 Swoole / Workerman
+ * 运行时完全一致（HTTP 传响应数组、WebSocket / Text 传字符串等）。
  *
  * @internal 由 {@see NativeRuntime} 创建
  */
 final class NativeConnection implements ConnectionInterface
 {
+    /** 默认发送缓冲上限（字节），超过即视为对端消费不过来 */
+    public const int DEFAULT_MAX_SEND_BUFFER = 8388608;
+
     private static int $seq = 0;
 
     /** @var array<string, mixed> */
     private array $context = [];
 
-    private string $buffer = '';
+    private string $recvBuffer = '';
+
+    private string $sendBuffer = '';
 
     private bool $handshakeDone = false;
 
+    private bool $sslReady = false;
+
     private bool $closed = false;
 
-    private int $connId;
+    private bool $closeAfterFlush = false;
 
+    private bool $writeWatched = false;
+
+    private bool $bufferOverflow = false;
+
+    private readonly int $connId;
+
+    private float $lastActiveAt;
+
+    private int $bytesRead = 0;
+
+    private int $bytesWritten = 0;
+
+    /**
+     * @param resource    $socket        TCP/Unix 为连接套接字；UDP 为服务端套接字
+     * @param string      $peerName      对端地址
+     * @param string|null $protocolClass 协议类，null 表示裸字节
+     * @param string|null $udpPeer       非 null 表示 UDP 报文连接，值为对端地址
+     */
     public function __construct(
         private readonly mixed $socket,
         private readonly string $peerName = '',
         private readonly ?string $protocolClass = null,
+        private ?LoopInterface $loop = null,
+        private readonly ?string $udpPeer = null,
+        private readonly int $maxSendBuffer = self::DEFAULT_MAX_SEND_BUFFER,
     ) {
-        $this->connId = ++self::$seq;
+        $this->connId      = ++self::$seq;
+        $this->lastActiveAt = microtime(true);
+        $this->sslReady    = true;
     }
 
     public function id(): int
@@ -46,7 +83,7 @@ final class NativeConnection implements ConnectionInterface
 
     public function send(string $data, bool $raw = false): bool
     {
-        if ($this->closed || !is_resource($this->socket)) {
+        if ($this->closed) {
             return false;
         }
 
@@ -54,19 +91,128 @@ final class NativeConnection implements ConnectionInterface
             ? $data
             : ($this->protocolClass)::encode($data, $this);
 
-        $written = @fwrite($this->socket, $bytes);
-
-        return $written !== false && $written > 0;
+        return $this->write($bytes);
     }
 
-    /** 写裸字节（用于 WebSocket 握手响应等不经过协议编码的场景） */
+    /** 写裸字节，跳过协议编码（WebSocket 握手响应、SSL 前置等场景） */
     public function sendRaw(string $data): bool
     {
-        if ($this->closed || !is_resource($this->socket)) {
+        return $this->closed ? false : $this->write($data);
+    }
+
+    /**
+     * 写入并在必要时挂起可写监听续写。
+     */
+    private function write(string $bytes): bool
+    {
+        if ($bytes === '' || !is_resource($this->socket)) {
             return false;
         }
-        $written = @fwrite($this->socket, $data);
-        return $written !== false && $written > 0;
+
+        $this->lastActiveAt = microtime(true);
+
+        if ($this->udpPeer !== null) {
+            $n = @stream_socket_sendto($this->socket, $bytes, 0, $this->udpPeer);
+            if ($n > 0) {
+                $this->bytesWritten += $n;
+            }
+            return $n !== false && $n > 0;
+        }
+
+        // 已有积压：直接追加，顺序由可写回调保证
+        if ($this->sendBuffer !== '') {
+            $this->sendBuffer .= $bytes;
+            return $this->guardBuffer();
+        }
+
+        $n = @fwrite($this->socket, $bytes);
+        if ($n === false) {
+            $this->close();
+            return false;
+        }
+        $this->bytesWritten += $n;
+
+        if ($n < strlen($bytes)) {
+            $this->sendBuffer = substr($bytes, $n);
+            $this->watchWritable();
+            return $this->guardBuffer();
+        }
+
+        return true;
+    }
+
+    /** 缓冲超限保护：超过上限直接断开，防止慢客户端拖垮进程 */
+    private function guardBuffer(): bool
+    {
+        if (strlen($this->sendBuffer) <= $this->maxSendBuffer) {
+            return true;
+        }
+        $this->bufferOverflow = true;
+        $this->close();
+        return false;
+    }
+
+    /**
+     * 事件循环可写回调：把积压缓冲继续写出，写净后取消监听。
+     *
+     * @return bool 缓冲是否已清空
+     */
+    public function flush(): bool
+    {
+        if ($this->sendBuffer === '' || !is_resource($this->socket)) {
+            $this->unwatchWritable();
+            return true;
+        }
+
+        $n = @fwrite($this->socket, $this->sendBuffer);
+        if ($n === false) {
+            $this->close();
+            return true;
+        }
+        $this->bytesWritten += $n;
+        $this->sendBuffer   = substr($this->sendBuffer, $n);
+
+        if ($this->sendBuffer === '') {
+            $this->unwatchWritable();
+            if ($this->closeAfterFlush) {
+                $this->close();
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    private function watchWritable(): void
+    {
+        if ($this->writeWatched || $this->loop === null || !is_resource($this->socket)) {
+            return;
+        }
+        $this->writeWatched = true;
+        $this->loop->onWritable($this->socket, function (): void {
+            $this->flush();
+        });
+    }
+
+    private function unwatchWritable(): void
+    {
+        if (!$this->writeWatched || $this->loop === null) {
+            return;
+        }
+        $this->writeWatched = false;
+        if (is_resource($this->socket)) {
+            $this->loop->offWritable($this->socket);
+        }
+    }
+
+    /** 缓冲写净后再关闭（HTTP `Connection: close` 语义） */
+    public function closeAfterFlush(): void
+    {
+        if ($this->sendBuffer === '') {
+            $this->close();
+            return;
+        }
+        $this->closeAfterFlush = true;
     }
 
     public function close(?string $data = null): void
@@ -78,13 +224,19 @@ final class NativeConnection implements ConnectionInterface
             $this->send($data);
         }
         $this->closed = true;
-        if (is_resource($this->socket)) {
+        $this->unwatchWritable();
+
+        // UDP 复用服务端套接字，不能在单个报文结束时关闭
+        if ($this->udpPeer === null && is_resource($this->socket)) {
             @fclose($this->socket);
         }
     }
 
     public function remoteAddress(): string
     {
+        if ($this->udpPeer !== null) {
+            return $this->udpPeer;
+        }
         if ($this->peerName !== '') {
             return $this->peerName;
         }
@@ -110,7 +262,10 @@ final class NativeConnection implements ConnectionInterface
 
     public function isAlive(): bool
     {
-        return !$this->closed && is_resource($this->socket) && !@feof($this->socket);
+        if ($this->closed || !is_resource($this->socket)) {
+            return false;
+        }
+        return $this->udpPeer !== null || !@feof($this->socket);
     }
 
     public function native(): mixed
@@ -123,32 +278,46 @@ final class NativeConnection implements ConnectionInterface
         return $this->protocolClass;
     }
 
-    // ---- 接收缓冲（由 NativeRuntime 驱动） ----
+    public function isUdp(): bool
+    {
+        return $this->udpPeer !== null;
+    }
+
+    public function bindLoop(LoopInterface $loop): void
+    {
+        $this->loop = $loop;
+    }
+
+    // ---------------------------------------------------------- 接收缓冲
 
     public function appendBuffer(string $data): void
     {
-        $this->buffer .= $data;
+        $this->recvBuffer  .= $data;
+        $this->bytesRead   += strlen($data);
+        $this->lastActiveAt = microtime(true);
     }
 
     public function getBuffer(): string
     {
-        return $this->buffer;
+        return $this->recvBuffer;
     }
 
     public function setBuffer(string $buffer): void
     {
-        $this->buffer = $buffer;
+        $this->recvBuffer = $buffer;
     }
 
     public function clearBuffer(): void
     {
-        $this->buffer = '';
+        $this->recvBuffer = '';
     }
 
     public function hasFullHttpRequest(): bool
     {
-        return strpos($this->buffer, "\r\n\r\n") !== false;
+        return str_contains($this->recvBuffer, "\r\n\r\n");
     }
+
+    // ---------------------------------------------------- 握手 / SSL 状态
 
     public function isHandshakeDone(): bool
     {
@@ -158,6 +327,56 @@ final class NativeConnection implements ConnectionInterface
     public function setHandshakeDone(): void
     {
         $this->handshakeDone = true;
+    }
+
+    public function isSslReady(): bool
+    {
+        return $this->sslReady;
+    }
+
+    public function setSslPending(): void
+    {
+        $this->sslReady = false;
+    }
+
+    public function setSslReady(): void
+    {
+        $this->sslReady = true;
+    }
+
+    // ------------------------------------------------------------ 运行期
+
+    public function lastActiveAt(): float
+    {
+        return $this->lastActiveAt;
+    }
+
+    public function touch(): void
+    {
+        $this->lastActiveAt = microtime(true);
+    }
+
+    public function pendingBytes(): int
+    {
+        return strlen($this->sendBuffer);
+    }
+
+    public function isBufferOverflow(): bool
+    {
+        return $this->bufferOverflow;
+    }
+
+    /** @return array{id:int, remote:string, read:int, written:int, pending:int, idle:float} */
+    public function stats(): array
+    {
+        return [
+            'id'      => $this->connId,
+            'remote'  => $this->remoteAddress(),
+            'read'    => $this->bytesRead,
+            'written' => $this->bytesWritten,
+            'pending' => strlen($this->sendBuffer),
+            'idle'    => round(microtime(true) - $this->lastActiveAt, 3),
+        ];
     }
 
     public function setContext(string $key, mixed $value): void

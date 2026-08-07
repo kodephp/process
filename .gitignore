@@ -34,3 +34,6 @@ CHANGELOG
 /benchmarks/gate/*.pid
 /benchmarks/gate/gate-*.txt
 /benchmarks/gate/gate-*.json
+/benchmarks/bench-result.txt
+/benchmarks/workerman.log
+/benchmarks/*.log

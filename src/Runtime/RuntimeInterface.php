@@ -7,10 +7,10 @@ namespace Kode\Process\Runtime;
 /**
  * 运行时契约：一套 API，三种实现。
  *
- * 应用只面向本接口编程，即可在 Swoole / Workerman 之间无缝切换：
+ * 应用只面向本接口编程，切换底层（Native / Swoole / Workerman）时**业务代码零改动**：
  *
  * ```php
- * $rt = Runtime::auto();                       // 自动择优
+ * $rt = Runtime::auto();                       // 默认自研 Native
  * $rt->listen('http://0.0.0.0:8080', ['workers' => 4]);
  * $rt->on('message', fn($conn, $req) => $conn->send('Hello'));
  * $rt->start();
@@ -23,6 +23,11 @@ namespace Kode\Process\Runtime;
  *  - message(ConnectionInterface $conn, mixed $data)
  *  - close(ConnectionInterface $conn)
  *  - error(ConnectionInterface|null $conn, \Throwable $e)
+ *  - task(mixed $data, int $taskId) —— 任务进程内执行，返回值回传 finish
+ *  - finish(mixed $result) —— 投递方 worker 收到任务结果
+ *
+ * 能力差异通过 {@see self::supports()} 查询后优雅降级，不支持的能力会以
+ * {@see Exception\RuntimeNotSupportedException} 明确报错，而不是静默行为不一致。
  */
 interface RuntimeInterface
 {
@@ -107,4 +112,36 @@ interface RuntimeInterface
 
     /** 服务是否正在运行 */
     public function isRunning(): bool;
+
+    /**
+     * 当前 worker 序号（0 起）；master 进程或运行时无此概念时为 0。
+     *
+     * @since 5.0.0
+     */
+    public function workerId(): int;
+
+    /**
+     * 当前 worker 持有的连接（仅本进程可见）。
+     *
+     * @return array<int, ConnectionInterface>
+     * @since 5.0.0
+     */
+    public function connections(): array;
+
+    /**
+     * 向当前 worker 的所有连接群发。
+     *
+     * @return int 投递成功的连接数
+     * @since 5.0.0
+     */
+    public function broadcast(string $data, bool $raw = false): int;
+
+    /**
+     * 投递任务。支持 {@see Capability::TaskWorker} 时异步交给任务进程，
+     * 否则降级为进程内同步执行 `task` 回调——业务代码无需分支。
+     *
+     * @throws Exception\RuntimeNotSupportedException 未注册 task 回调且不支持任务进程
+     * @since 5.0.0
+     */
+    public function task(mixed $data): bool;
 }

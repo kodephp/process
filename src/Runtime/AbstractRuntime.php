@@ -12,7 +12,16 @@ use Kode\Process\Runtime\Exception\RuntimeNotSupportedException;
  */
 abstract class AbstractRuntime implements RuntimeInterface
 {
-    public const EVENTS = ['workerStart', 'workerStop', 'connect', 'message', 'close', 'error'];
+    public const EVENTS = [
+        'workerStart',
+        'workerStop',
+        'connect',
+        'message',
+        'close',
+        'error',
+        'task',
+        'finish',
+    ];
 
     /** @var array<string, callable> */
     protected array $handlers = [];
@@ -175,6 +184,65 @@ abstract class AbstractRuntime implements RuntimeInterface
             throw new RuntimeNotSupportedException('尚未调用 listen() 配置监听地址');
         }
         return $this->listeners[0];
+    }
+
+    /**
+     * 当前 worker 序号。未运行或运行时无此概念时返回 0。
+     */
+    public function workerId(): int
+    {
+        return 0;
+    }
+
+    /**
+     * 当前 worker 持有的连接。
+     *
+     * 各运行时只能看到**本进程**的连接，跨进程广播请用共享表 / 队列协同。
+     *
+     * @return array<int, ConnectionInterface>
+     */
+    public function connections(): array
+    {
+        return [];
+    }
+
+    /**
+     * 向当前 worker 的全部连接群发。
+     *
+     * @return int 实际投递成功的连接数
+     */
+    public function broadcast(string $data, bool $raw = false): int
+    {
+        $sent = 0;
+        foreach ($this->connections() as $conn) {
+            if ($conn->isAlive() && $conn->send($data, $raw)) {
+                $sent++;
+            }
+        }
+        return $sent;
+    }
+
+    /**
+     * 投递任务。
+     *
+     * 运行时具备 {@see Capability::TaskWorker} 时投递到独立任务进程（异步）；
+     * 不具备时**降级为当前进程内同步执行** `task` 回调，保证业务代码在切换
+     * 运行时后无需改动。可用 `supports(Capability::TaskWorker)` 判断是否异步。
+     *
+     * @throws RuntimeNotSupportedException 未注册 task 回调且运行时不支持任务进程
+     */
+    public function task(mixed $data): bool
+    {
+        if (!$this->hasHandler('task')) {
+            throw RuntimeNotSupportedException::capability(static::type(), Capability::TaskWorker);
+        }
+
+        $result = $this->fire('task', $data, $this->workerId());
+        if ($result !== null && $this->hasHandler('finish')) {
+            $this->fire('finish', $result);
+        }
+
+        return true;
     }
 
     public function stats(): array

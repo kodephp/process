@@ -28,10 +28,12 @@ use Kode\Process\Signal\SignalHandler;
  *     ->start();
  * ```
  *
- * 自 4.0.0 起本包不再自建网络 I/O 内核（判定依据见 docs/gate-report.md）：
- * 网络层交给 {@see Runtime} 兼容层——宿主装了 Swoole 就用 Swoole，否则复用 Workerman
- * （纯 PHP 依赖，已写入 require，开箱即用）。内置 {@see Reactor} 是统一的事件循环
- * （Kode::loop()），与运行时正交。本包自己专注进程编排、共享数据、IPC 与信号。
+ * 网络层交给 {@see Runtime}：**默认使用自研 Native 运行时**（纯 PHP master-worker，
+ * 零扩展依赖，事件循环自动择优 ext-event / ext-ev / stream_select）。已有 Swoole /
+ * Workerman 技术栈的项目可显式接入——`Kode::serve($addr, $opts, 'swoole')`，三者共用
+ * 同一套 {@see RuntimeInterface}，切换底层无需改动业务代码。
+ * 内置 {@see Reactor} 是统一的事件循环（Kode::loop()），与运行时正交。
+ * 本包同时提供进程编排、共享数据、IPC 与信号能力。
  */
 final class Kode
 {
@@ -108,7 +110,9 @@ final class Kode
     }
 
     /**
-     * 部署前自检：可用运行时、事件循环驱动、共享表后端。
+     * 部署前自检：可用运行时、事件循环驱动、共享表后端、并行与集群能力。
+     *
+     * 只做静态探测，不会建立任何连接。
      *
      * @return array<string, mixed>
      */
@@ -120,6 +124,10 @@ final class Kode
                 'zts' => Parallel::isZts(),
                 'available' => Parallel::isAvailable(),
                 'backend' => Parallel::backend(),
+            ]]
+            + ['cluster' => [
+                'backends' => Cluster::available(),
+                'joined' => Cluster::self()?->id,
             ]];
     }
 
@@ -128,7 +136,7 @@ final class Kode
     /**
      * 创建运行时实例。
      *
-     * @param RuntimeType|string|null $type null 表示自动择优（swoole → workerman）
+     * @param RuntimeType|string|null $type null 表示自动择优（native → swoole → workerman）
      */
     public static function runtime(RuntimeType|string|null $type = null): RuntimeInterface
     {
@@ -183,6 +191,86 @@ final class Kode
     public static function table(int $key = 0x4B4F4445, int $size = 4 * 1024 * 1024): GlobalData\TableInterface
     {
         return SharedTable::auto($key, $size);
+    }
+
+    // ------------------------------------------------------------ 集群协同
+
+    /**
+     * 获取集群协调存储；未初始化时按 redis → globaldata → file 自动择优。
+     *
+     * 需要指定后端时用 {@see Cluster::make()}：
+     *
+     * ```php
+     * Cluster::make('redis', ['host' => '10.0.0.5']);
+     * ```
+     */
+    public static function cluster(): Cluster\Store\StoreInterface
+    {
+        return Cluster::store();
+    }
+
+    /**
+     * 把本节点加入集群，之后需周期调用 {@see Cluster::heartbeat()} 续约。
+     *
+     * ```php
+     * Kode::join(['service' => 'api', 'port' => 9501]);
+     * ```
+     *
+     * @param Cluster\Node|array<string, mixed> $node 缺省 id 取「主机名-PID」，缺省 host 取本机出口 IP
+     */
+    public static function join(Cluster\Node|array $node): Cluster\Node
+    {
+        return Cluster::join($node);
+    }
+
+    /**
+     * 分布式锁——跨机互斥。
+     *
+     * ```php
+     * Kode::lock('settle:1001')->withLock(fn () => $this->settle(1001), wait: 5.0);
+     * ```
+     */
+    public static function lock(string $key, float $ttl = 30.0): Cluster\Lock\DistributedLock
+    {
+        return Cluster::lock($key, $ttl);
+    }
+
+    /**
+     * Leader 选举——让定时任务在全集群只跑一次。
+     *
+     * ```php
+     * $election = Kode::election('cron');
+     * Kode::every(5.0, fn () => $election->tick() && $this->runCron());
+     * ```
+     */
+    public static function election(string $name = 'default', float $ttl = 15.0): Cluster\Election\LeaderElection
+    {
+        return Cluster::election($name, null, $ttl);
+    }
+
+    /**
+     * 负载均衡器：round-robin / weighted / random / least-conn / hash。
+     *
+     * @param list<Cluster\Node> $nodes 省略时取 $service 下的健康节点
+     */
+    public static function balancer(
+        string $strategy = 'round-robin',
+        array $nodes = [],
+        ?string $service = null,
+    ): Cluster\Balancer\BalancerInterface {
+        return Cluster::balancer($strategy, $nodes, $service);
+    }
+
+    /** 分布式 ID 生成器（Snowflake），机器 ID 自动从集群领取。 */
+    public static function snowflake(?int $workerId = null): Cluster\Snowflake
+    {
+        return Cluster::snowflake($workerId);
+    }
+
+    /** 分布式限流器——限的是集群总量。 */
+    public static function limiter(): Cluster\RateLimiter
+    {
+        return Cluster::limiter();
     }
 
     // ----------------------------------------------------- 定时器与编排原语

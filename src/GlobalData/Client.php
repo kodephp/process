@@ -70,15 +70,18 @@ final class Client
         return $response['success'] ?? false;
     }
 
-    public function increment(string $key, int $step = 1): int|false
+    /**
+     * 原子自增。$ttl 仅在键首次创建（或过期重建）时生效——滑动窗口限流靠它划定窗口。
+     */
+    public function increment(string $key, int $step = 1, int $ttl = 0): int|false
     {
-        $response = $this->sendRequest(['action' => 'increment', 'key' => $key, 'step' => $step]);
+        $response = $this->sendRequest(['action' => 'increment', 'key' => $key, 'step' => $step, 'ttl' => $ttl]);
         return ($response['success'] ?? false) ? $response['value'] : false;
     }
 
-    public function decrement(string $key, int $step = 1): int|false
+    public function decrement(string $key, int $step = 1, int $ttl = 0): int|false
     {
-        $response = $this->sendRequest(['action' => 'decrement', 'key' => $key, 'step' => $step]);
+        $response = $this->sendRequest(['action' => 'decrement', 'key' => $key, 'step' => $step, 'ttl' => $ttl]);
         return ($response['success'] ?? false) ? $response['value'] : false;
     }
 
@@ -105,12 +108,57 @@ final class Client
         return $response['stats'] ?? [];
     }
 
+    /**
+     * 仅当键不存在时写入（服务端原子执行）。
+     *
+     * 服务端单线程串行处理请求，因此本操作是真正的原子 set-if-absent，
+     * 可直接用作分布式锁 / Leader 选举的基石。
+     */
     public function add(string $key, mixed $value, int $ttl = 0): bool
     {
-        if ($this->exists($key)) {
-            return false;
-        }
-        return $this->set($key, $value, $ttl);
+        $response = $this->sendRequest(['action' => 'add', 'key' => $key, 'value' => $value, 'ttl' => $ttl]);
+        return $response['success'] ?? false;
+    }
+
+    /**
+     * 仅当当前值等于 $oldValue 时才删除（服务端原子执行）。
+     *
+     * 释放分布式锁时用它，避免误删「本节点锁已超时、被他人重新获得」的锁。
+     *
+     * @since 5.0.0
+     */
+    public function casDelete(string $key, mixed $oldValue): bool
+    {
+        $response = $this->sendRequest(['action' => 'casdel', 'key' => $key, 'old_value' => $oldValue]);
+        return $response['success'] ?? false;
+    }
+
+    /**
+     * 重设键的存活时间（秒）；键不存在返回 false。
+     *
+     * @since 5.0.0
+     */
+    public function expire(string $key, int $ttl): bool
+    {
+        $response = $this->sendRequest(['action' => 'expire', 'key' => $key, 'ttl' => $ttl]);
+        return $response['success'] ?? false;
+    }
+
+    /**
+     * 带 TTL 的 CAS：值匹配时同时更新值与存活时间（锁续期）。
+     *
+     * @since 5.0.0
+     */
+    public function casWithTtl(string $key, mixed $oldValue, mixed $newValue, int $ttl): bool
+    {
+        $response = $this->sendRequest([
+            'action'    => 'cas',
+            'key'       => $key,
+            'old_value' => $oldValue,
+            'new_value' => $newValue,
+            'ttl'       => $ttl,
+        ]);
+        return $response['success'] ?? false;
     }
 
     public function replace(string $key, mixed $value, int $ttl = 0): bool
@@ -121,13 +169,15 @@ final class Client
         return $this->set($key, $value, $ttl);
     }
 
+    /**
+     * 批量读取（单次往返）。
+     *
+     * 只返回存在且未过期的键，服务发现列举节点时把 N 次 RTT 压成 1 次。
+     */
     public function getMulti(array $keys): array
     {
-        $result = [];
-        foreach ($keys as $key) {
-            $result[$key] = $this->get($key);
-        }
-        return $result;
+        $response = $this->sendRequest(['action' => 'mget', 'keys' => array_values($keys)]);
+        return $response['values'] ?? [];
     }
 
     public function setMulti(array $items, int $ttl = 0): bool

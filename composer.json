@@ -1,10 +1,10 @@
 {
     "name": "kode/process",
-    "description": "PHP 8.3+ 进程编排内核与 Swoole/Workerman 运行时兼容层：一套 API 跑在 Swoole / Workerman 之上，含 Master-Worker 模型、进程池、共享表、IPC、信号与定时器，统一事件循环 Reactor",
+    "description": "PHP 8.3+ 进程编排内核：默认自研 Native 运行时（零扩展、master-worker 多进程），兼容 Swoole/Workerman，内置分布式集群能力（服务发现、分布式锁、Leader 选举、负载均衡、分布式 ID、限流、集群 RPC）",
     "type": "library",
-    "keywords": ["php", "process", "runtime", "reactor", "event-loop", "worker", "ipc", "signal", "pool", "swoole", "workerman", "multiprocessing", "queue"],
+    "keywords": ["php", "process", "runtime", "native", "reactor", "event-loop", "worker", "ipc", "signal", "pool", "swoole", "workerman", "multiprocessing", "queue", "cluster", "distributed", "snowflake", "load-balancer"],
     "license": "Apache-2.0",
-    "version": "4.2.0",
+    "version": "5.0.0",
     "authors": [
         {
             "name": "KodePHP Team",
@@ -59,7 +59,7 @@
     "prefer-stable": true,
     "extra": {
         "branch-alias": {
-            "dev-main": "4.2.x-dev"
+            "dev-main": "5.0.x-dev"
         }
     }
 }

@@ -15,14 +15,18 @@ use Kode\Process\Runtime\RuntimeType;
  * 应用已经跑在 Swoole 上时，本适配器复用 Swoole 的 I/O 栈与协程能力。
  *
  * 注意：默认使用 SWOOLE_BASE 模式。SWOOLE_PROCESS 模式存在 reactor→worker 的
- * 管道转发开销，实测吞吐低约 8%（详见 docs/gate-report.md）；
- * 需要 Task 工作进程时才应显式切到 PROCESS 模式。
+ * 管道转发开销，实测吞吐低约 8%；配置 taskWorkers > 0 时会自动切到 PROCESS 模式，
+ * 因为 Task 工作进程只在该模式下可用。
  *
  * 依赖：pecl install swoole（本包不强制依赖）
  */
 final class SwooleRuntime extends AbstractRuntime
 {
     private ?object $server = null;
+
+    private int $currentWorkerId = 0;
+
+    private int $taskWorkerCount = 0;
 
     public static function isAvailable(): bool
     {
@@ -77,7 +81,12 @@ final class SwooleRuntime extends AbstractRuntime
         $opts     = $listener['options'];
         $scheme   = $listener['scheme'];
 
-        $mode = ($opts['mode'] ?? null) === 'process' ? SWOOLE_PROCESS : SWOOLE_BASE;
+        $this->taskWorkerCount = max(0, (int)($opts['taskWorkers'] ?? 0));
+
+        // Task 进程必须由 PROCESS 模式承载，配置了 taskWorkers 时自动切换
+        $mode = ($opts['mode'] ?? null) === 'process' || $this->taskWorkerCount > 0
+            ? SWOOLE_PROCESS
+            : SWOOLE_BASE;
         $sockType = isset($opts['ssl']) ? (SWOOLE_SOCK_TCP | SWOOLE_SSL) : SWOOLE_SOCK_TCP;
 
         $class = match ($scheme) {
@@ -105,6 +114,10 @@ final class SwooleRuntime extends AbstractRuntime
         if (!empty($opts['maxRequest'])) {
             $settings['max_request'] = (int)$opts['maxRequest'];
         }
+        if ($this->taskWorkerCount > 0) {
+            $settings['task_worker_num']      = $this->taskWorkerCount;
+            $settings['task_enable_coroutine'] = false;
+        }
         if (isset($opts['ssl']) && is_array($opts['ssl'])) {
             $settings += [
                 'ssl_cert_file' => $opts['ssl']['local_cert'] ?? null,
@@ -124,11 +137,21 @@ final class SwooleRuntime extends AbstractRuntime
     private function bindEvents(object $server, string $scheme): void
     {
         $server->on('workerStart', function (object $srv, int $workerId): void {
+            $this->currentWorkerId = $workerId;
             $this->fire('workerStart', $workerId);
         });
         $server->on('workerStop', function (object $srv, int $workerId): void {
             $this->fire('workerStop', $workerId);
         });
+
+        if ($this->taskWorkerCount > 0) {
+            $server->on('task', function (object $srv, int $taskId, int $srcWorkerId, mixed $data): mixed {
+                return $this->fire('task', $data, $taskId);
+            });
+            $server->on('finish', function (object $srv, int $taskId, mixed $result): void {
+                $this->fire('finish', $result);
+            });
+        }
 
         if ($scheme === 'http') {
             $server->on('request', function (object $req, object $resp) use ($server): void {
@@ -218,15 +241,52 @@ final class SwooleRuntime extends AbstractRuntime
         return (bool)$ok;
     }
 
-    /** 底层 Swoole\Server 实例，用于访问 Swoole 专有能力（如 task 投递） */
+    /** 底层 Swoole\Server 实例，用于访问 Swoole 专有能力 */
     public function server(): ?object
     {
         return $this->server;
     }
 
+    public function workerId(): int
+    {
+        return $this->currentWorkerId;
+    }
+
+    /**
+     * 当前 worker 的连接（Swoole\Server::$connections）。
+     *
+     * @return array<int, \Kode\Process\Runtime\ConnectionInterface>
+     */
+    public function connections(): array
+    {
+        if ($this->server === null || !isset($this->server->connections)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($this->server->connections as $fd) {
+            $out[(int)$fd] = new SwooleConnection($this->server, (int)$fd);
+        }
+        return $out;
+    }
+
+    /**
+     * 配置了 taskWorkers 时投递到 Swoole Task 进程，否则降级为进程内同步执行。
+     */
+    public function task(mixed $data): bool
+    {
+        if ($this->taskWorkerCount > 0 && $this->server !== null && method_exists($this->server, 'task')) {
+            return $this->server->task($data) !== false;
+        }
+        return parent::task($data);
+    }
+
     public function stats(): array
     {
-        $base = parent::stats();
+        $base = parent::stats() + [
+            'worker_id'    => $this->currentWorkerId,
+            'task_workers' => $this->taskWorkerCount,
+        ];
         if ($this->server !== null && method_exists($this->server, 'stats')) {
             $base['swoole'] = $this->server->stats();
         }

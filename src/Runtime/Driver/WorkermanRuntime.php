@@ -24,6 +24,10 @@ final class WorkermanRuntime extends AbstractRuntime
     /** @var array<int, object> Workerman\Worker 实例 */
     private array $workers = [];
 
+    private int $currentWorkerId = 0;
+
+    private ?object $currentWorker = null;
+
     public static function isAvailable(): bool
     {
         return class_exists(self::WORKER_CLASS);
@@ -112,8 +116,48 @@ final class WorkermanRuntime extends AbstractRuntime
         }
 
         $this->running = true;
-        $workerClass::runAll();
-        $this->running = false;
+        $restoreArgv   = $this->normalizeArgv();
+        try {
+            $workerClass::runAll();
+        } finally {
+            $restoreArgv();
+            $this->running = false;
+        }
+    }
+
+    /**
+     * 屏蔽 Workerman 的 argv 约定，保证跨运行时行为一致。
+     *
+     * Workerman 会解析 `$argv[1]` 作为 start/stop/reload/status 子命令，参数不合法时
+     * 直接打印用法并 exit——这会让「同一份业务代码切换运行时」的承诺失效（Native /
+     * Swoole 都不解析 argv）。因此默认注入合成的 `['<script>', 'start']`。
+     *
+     * 需要 Workerman 原生 CLI（stop/reload/status/-d 守护）时，
+     * 传 `['workermanCli' => true]` 显式保留真实 argv。
+     *
+     * @return callable():void 还原原始 argv 的闭包
+     */
+    private function normalizeArgv(): callable
+    {
+        $opts = $this->listeners[array_key_first($this->listeners)]['options'] ?? [];
+
+        if (!empty($opts['workermanCli'])) {
+            return static fn (): null => null;
+        }
+
+        $originalArgv = $_SERVER['argv'] ?? [];
+        $originalArgc = $_SERVER['argc'] ?? 0;
+
+        $command = !empty($opts['daemonize']) ? ['start', '-d'] : ['start'];
+        $synthetic = array_merge([$originalArgv[0] ?? 'kode-process'], $command);
+
+        $GLOBALS['argv'] = $_SERVER['argv'] = $synthetic;
+        $GLOBALS['argc'] = $_SERVER['argc'] = count($synthetic);
+
+        return static function () use ($originalArgv, $originalArgc): void {
+            $GLOBALS['argv'] = $_SERVER['argv'] = $originalArgv;
+            $GLOBALS['argc'] = $_SERVER['argc'] = $originalArgc;
+        };
     }
 
     /**
@@ -122,7 +166,9 @@ final class WorkermanRuntime extends AbstractRuntime
     private function bindEvents(object $worker): void
     {
         $worker->onWorkerStart = function (object $w): void {
-            $this->fire('workerStart', (int)($w->id ?? 0));
+            $this->currentWorker   = $w;
+            $this->currentWorkerId = (int)($w->id ?? 0);
+            $this->fire('workerStart', $this->currentWorkerId);
         };
 
         $worker->onWorkerStop = function (object $w): void {
@@ -209,10 +255,38 @@ final class WorkermanRuntime extends AbstractRuntime
         return (bool)$ok;
     }
 
+    public function workerId(): int
+    {
+        return $this->currentWorkerId;
+    }
+
+    /**
+     * 当前 worker 的连接（Workerman\Worker::$connections）。
+     *
+     * @return array<int, \Kode\Process\Runtime\ConnectionInterface>
+     */
+    public function connections(): array
+    {
+        $raw = $this->currentWorker->connections ?? [];
+        if (!is_array($raw)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($raw as $id => $conn) {
+            if (is_object($conn)) {
+                $out[(int)$id] = new WorkermanConnection($conn);
+            }
+        }
+        return $out;
+    }
+
     public function stats(): array
     {
         return parent::stats() + [
             'workers'        => count($this->workers),
+            'worker_id'      => $this->currentWorkerId,
+            'connections'    => count($this->connections()),
             'event_loop'     => $this->detectEventLoop(),
             'recommendation' => self::eventLoopRecommendation(),
         ];

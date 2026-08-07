@@ -14,7 +14,9 @@ use EventBase;
  * 相比 stream_select 的 O(n) 扫描在高连接数下有数量级差异。
  *
  * 实测（4 worker、HTTP 最小响应）：单请求 CPU 成本约比 stream_select 路径低一个量级，
- * 但端到端吞吐受内核网络栈限制，详见 docs/gate-report.md。
+ * 但端到端吞吐仍受内核网络栈限制，压测数据见 docs/benchmark.md。
+ *
+ * 自研 Native 运行时会通过 {@see LoopFactory} 自动择优到本实现（若已安装 ext-event）。
  */
 final class EventLoop implements LoopInterface
 {
