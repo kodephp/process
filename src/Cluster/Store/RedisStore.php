@@ -226,9 +226,15 @@ final class RedisStore implements StoreInterface
         $found   = [];
         $cursor  = null;
 
-        // 用 SCAN 渐进遍历，避免 KEYS 在大库上阻塞整个 Redis
+        // 用 SCAN 渐进遍历，避免 KEYS 在大库上阻塞整个 Redis。
+        // 注意：phpredis 的 scan() 通过引用参数改写游标，不能包进箭头闭包
+        // （闭包内是副本，外部 $cursor 永远是 null 会只扫一趟就退出）。
         do {
-            $batch = $this->call(fn (): mixed => $this->redis->scan($cursor, $pattern, 500));
+            try {
+                $batch = $this->redis->scan($cursor, $pattern, 500);
+            } catch (RedisException $e) {
+                throw new ClusterException('Redis 操作失败：' . $e->getMessage(), 0, $e);
+            }
             foreach (is_array($batch) ? $batch : [] as $full) {
                 $found[] = substr((string) $full, $cut);
             }

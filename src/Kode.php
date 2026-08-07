@@ -273,6 +273,83 @@ final class Kode
         return Cluster::limiter();
     }
 
+    /**
+     * 上报心跳，延续本节点在注册表中的存活；被摘除时自动重新注册。
+     *
+     * @return bool 本次是否成功续约（false 表示已重新注册）
+     */
+    public static function heartbeat(): bool
+    {
+        return Cluster::heartbeat();
+    }
+
+    /** 本节点优雅下线：注销、让出 Leader、归还机器 ID。 */
+    public static function leave(): bool
+    {
+        return Cluster::leave();
+    }
+
+    /** 本节点信息；尚未 join() 时返回 null。 */
+    public static function self(): ?Cluster\Node
+    {
+        return Cluster::self();
+    }
+
+    /**
+     * 列出集群节点。
+     *
+     * @return list<Cluster\Node>
+     */
+    public static function nodes(?string $service = null, bool $healthyOnly = true): array
+    {
+        return Cluster::nodes($service, $healthyOnly);
+    }
+
+    /**
+     * 列出除本节点外的其它节点（广播时用得上）。
+     *
+     * @return list<Cluster\Node>
+     */
+    public static function peers(?string $service = null): array
+    {
+        return Cluster::peers($service);
+    }
+
+    /** 服务注册表（服务发现）。 */
+    public static function registry(): Cluster\Registry\RegistryInterface
+    {
+        return Cluster::registry();
+    }
+
+    /** 续租 Snowflake 机器 ID；返回 false 表示租约丢失并会自动重分配。 */
+    public static function renewSnowflake(?string $namespace = null): bool
+    {
+        return Cluster::renewSnowflake($namespace);
+    }
+
+    /** 创建集群 RPC 客户端（节点间方法调用 / 广播）。 */
+    public static function rpc(float $timeout = 3.0, ?string $token = null): Cluster\Rpc\RpcClient
+    {
+        return Cluster::rpc($timeout, $token);
+    }
+
+    /** 创建集群 RPC 服务端（让本节点可被其它节点调用）。 */
+    public static function rpcServer(?string $token = null): Cluster\Rpc\RpcServer
+    {
+        return Cluster::server($token);
+    }
+
+    /**
+     * 向集群其它节点广播一次 RPC 调用。
+     *
+     * @param array<string, mixed> $params
+     * @return array<string, array{ok: bool, result?: mixed, error?: string}>
+     */
+    public static function broadcast(string $method, array $params = [], ?string $service = null): array
+    {
+        return Cluster::broadcast($method, $params, $service);
+    }
+
     // ----------------------------------------------------- 定时器与编排原语
 
     /**

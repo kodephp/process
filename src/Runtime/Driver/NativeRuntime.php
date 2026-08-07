@@ -949,13 +949,10 @@ final class NativeRuntime extends AbstractRuntime
     public function addTimer(float $interval, callable $callback, bool $periodic = true): int
     {
         $id = ++$this->timerSeq;
-        $this->timers[$id] = [
-            'interval' => $interval,
-            'callback' => $callback,
-            'periodic' => $periodic,
-        ];
         // 运行中的 worker 直接落到事件循环，未启动时留待 workerStart 统一注册
-        $this->loop?->addTimer($interval, $callback, $periodic);
+        $loopId = $this->loop?->addTimer($interval, $callback, $periodic);
+        // 存「本包 ID → 底层 loop timer ID」映射（未启动时为 null），供 delTimer 真正注销
+        $this->timers[$id] = $loopId;
 
         return $id;
     }
@@ -965,7 +962,14 @@ final class NativeRuntime extends AbstractRuntime
         if (!isset($this->timers[$timerId])) {
             return false;
         }
+        $loopId = $this->timers[$timerId];
         unset($this->timers[$timerId]);
+
+        // 底层事件循环的定时器必须显式移除，否则仍会在下一轮触发
+        if ($loopId !== null) {
+            $this->loop?->delTimer($loopId);
+        }
+
         return true;
     }
 

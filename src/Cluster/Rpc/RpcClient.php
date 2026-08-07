@@ -33,6 +33,9 @@ final class RpcClient
     /** 请求序号，用于生成请求 ID。 */
     private int $seq = 0;
 
+    /** 各连接的接收缓冲（处理粘包/半包），键为规范化地址。 @var array<string, string> */
+    private array $readBuffers = [];
+
     /**
      * @param float       $timeout 单次调用超时（秒），含连接与读写
      * @param string|null $token   与服务端 `token` 对应的鉴权串
@@ -125,8 +128,9 @@ final class RpcClient
      */
     public function call(string $address, string $method, array $params = []): mixed
     {
-        $id      = $this->nextId();
-        $payload = RpcFrame::encode(RpcFrame::request($id, $method, $this->buildParams($params)));
+        $id         = $this->nextId();
+        $normalized = $this->normalize($address);
+        $payload    = RpcFrame::encode(RpcFrame::request($id, $method, $this->buildParams($params)));
 
         // 首次失败可能是长连接过期，丢弃重连再试一次
         for ($attempt = 0; $attempt < 2; $attempt++) {
@@ -137,17 +141,20 @@ final class RpcClient
                 continue;
             }
 
-            $response = $this->readFrame($socket);
+            // 持续读帧直到匹配本次请求 ID，跳过可能滞留的服务端通知/乱序响应
+            do {
+                $response = $this->readFrame($socket, $normalized);
 
-            if ($response === null) {
-                $this->drop($address);
+                if ($response === null) {
+                    $this->drop($address);
 
-                if ($attempt === 0 && $this->persistent) {
-                    continue;
+                    if ($attempt === 0 && $this->persistent) {
+                        break;
+                    }
+
+                    throw ClusterException::rpcFailed($address, '读取响应超时或连接中断');
                 }
-
-                throw ClusterException::rpcFailed($address, '读取响应超时或连接中断');
-            }
+            } while (($response['i'] ?? null) !== $id);
 
             if (($response['o'] ?? false) !== true) {
                 throw ClusterException::rpcFailed($address, (string) ($response['e'] ?? '未知错误'));
@@ -307,15 +314,33 @@ final class RpcClient
     /**
      * 阻塞读取一条完整帧。
      *
+     * 缓冲跨调用保留（按连接），因此多次回包粘在一起（如 notify 回包紧跟 call 回包）
+     * 时不会丢失后续帧；同时持续按请求 ID 过滤，丢弃不匹配的遗留响应。
+     *
      * @param  resource $socket
      * @return array<string, mixed>|null 超时或连接中断返回 null
      */
-    private function readFrame($socket): ?array
+    private function readFrame($socket, string $normalized): ?array
     {
-        $buffer   = '';
         $deadline = microtime(true) + $this->timeout;
 
         while (microtime(true) < $deadline) {
+            // 先尝试从已读缓冲里解析出一条完整帧
+            $buffer = $this->readBuffers[$normalized] ?? '';
+            if ($buffer !== '') {
+                try {
+                    $frame = RpcFrame::shift($buffer);
+                } catch (Throwable) {
+                    $this->readBuffers[$normalized] = '';
+                    return null;
+                }
+                $this->readBuffers[$normalized] = $buffer;
+
+                if ($frame !== null) {
+                    return $frame;
+                }
+            }
+
             $read   = [$socket];
             $write  = null;
             $except = null;
@@ -334,17 +359,7 @@ final class RpcClient
                 return null;
             }
 
-            $buffer .= $chunk;
-
-            try {
-                $frame = RpcFrame::shift($buffer);
-            } catch (Throwable) {
-                return null;
-            }
-
-            if ($frame !== null) {
-                return $frame;
-            }
+            $this->readBuffers[$normalized] = ($this->readBuffers[$normalized] ?? '') . $chunk;
         }
 
         return null;
@@ -361,6 +376,8 @@ final class RpcClient
             }
             unset($this->pool[$normalized]);
         }
+
+        unset($this->readBuffers[$normalized]);
     }
 
     /** 当前连接池大小。 */

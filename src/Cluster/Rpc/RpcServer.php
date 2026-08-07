@@ -198,6 +198,12 @@ final class RpcServer
                 return;
             }
 
+            // 单向通知（空 id）：执行处理器但不回包，避免污染长连接缓冲
+            if (($request['i'] ?? '') === '') {
+                $this->handle($request, $conn);
+                continue;
+            }
+
             $conn->send(RpcFrame::encode($this->handle($request, $conn)), true);
         }
     }

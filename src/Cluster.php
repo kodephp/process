@@ -122,6 +122,9 @@ final class Cluster
 
     private static ?Snowflake $snowflake = null;
 
+    /** snowflake() 分配机器 ID 时使用的命名空间，续租/归还时需与之一致。 */
+    private static ?string $snowflakeNamespace = null;
+
     private static ?RateLimiter $limiter = null;
 
     /** @var array<string, LeaderElection> */
@@ -304,6 +307,17 @@ final class Cluster
         }
         self::$elections = [];
 
+        // 优雅下线：归还机器 ID，避免长期占位直到 TTL 过期
+        if (self::$snowflake !== null) {
+            Snowflake::releaseWorkerId(
+                self::store(),
+                self::$snowflakeNamespace ?? 'default',
+                self::$snowflake->workerId()
+            );
+            self::$snowflake = null;
+            self::$snowflakeNamespace = null;
+        }
+
         $self = self::$self;
         if ($self === null) {
             return false;
@@ -423,17 +437,18 @@ final class Cluster
      */
     public static function snowflake(?int $workerId = null, string $namespace = 'default'): Snowflake
     {
-        if (self::$snowflake !== null && $workerId === null) {
+        if (self::$snowflake !== null && $workerId === null && self::$snowflakeNamespace === $namespace) {
             return self::$snowflake;
         }
 
         $workerId ??= Snowflake::allocateWorkerId(self::store(), $namespace);
+        self::$snowflakeNamespace = $namespace;
 
         return self::$snowflake = new Snowflake($workerId);
     }
 
     /** 续租 Snowflake 机器 ID；返回 false 表示租约丢失，会自动重新分配。 */
-    public static function renewSnowflake(string $namespace = 'default'): bool
+    public static function renewSnowflake(?string $namespace = null): bool
     {
         $snowflake = self::$snowflake;
 
@@ -441,10 +456,13 @@ final class Cluster
             return false;
         }
 
+        $namespace ??= self::$snowflakeNamespace ?? 'default';
+
         if (Snowflake::renewWorkerId(self::store(), $namespace, $snowflake->workerId())) {
             return true;
         }
 
+        self::$snowflakeNamespace = $namespace;
         self::$snowflake = null;
         self::snowflake(null, $namespace);
 
@@ -532,6 +550,7 @@ final class Cluster
         self::$registry  = null;
         self::$self      = null;
         self::$snowflake = null;
+        self::$snowflakeNamespace = null;
         self::$limiter   = null;
         self::$elections = [];
     }
