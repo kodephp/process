@@ -35,7 +35,7 @@ Kode Process 是一个「进程编排内核 + 运行时兼容层」：你只写�
 | ⏱️ **定时器** | 一次性、周期、Cron |
 | 📨 **队列** | 委托 `kode/queue`，内存 / 同步 / Redis / 数据库多后端 |
 | 🔒 **SSL/TLS** | 通过监听选项配置，随宿主运行时生效 |
-| 🩺 **部署自检** | `Kode::diagnose()` 一键列出可用运行时 / 事件循环 / 共享表后端 |
+| 🩺 **部署自检** | `Kode::diagnose()` 一键列出可用运行时 / 事件循环 / 共享表后端 / 并行(ZTS) 能力 |
 
 ## 安装
 
@@ -153,8 +153,9 @@ Runtime::isSupported('workerman');           // 该运行时是否可用
 print_r(Kode::diagnose());                   // 部署前一键自检（含 Linux 上 ext-event 安装建议）
 ```
 
-`Kode::diagnose()` 返回可用运行时、各自版本与优先级、当前事件循环驱动，以及共享表后端；
-在 Linux 且未安装 `ext-event` / `ext-ev` 时会给出安装建议（Workerman 官方也推荐 Linux 用 event 循环）。
+`Kode::diagnose()` 返回可用运行时、各自版本与优先级、当前事件循环驱动、共享表后端，以及并行能力
+（是否 ZTS、是否可用、后端类型）；在 Linux 且未安装 `ext-event` / `ext-ev` 时会给出安装建议
+（Workerman 官方也推荐 Linux 用 event 循环）。
 
 ## 共享数据（零安装兜底）
 
@@ -205,26 +206,35 @@ if (Kode::supportsParallel()) {
 
 ## 定时器
 
-```php
-use Kode\Process\Timer;
+通过 `Kode` 门面一行注册定时器，底层复用 `Kode\Process\Timer`：
 
-Timer::add(2.5, fn() => echo "每 2.5 秒执行\n");
-Timer::once(10, fn() => echo "10 秒后执行一次\n");
-Timer::cron('* * * * *', fn() => echo "每分钟执行\n");
+```php
+use Kode\Process\Kode;
+
+Kode::every(2.5, fn() => echo "每 2.5 秒执行\n");      // 周期定时器
+Kode::after(10,  fn() => echo "10 秒后执行一次\n");     // 一次性定时器
+Kode::cron('* * * * *', fn() => echo "每分钟执行\n");  // Cron 定时器
+
+$id = Kode::after(5, fn() => null);
+Kode::clearTimer($id);   // 取消定时器
+Kode::tickTimers();      // 在自定义主循环中周期推进
 ```
+
+也支持 `setTimeout` / `setInterval`（JS 风格别名）与 `pause` / `resume` / `getStatus` 等，
+详见 [docs/timer.md](docs/timer.md)。
 
 ## 队列系统
 
 ```php
-use Kode\Process\Queue\QueueManager;
+use Kode\Process\Kode;
 
-QueueManager::getInstance()
+Kode::queue()
     ->register('send_email', function (array $data) {
         mail($data['to'], $data['subject'], $data['body']);
         return ['status' => 'sent'];
     });
 
-QueueManager::getInstance()->dispatch('send_email', [
+Kode::queue()->dispatch('send_email', [
     'to'      => 'user@example.com',
     'subject' => 'Hello',
     'body'    => 'World',
@@ -232,6 +242,27 @@ QueueManager::getInstance()->dispatch('send_email', [
 ```
 
 队列由 `kode/queue` 提供，支持内存 / 同步 / Redis / 数据库多后端。详见 [docs/queue.md](docs/queue.md)。
+
+## 信号、监控与进程内事件
+
+```php
+use Kode\Process\Kode;
+
+// 应用层信号（运行时已自行管理 SIGTERM / SIGINT 等进程信号）
+Kode::signal()->register(SIGUSR1, function () {
+    echo "收到 SIGUSR1，重载配置\n";
+});
+
+// 运行状态监控（写入 status / pid 文件，便于运维排查）
+$monitor = Kode::monitor();
+$monitor->init(getmypid());
+
+// 进程内发布/订阅事件
+Kode::emitter()->on('task.done', fn($id) => echo "任务 $id 完成\n");
+Kode::emitter()->emit('task.done', 123);
+```
+
+信号处理器为单例，详见 [docs/signal.md](docs/signal.md)。
 
 ## SSL/TLS
 

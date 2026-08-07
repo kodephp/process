@@ -83,3 +83,29 @@ Kode::serve('http://0.0.0.0:8080', [
     })
     ->start();
 ```
+
+## 定时器与编排原语
+
+`Kode` 门面还提供进程编排原语的一行入口，无需分别引入底层类：
+
+```php
+use Kode\Process\Kode;
+
+// 定时器：周期 / 一次性 / Cron
+Kode::every(2.5, fn() => echo "心跳\n");
+Kode::after(10,  fn() => echo "10 秒后执行一次\n");
+Kode::cron('0 0 * * *', fn() => echo "每天零点\n");
+Kode::tickTimers();   // 自定义主循环中周期推进
+
+// 应用层信号（运行时已托管 SIGTERM / SIGINT 等进程信号）
+Kode::signal()->register(SIGUSR1, fn() => echo "重载配置\n");
+
+// 队列（kode/queue 适配层）
+Kode::queue()->register('send_email', fn($data) => mail($data['to'], $data['subject'], $data['body']));
+Kode::queue()->dispatch('send_email', ['to' => 'a@b.c', 'subject' => 'Hi', 'body' => 'World']);
+
+// 进程内发布/订阅事件
+Kode::emitter()->on('task.done', fn($id) => echo "任务 $id 完成\n");
+```
+
+`Kode::diagnose()` 可在部署前一键自检运行时、事件循环、共享表后端与并行（ZTS）能力。

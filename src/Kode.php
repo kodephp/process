@@ -11,8 +11,13 @@ use Kode\Process\Parallel\Parallel;
 use Kode\Process\Protocol\ProtocolManager;
 use Kode\Process\Reactor\LoopFactory;
 use Kode\Process\Reactor\LoopInterface;
+use Kode\Process\Async\Async;
+use Kode\Process\Async\EventEmitter;
+use Kode\Process\Debug\StatusMonitor;
+use Kode\Process\Queue\QueueManager;
 use Kode\Process\Runtime\RuntimeInterface;
 use Kode\Process\Runtime\RuntimeType;
+use Kode\Process\Signal\SignalHandler;
 
 /**
  * 静态门面：一行代码起服务。
@@ -109,7 +114,13 @@ final class Kode
      */
     public static function diagnose(): array
     {
-        return Runtime::diagnose() + ['table' => SharedTable::diagnose()];
+        return Runtime::diagnose()
+            + ['table' => SharedTable::diagnose()]
+            + ['parallel' => [
+                'zts' => Parallel::isZts(),
+                'available' => Parallel::isAvailable(),
+                'backend' => Parallel::backend(),
+            ]];
     }
 
     // -------------------------------------------------------------- 运行时
@@ -172,6 +183,103 @@ final class Kode
     public static function table(int $key = 0x4B4F4445, int $size = 4 * 1024 * 1024): GlobalData\TableInterface
     {
         return SharedTable::auto($key, $size);
+    }
+
+    // ----------------------------------------------------- 定时器与编排原语
+
+    /**
+     * 注册一次性定时器：delay 秒后执行一次，返回 ID（可用 clearTimer 取消）。
+     *
+     * @param array<int, mixed> $args 透传给回调的位置参数
+     */
+    public static function after(float $delay, callable $callback, array $args = []): int
+    {
+        return Timer::once($delay, $callback, $args);
+    }
+
+    /**
+     * 注册周期性定时器：每 delay 秒执行一次，直到被 clearTimer 取消。
+     *
+     * @param array<int, mixed> $args 透传给回调的位置参数
+     */
+    public static function every(float $delay, callable $callback, array $args = []): int
+    {
+        return Timer::forever($delay, $callback, $args);
+    }
+
+    /**
+     * 注册 cron 表达式定时器：如 '0 0 * * *' 每天零点触发一次。
+     *
+     * @param array<int, mixed> $args 透传给回调的位置参数
+     */
+    public static function cron(string $expression, callable $callback, array $args = []): int
+    {
+        return Timer::cron($expression, $callback, $args);
+    }
+
+    /**
+     * 推进所有定时器与 cron 任务（自定义主循环 / 批处理进程中周期调用）。
+     */
+    public static function tickTimers(): void
+    {
+        Timer::tick();
+    }
+
+    /**
+     * 取消指定的定时器或 cron 任务。
+     */
+    public static function clearTimer(int $timerId): bool
+    {
+        return Timer::del($timerId);
+    }
+
+    /**
+     * 当前活跃的定时器 + cron 任务总数。
+     */
+    public static function timerCount(): int
+    {
+        return Timer::count();
+    }
+
+    /**
+     * 进程级信号处理器单例。
+     *
+     * 运行时（Swoole / Workerman）自行管理 SIGTERM / SIGINT 等进程信号；
+     * 应用层可用其余信号（如 SIGHUP 重载配置、SIGUSR1 自定义）通过本处理器注册。
+     */
+    public static function signal(): SignalHandler
+    {
+        return SignalHandler::getInstance();
+    }
+
+    /**
+     * 进程侧队列管理器单例（kode/queue 适配层：处理器注册 + 单条/批量消费）。
+     */
+    public static function queue(): QueueManager
+    {
+        return QueueManager::getInstance();
+    }
+
+    /**
+     * 进程运行状态监控器（写入 status / pid 文件，便于运维排查）。
+     *
+     * @param string|null $statusFile 状态文件路径，null 用默认 /tmp/kode_process_status.json
+     * @param string|null $pidFile    PID 文件路径，null 用默认 /tmp/kode_process.pid
+     */
+    public static function monitor(?string $statusFile = null, ?string $pidFile = null): StatusMonitor
+    {
+        return new StatusMonitor(
+            $statusFile ?? '/tmp/kode_process_status.json',
+            $pidFile ?? '/tmp/kode_process.pid'
+        );
+    }
+
+    /**
+     * 进程内事件发射器（发布/订阅）：Kode::emitter()->on('event', $cb) / ->emit('event', ...)。
+     */
+    public static function emitter(): EventEmitter
+    {
+        return Async::getEmitter();
     }
 
     // ------------------------------------------------------------ 并发原语
