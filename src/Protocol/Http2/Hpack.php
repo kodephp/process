@@ -268,13 +268,23 @@ final class Hpack
         while ($i < $len) {
             $byte = ord($block[$i]);
 
-            // 6.1 索引头字段：1xxxxxxx
+            // 6.1 索引头字段：1xxxxxxx（请求中最常见，内联取表避免 lookup() 方法分发
+            // 与其每次返回的 2 元素数组分配）
             if (($byte & 0x80) !== 0) {
                 $index = $this->readInteger($block, $i, 7);
                 if ($index === 0) {
                     throw Http2Exception::compression('HPACK 索引 0 非法');
                 }
-                $out[] = $this->lookup($index);
+                if ($index <= 61) {
+                    $entry  = self::STATIC_TABLE[$index];
+                    $out[]  = [$entry[0], $entry[1]];
+                } else {
+                    $entry = $this->dynamic[$index - 62] ?? null;
+                    if ($entry === null) {
+                        throw Http2Exception::compression('HPACK 索引越界：' . $index);
+                    }
+                    $out[] = [$entry[0], $entry[1]];
+                }
                 continue;
             }
 
@@ -292,7 +302,7 @@ final class Hpack
             // 6.2.1 增量索引字面量：01xxxxxx
             if (($byte & 0xC0) === 0x40) {
                 $nameIndex = $this->readInteger($block, $i, 6);
-                $name      = $nameIndex === 0 ? $this->readString($block, $i) : $this->lookup($nameIndex)[0];
+                $name      = $nameIndex === 0 ? $this->readString($block, $i) : $this->nameOf($nameIndex);
                 $value     = $this->readString($block, $i);
                 $this->push($name, $value);
                 $out[] = [$name, $value];
@@ -301,7 +311,7 @@ final class Hpack
 
             // 6.2.2 不索引 0000xxxx / 6.2.3 从不索引 0001xxxx
             $nameIndex = $this->readInteger($block, $i, 4);
-            $name      = $nameIndex === 0 ? $this->readString($block, $i) : $this->lookup($nameIndex)[0];
+            $name      = $nameIndex === 0 ? $this->readString($block, $i) : $this->nameOf($nameIndex);
             $out[]     = [$name, $this->readString($block, $i)];
         }
 
@@ -309,14 +319,15 @@ final class Hpack
     }
 
     /**
-     * 按 HPACK 索引取回条目（静态表 1..61，其后为动态表）。
+     * 按 HPACK 索引取回头名（静态表 1..61，其后为动态表）。
      *
-     * @return array{0: string, 1: string}
+     * 只取名字、不取整条 [name, value]，避免为「仅需要名字」的字面量表示分配
+     * 一个用不上的 2 元素数组（解码热路径每请求多次触发）。
      */
-    private function lookup(int $index): array
+    private function nameOf(int $index): string
     {
         if ($index <= 61) {
-            return self::STATIC_TABLE[$index];
+            return self::STATIC_TABLE[$index][0];
         }
 
         $entry = $this->dynamic[$index - 62] ?? null;
@@ -324,7 +335,7 @@ final class Hpack
             throw Http2Exception::compression('HPACK 索引越界：' . $index);
         }
 
-        return [$entry[0], $entry[1]];
+        return $entry[0];
     }
 
     /**

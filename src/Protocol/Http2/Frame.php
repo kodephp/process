@@ -97,7 +97,8 @@ final class Frame
     {
         $length = strlen($payload);
 
-        // 24 位长度手工拼装：pack('N') 是 32 位，需截掉最高字节
+        // 24 位长度手工拼装：pack('N') 是 32 位，需截掉最高字节。
+        // 经验证 pack('N', …) 在本构建下优于 4×chr 算术拼接，故流 ID 仍走 pack。
         return chr(($length >> 16) & 0xFF)
             . chr(($length >> 8) & 0xFF)
             . chr($length & 0xFF)
@@ -204,8 +205,13 @@ final class Frame
 
         $out = [];
         for ($i = 0; $i < $len; $i += 6) {
-            $item          = unpack('nid/Nvalue', substr($payload, $i, 6));
-            $out[$item['id']] = $item['value'];
+            // 直接用 ord 拼装，避免 unpack 的格式串解析、substr 切片与每次返回的数组分配。
+            $id    = (ord($payload[$i]) << 8) | ord($payload[$i + 1]);
+            $value = ((ord($payload[$i + 2]) << 24)
+                    | (ord($payload[$i + 3]) << 16)
+                    | (ord($payload[$i + 4]) << 8)
+                    | ord($payload[$i + 5])) & 0x7FFFFFFF;
+            $out[$id] = $value;
         }
 
         return $out;

@@ -97,6 +97,25 @@ final class Http2Session
     /** 流状态对象池上限：超过即不再回收，避免长连接下池无限增长 */
     private const int STREAM_POOL_LIMIT = 64;
 
+    /**
+     * 响应头块缓存：键为 `serialize([status, headers])`，值为已 HPACK 编码的整块。
+     *
+     * 服务端编码器严格走「不索引 / 从不索引」表示（见 {@see Hpack::encode()}），
+     * 动态表恒为空，因此同一 `(status, headers)` 编码出的字节块是确定且可复现的——
+     * 这与 {@see Hpack::$literalCache} 同源：缓存纯函数结果，线格式完全一致。
+     * 真实服务的响应头组合高度固定（同一 status + 同一组头反复出现），稳态下
+     * 除首个请求外几乎全部命中，直接跳过 normalizeHeaders + HPACK encode 两项开销。
+     * 上限 {@see RESPONSE_BLOCK_CACHE_LIMIT} 防止动态值（如每次不同的 Date）无限膨胀。
+     *
+     * @var array<string, string>
+     */
+    private static array $responseBlockCache = [];
+
+    /** 已缓存条目数（达到上限后停止写入，避免抖动与内存增长） */
+    private static int $responseBlockCacheCount = 0;
+
+    private const int RESPONSE_BLOCK_CACHE_LIMIT = 256;
+
     private int $lastStreamId = 0;
 
     private int $highestClientStream = 0;
@@ -124,6 +143,16 @@ final class Http2Session
         $this->recvWindow           = $this->initialWindowSize;
         $this->decoder              = new Hpack($headerTableSize);
         $this->encoder              = new Hpack($headerTableSize);
+    }
+
+    /**
+     * 清空响应头块缓存（主要用于测试隔离与基准冷启动）。
+     * 不影响任何已建立的会话，仅丢弃可重新计算的缓存。
+     */
+    public static function clearResponseBlockCache(): void
+    {
+        self::$responseBlockCache        = [];
+        self::$responseBlockCacheCount   = 0;
     }
 
     /**
@@ -745,7 +774,11 @@ final class Http2Session
             throw Http2Exception::frameSize('WINDOW_UPDATE 负载必须为 4 字节');
         }
 
-        $increment = unpack('N', $frame['payload'])[1] & 0x7FFFFFFF;
+        $p         = $frame['payload'];
+        $increment = ((ord($p[0]) << 24)
+            | (ord($p[1]) << 16)
+            | (ord($p[2]) << 8)
+            | ord($p[3])) & 0x7FFFFFFF;
         if ($increment === 0) {
             throw Http2Exception::protocol('WINDOW_UPDATE 增量不能为 0', $frame['stream']);
         }
@@ -934,18 +967,30 @@ final class Http2Session
      */
     private function writeHeaders(int $streamId, int $status, array $headers, bool $endStream): void
     {
-        $list = [[':status', (string) $status]];
-
-        foreach (self::normalizeHeaders($headers) as [$lower, $value]) {
-            // HTTP/2 禁止逐跳头，静默丢弃比让对端断连更友好
-            if ($lower === 'connection' || $lower === 'keep-alive' || $lower === 'transfer-encoding'
-                || $lower === 'upgrade' || $lower === 'proxy-connection') {
-                continue;
+        // 响应头块是 (status, headers) 的纯函数（编码器动态表恒空），稳态下同一组合
+        // 反复出现：以原始输入为键，首次编码后缓存，其后直接命中，跳过
+        // normalizeHeaders + HPACK encode 两项开销（仅付出一次 serialize 取键）。
+        $key = serialize([$status, $headers]);
+        if (isset(self::$responseBlockCache[$key])) {
+            $block = self::$responseBlockCache[$key];
+        } else {
+            $list = [[':status', (string) $status]];
+            foreach (self::normalizeHeaders($headers) as [$lower, $value]) {
+                // HTTP/2 禁止逐跳头，静默丢弃比让对端断连更友好
+                if ($lower === 'connection' || $lower === 'keep-alive' || $lower === 'transfer-encoding'
+                    || $lower === 'upgrade' || $lower === 'proxy-connection') {
+                    continue;
+                }
+                $list[] = [$lower, $value];
             }
-            $list[] = [$lower, $value];
+
+            $block = $this->encoder->encode($list);
+            if (self::$responseBlockCacheCount < self::RESPONSE_BLOCK_CACHE_LIMIT) {
+                self::$responseBlockCache[$key] = $block;
+                self::$responseBlockCacheCount++;
+            }
         }
 
-        $block = $this->encoder->encode($list);
         $flags = Frame::FLAG_END_HEADERS | ($endStream ? Frame::FLAG_END_STREAM : 0);
 
         // 头块超过对端 MAX_FRAME_SIZE 时拆成 HEADERS + CONTINUATION 序列

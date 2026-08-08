@@ -18,7 +18,7 @@ for ($sid = 1; $sid <= ($n + 4000) * 2; $sid += 2) {
 }
 $typicalHeaders = [
     'content-type' => 'text/html; charset=utf-8', 'content-length' => '13',
-    'cache-control' => 'no-cache', 'date' => 'Mon, 08 Aug 2026 00:00:00 GMT', 'server' => 'kode/5.2.3',
+    'cache-control' => 'no-cache', 'date' => 'Mon, 08 Aug 2026 00:00:00 GMT', 'server' => 'kode/5.2.4',
 ];
 $body = 'Hello, Kode!';
 

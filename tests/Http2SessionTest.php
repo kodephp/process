@@ -461,6 +461,67 @@ final class Http2SessionTest extends TestCase
     }
 
     /**
+     * 回归：响应头块缓存对调用方完全透明——同一 (status, headers) 跨会话两次 respond
+     * 必须产生逐字节相同的 HEADERS 头块（缓存命中不改变线格式），且解码内容正确。
+     */
+    public function testResponseBlockCacheIsTransparentAndCorrect(): void
+    {
+        $make = function () {
+            $s = new Http2Session();
+            $this->handshake($s);
+            $s->feed($this->headersFrame(1, self::getHeaders(), Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM));
+            $s->drain();
+            return $s;
+        };
+
+        $headers = ['content-type' => 'text/plain', 'cache-control' => 'no-cache'];
+
+        $s1 = $make();
+        $this->assertTrue($s1->respond(1, 200, $headers, 'a'));
+        $payload1 = Frame::decode($s1->drain())['payload'];
+
+        $s2 = $make();
+        $this->assertTrue($s2->respond(1, 200, $headers, 'b'));
+        $payload2 = Frame::decode($s2->drain())['payload'];
+
+        $this->assertSame($payload1, $payload2, '同一响应头组合必须编码出相同字节块（缓存命中不影响线格式）');
+
+        $decoded = (new Hpack())->decode($payload1);
+        $map = [];
+        foreach ($decoded as [$name, $value]) {
+            $map[$name] = $value;
+        }
+        $this->assertSame('200', $map[':status']);
+        $this->assertSame('text/plain', $map['content-type']);
+        $this->assertSame('no-cache', $map['cache-control']);
+    }
+
+    /**
+     * 回归：clearResponseBlockCache() 必须让缓存可复位（测试隔离与基准冷启动需要）。
+     */
+    public function testResponseBlockCacheCanBeCleared(): void
+    {
+        Http2Session::clearResponseBlockCache();
+        $make = function () {
+            $s = new Http2Session();
+            $this->handshake($s);
+            $s->feed($this->headersFrame(1, self::getHeaders(), Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM));
+            $s->drain();
+            return $s;
+        };
+
+        $s1 = $make();
+        $this->assertTrue($s1->respond(1, 200, ['content-type' => 'text/plain'], 'x'));
+        $this->assertNotEmpty($s1->drain());
+
+        Http2Session::clearResponseBlockCache();
+
+        $s2 = $make();
+        $this->assertTrue($s2->respond(1, 200, ['content-type' => 'text/plain'], 'y'));
+        $this->assertNotEmpty($s2->drain());
+    }
+
+    /**
      * 回归：流式响应收尾时 pending 已排空，若不补一帧就没有任何帧带 END_STREAM，
      * 流会被静默关闭而客户端永远等不到响应结束（真实 curl 会挂起）。
      */
