@@ -164,6 +164,35 @@ abstract class AbstractRuntime implements RuntimeInterface
         }
     }
 
+    /**
+     * 派发 message 事件——热路径专用的定参版本。
+     *
+     * 语义与 `fire('message', $connection, $message)` 完全一致，包括异常兜底；
+     * 唯一的区别是不经过可变参数：`...$args` 每次调用都要打包一个数组、
+     * 再在调用点展开，而 message 是唯一每请求都必然触发一次的事件，
+     * 这笔固定开销会被请求量整体放大。
+     */
+    protected function fireMessage(mixed $connection, mixed $message): void
+    {
+        $handler = $this->handlers['message'] ?? null;
+        if ($handler === null) {
+            return;
+        }
+
+        try {
+            $handler($connection, $message);
+        } catch (\Throwable $e) {
+            if (isset($this->handlers['error'])) {
+                ($this->handlers['error'])(
+                    $connection instanceof ConnectionInterface ? $connection : null,
+                    $e
+                );
+                return;
+            }
+            throw $e;
+        }
+    }
+
     protected function hasHandler(string $event): bool
     {
         return isset($this->handlers[$event]);

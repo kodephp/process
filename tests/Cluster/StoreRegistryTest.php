@@ -149,11 +149,13 @@ final class StoreRegistryTest extends TestCase
 
     public function testStaleNodeBecomesSuspectThenIsHiddenFromHealthyList(): void
     {
-        // ttl 极小，直接把心跳年龄推进 Suspect 区间
-        $registry = new StoreRegistry($this->store, 0.02);
+        // ttl 取足够宽，使 Suspect 窗口（1×ttl ~ 2×ttl）稳定容纳测试开销；
+        // 睡眠固定为 1.5×ttl，把心跳年龄推进 Suspect 区间而非偶发的 Down。
+        $ttl = 0.3;
+        $registry = new StoreRegistry($this->store, $ttl);
         $registry->register(new Node('n1', 'api'));
 
-        usleep(30_000);   // 1×ttl < age < 2×ttl → Suspect
+        usleep((int) ($ttl * 1.5 * 1_000_000));   // 1×ttl < age < 2×ttl → Suspect
 
         $this->assertSame([], $registry->nodes('api'), '仅健康节点时 Suspect 不返回');
 

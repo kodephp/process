@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Kode\Process\Tests;
 
+use Kode\Process\Protocol\Http2\Http2Session;
 use Kode\Process\Runtime\Driver\NativeConnection;
 use PHPUnit\Framework\TestCase;
 
@@ -189,5 +190,67 @@ final class NativeConnectionTest extends TestCase
     {
         $pos = strpos($wire, "\r\n\r\n");
         return $pos === false ? '' : substr($wire, $pos + 4);
+    }
+
+    /**
+     * 优雅关闭：HTTP/2 连接关闭 TCP 前必须先发 GOAWAY，
+     * 否则正在进行的多路复用请求会被 RST 硬切断、restart 会中断在途连接。
+     */
+    public function testGracefulCloseSendsGoawayOnHttp2Connection(): void
+    {
+        [$sock, $peer] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+        stream_set_blocking($sock, false);
+        stream_set_blocking($peer, false);
+
+        $conn = new NativeConnection($sock, '127.0.0.1:1');
+
+        $session = new Http2Session();
+        $session->markPrefaceReceived();
+        $session->sendLocalSettings();
+        $conn->attachHttp2($session);
+
+        $conn->gracefulClose();
+
+        $this->assertTrue($conn->isClosed(), 'gracefulClose 必须关闭连接');
+        $this->assertTrue($session->isClosed(), 'gracefulClose 必须对 h2 会话发送 GOAWAY 并标记关闭');
+
+        // flushHttp2 已在关闭前把 GOAWAY 写入套接字：从对端读取并断言 GOAWAY 帧存在
+        $bytes = $this->readPeer($peer);
+        $this->assertNotEmpty($bytes, '必须向对端写出帧数据');
+        // GOAWAY 帧头：3 字节长度(0x000008) + type(0x07) + flags(0x00) ...
+        $this->assertStringContainsString("\x00\x00\x08\x07\x00", $bytes, '应写出 GOAWAY 帧（type=7）');
+        fclose($peer);
+    }
+
+    public function testGracefulClosePlainConnectionJustCloses(): void
+    {
+        [$sock, $peer] = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, 0);
+        stream_set_blocking($sock, false);
+        stream_set_blocking($peer, false);
+
+        $conn = new NativeConnection($sock, '127.0.0.1:1');
+        $conn->gracefulClose();
+
+        $this->assertTrue($conn->isClosed());
+        $this->assertFalse($conn->isHttp2());
+        fclose($peer);
+    }
+
+    private function readPeer($peer): string
+    {
+        $bytes    = '';
+        $deadline = microtime(true) + 0.5;
+        while (microtime(true) < $deadline && strlen($bytes) < 17) {
+            $r = @fread($peer, 1024);
+            if ($r === false) {
+                break;
+            }
+            $bytes .= $r;
+            if ($r === '') {
+                usleep(5000);
+            }
+        }
+
+        return $bytes;
     }
 }

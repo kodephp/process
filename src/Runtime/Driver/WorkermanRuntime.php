@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Kode\Process\Runtime\Driver;
 
+use Kode\Process\Http\Request;
+use Kode\Process\Protocol\HttpProtocol;
 use Kode\Process\Runtime\AbstractRuntime;
 use Kode\Process\Runtime\Capability;
 use Kode\Process\Runtime\Exception\RuntimeNotSupportedException;
@@ -20,6 +22,9 @@ use Kode\Process\Runtime\RuntimeType;
 final class WorkermanRuntime extends AbstractRuntime
 {
     private const WORKER_CLASS = '\Workerman\Worker';
+
+    /** Workerman 在 http 场景下交付的请求类，用于识别是否需要包装 */
+    private const WORKERMAN_REQUEST = '\Workerman\Protocols\Http\Request';
 
     /** @var array<int, object> Workerman\Worker 实例 */
     private array $workers = [];
@@ -187,15 +192,21 @@ final class WorkermanRuntime extends AbstractRuntime
         if ($this->hasHandler('message')) {
             $worker->onMessage = function (object $conn, mixed $data): void {
                 $wrap = new WorkermanConnection($conn);
-                // 依据 Accept-Encoding 自动启用 gzip（响应体达阈值才压缩，send 时判定）
-                if (
-                    $this->gzipEnabled
-                    && is_array($data)
-                    && HttpProtocol::acceptsGzip((string)($data['headers']['accept-encoding'] ?? ''))
-                ) {
-                    $wrap->setGzipAuto(true);
+
+                // HTTP 场景下 Workerman 交来的是 Workerman\Protocols\Http\Request 对象，
+                // 统一包装成 Kode\Process\Http\Request 再交给业务——否则同一份 handler
+                // 换到 Native 上就会因为字段访问方式不同而崩。
+                // 非 HTTP（tcp/ws/text/frame）原样透传字符串。
+                $requestClass = self::WORKERMAN_REQUEST;
+                if ($data instanceof $requestClass) {
+                    $request = Request::fromWorkerman($data);
+                    if ($this->gzipEnabled && HttpProtocol::acceptsGzip($request->header('accept-encoding', '') ?? '')) {
+                        $wrap->setGzipAuto(true);
+                    }
+                    $data = $request;
                 }
-                $this->fire('message', $wrap, $data);
+
+                $this->fireMessage($wrap, $data);
                 if ($wrap->isChunkStarted()) {
                     $wrap->endChunk();
                 }

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Kode\Process\Protocol;
 
+use Kode\Process\Http\Request;
+
 /**
  * HTTP/1.1 协议实现
  */
@@ -17,6 +19,9 @@ final class HttpProtocol implements ProtocolInterface
 
     /** 自动 gzip 压缩的最小响应体字节数（过小压缩收益不抵开销） */
     public const int GZIP_MIN_SIZE = 1024;
+
+    /** 请求体超过这个字节数时，头部定向扫描才值得先切出头块再搜 */
+    private const int SCAN_BODY_LIMIT = 2048;
 
     /** @var array<int, string> */
     private const array STATUS_TEXTS = [
@@ -96,13 +101,27 @@ final class HttpProtocol implements ProtocolInterface
     /**
      * 只扫描 Content-Length 字段，避免为了拿一个数字而解析整个头部。
      *
-     * 该方法在每个请求的每次收包上都会被调用，是最热的路径之一。
+     * 该方法在每个请求的每次收包上都会被调用，是最热的路径之一，因此只做**一次**搜索：
+     *  1. 这里曾经「先 strpos 命中标准写法，未命中再 stripos 回退」，前提是「大小写折叠很贵」。
+     *     实测推翻了它：PHP 8 的 stripos 与 strpos 成本几乎相同（40B 报文 25.7 vs 25.6ns）。
+     *     于是前置的 strpos 在 GET 这类无体请求上纯属多扫一遍报文，而无体请求正是常态。
+     *  2. 扫描范围仍限制在头部——否则上传大文件时，每收一个包都要在整个 body 上搜一遍。
      */
     private static function scanContentLength(string $buffer, int $headerEnd): int
     {
-        $pos = stripos($buffer, "\r\ncontent-length:");
+        if (strlen($buffer) - $headerEnd > self::SCAN_BODY_LIMIT) {
+            // 上传：body 远大于头部，先切出头块再搜才划算
+            $pos = stripos(substr($buffer, 0, $headerEnd), "\r\ncontent-length:");
+        } else {
+            // 体量不大：直接整串搜，用偏移判断命中是否落在头块内，
+            // 省掉一次为限定范围而做的 substr 拷贝
+            $pos = stripos($buffer, "\r\ncontent-length:");
+            if ($pos !== false && $pos >= $headerEnd) {
+                $pos = false;
+            }
+        }
 
-        if ($pos === false || $pos >= $headerEnd) {
+        if ($pos === false) {
             return 0;
         }
 
@@ -116,6 +135,9 @@ final class HttpProtocol implements ProtocolInterface
         return (int) trim(substr($buffer, $valueStart, $lineEnd - $valueStart));
     }
 
+    /** 纯字符串响应体走的固定头前缀，避免每请求重建数组再遍历拼接 */
+    private const string DEFAULT_HEAD = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ";
+
     #[\Override]
     public static function encode(mixed $data, mixed $connection = null): string
     {
@@ -125,7 +147,9 @@ final class HttpProtocol implements ProtocolInterface
             if (str_starts_with($data, 'HTTP/')) {
                 return $data;
             }
-            $data = ['body' => $data];
+
+            // 最热的一条路径：直接拼定长前缀，省掉数组构建 + 头部遍历
+            return self::DEFAULT_HEAD . strlen($data) . self::EOF . $data;
         }
 
         if (!is_array($data)) {
@@ -150,118 +174,85 @@ final class HttpProtocol implements ProtocolInterface
     }
 
     /**
+     * 交付统一的 {@see Request} 对象。
+     *
+     * 这里刻意不做任何解析：Request 内部按字段惰性求值，业务碰哪个字段才解析哪个。
+     * 一个只回字符串的 handler 因此一个字节都不会被解析，而需要完整请求的业务
+     * 拿到的字段与三个运行时完全一致。
+     *
+     * 旧的数组写法（`$request['path']` 等）通过 ArrayAccess 原样兼容。
+     */
+    #[\Override]
+    public static function decode(string $buffer, mixed $connection = null): mixed
+    {
+        return Request::fromRaw($buffer);
+    }
+
+    /**
+     * 一次性解析出全部字段的数组形式，供不便持有对象的场景使用。
+     *
      * @return array{
      *     method: string, uri: string, path: string, query: array<string, mixed>,
      *     protocol: string, headers: array<string, string>, body: string,
      *     get: array<string, mixed>, post: array<string, mixed>
      * }
      */
-    #[\Override]
-    public static function decode(string $buffer, mixed $connection = null): mixed
+    public static function parse(string $buffer): array
     {
-        return self::parseRequest($buffer);
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    private static function parseRequest(string $data): array
-    {
-        $headerEnd = strpos($data, self::EOF);
-        $headerPart = $headerEnd !== false ? substr($data, 0, $headerEnd) : $data;
-        $body = $headerEnd !== false ? substr($data, $headerEnd + 4) : '';
-
-        $lines = explode(self::HEADER_EOF, $headerPart);
-        $requestLine = array_shift($lines) ?? '';
-
-        $parts = explode(' ', $requestLine, 3);
-        $method = $parts[0] ?? 'GET';
-        $uri = $parts[1] ?? '/';
-        $protocol = $parts[2] ?? 'HTTP/1.1';
-
-        $headers = self::parseHeaderLines($lines);
-
-        $query = [];
-        $queryPos = strpos($uri, '?');
-
-        if ($queryPos !== false) {
-            $path = substr($uri, 0, $queryPos);
-            parse_str(substr($uri, $queryPos + 1), $query);
-        } else {
-            $path = $uri;
-        }
-
-        if ($path === '') {
-            $path = '/';
-        }
-
-        return [
-            'method' => $method,
-            'uri' => $uri,
-            'path' => $path,
-            'query' => $query,
-            'protocol' => $protocol,
-            'headers' => $headers,
-            'body' => $body,
-            'get' => $query,
-            'post' => self::parseBody($body, $headers),
-        ];
-    }
-
-    /**
-     * @param list<string> $lines
-     * @return array<string, string>
-     */
-    private static function parseHeaderLines(array $lines): array
-    {
-        $headers = [];
-
-        foreach ($lines as $line) {
-            $colon = strpos($line, ':');
-
-            if ($colon === false) {
-                continue;
-            }
-
-            $headers[trim(substr($line, 0, $colon))] = trim(substr($line, $colon + 1));
-        }
-
-        return $headers;
-    }
-
-    /**
-     * @param array<string, string> $headers
-     * @return array<string, mixed>
-     */
-    private static function parseBody(string $body, array $headers): array
-    {
-        if ($body === '') {
-            return [];
-        }
-
-        $contentType = $headers['Content-Type'] ?? $headers['content-type'] ?? '';
-
-        if (str_contains($contentType, 'application/x-www-form-urlencoded')) {
-            parse_str($body, $post);
-            return $post;
-        }
-
-        if (str_contains($contentType, 'application/json')) {
-            if (!json_validate($body)) {
-                return [];
-            }
-
-            $decoded = json_decode($body, true);
-
-            return is_array($decoded) ? $decoded : [];
-        }
-
-        return [];
+        /** @phpstan-ignore-next-line 结构由 Request::toArray() 保证 */
+        return Request::fromRaw($buffer)->toArray();
     }
 
     public static function getStatusText(int $status): string
     {
         return self::STATUS_TEXTS[$status] ?? 'Unknown';
+    }
+
+    /**
+     * 解析一份完整的 HTTP/1.1 响应报文。
+     *
+     * 用于把业务直接写出的 1.1 报文桥接到别的承载协议（如 HTTP/2 的 HEADERS + DATA），
+     * 从而让同一份 handler 在两种协议版本下都能工作。头名统一转小写，方便下游查找。
+     *
+     * @return array{status: int, headers: array<string, string>, body: string}
+     */
+    public static function parseResponse(string $raw): array
+    {
+        $headerEnd = strpos($raw, self::EOF);
+        $headerPart = $headerEnd !== false ? substr($raw, 0, $headerEnd) : $raw;
+        $body = $headerEnd !== false ? substr($raw, $headerEnd + 4) : '';
+
+        $lineEnd = strpos($headerPart, self::HEADER_EOF);
+        $statusLine = $lineEnd === false ? $headerPart : substr($headerPart, 0, $lineEnd);
+        $rest = $lineEnd === false ? '' : substr($headerPart, $lineEnd + 2);
+
+        // "HTTP/1.1 200 OK" → 取中间的状态码
+        $parts = explode(' ', $statusLine, 3);
+        $status = isset($parts[1]) ? (int) $parts[1] : 200;
+
+        $headers = [];
+
+        if ($rest !== '') {
+            foreach (explode(self::HEADER_EOF, $rest) as $line) {
+                $colon = strpos($line, ':');
+
+                if ($colon === false) {
+                    continue;
+                }
+
+                $name = strtolower(trim(substr($line, 0, $colon)));
+                $value = trim(substr($line, $colon + 1));
+
+                // 同名头合并，语义与 HTTP/2 的头列表一致
+                $headers[$name] = isset($headers[$name]) ? $headers[$name] . ', ' . $value : $value;
+            }
+        }
+
+        return [
+            'status' => $status >= 100 && $status <= 599 ? $status : 200,
+            'headers' => $headers,
+            'body' => $body,
+        ];
     }
 
     /**

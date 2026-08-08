@@ -491,14 +491,17 @@ post_max_size = 10M
 
 ```php
 // 过滤用户输入
-$input = htmlspecialchars($request['input']);
+$input = htmlspecialchars((string) $request->input('input', ''));
 
 // 使用预处理语句
 $stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?");
 $stmt->execute([$id]);
 
-// 验证请求来源
-if ($request['headers']['X-Requested-With'] !== 'XMLHttpRequest') {
+// 验证请求来源（header() 大小写不敏感）
+if (!$request->isAjax()) {
     return Response::error('Invalid request', 403);
 }
+
+// 客户端 IP：默认只信直连地址，明确在可信反代后面才传 true
+$ip = $request->ip(trustProxy: false);
 ```

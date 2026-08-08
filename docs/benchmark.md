@@ -146,12 +146,121 @@ v5.1.7 新增 HTTP 响应 gzip 压缩（依据 `Accept-Encoding` 自动压缩，
 注：本次 swoole 一度因 `SwooleRuntime` 未导入 `HttpProtocol` 导致每请求 500（QPS 跌至 ~80k），
 修复后恢复正常——属发布前已拦截的缺陷，未合入正式版本。
 
+## v5.2.0 三方公平对比（HTTP/2 + 热路径优化之后）
+
+本轮改进了**测量方法**本身，因为此前的「各跑一轮比 QPS」在这台机器上已经问不出有效信息。
+
+### 方法变更
+
+| 变更 | 原因 |
+|------|------|
+| 三方**交替轮转**跑 N 轮，取中位数 | 单次顺序执行会被机器状态漂移（温度、后台任务）系统性偏袒先跑或后跑的一方 |
+| 新增 **req/CPU 秒** 指标 | 核心数有限时纯 QPS 会撞压测端天花板，此时「每消耗 1 秒 CPU 处理多少请求」才是服务端自身的效率 |
+| 补充**纯 CPU 微基准** | 隔离 socket 与事件循环噪声，直接量化每请求的 PHP 工作量 |
+
+### 结果一：单 worker（未饱和区间，5 轮中位数）
+
+| 运行时 | QPS | 相对 native |
+|--------|----:|------------:|
+| **native** | **200,202** | — |
+| swoole | 175,570 | -12.3% |
+| workerman | 199,508 | -0.3% |
+
+单 worker 时压测端未饱和，能反映服务端真实上限：native 与 workerman 基本持平（0.3% 在噪声内），均明显高于 swoole。
+
+### 结果二：4 worker（已饱和，5 轮中位数）
+
+| 运行时 | QPS | req/CPU 秒 |
+|--------|----:|-----------:|
+| native | 181,248 | 57,782 |
+| swoole | 183,619 | 52,304 |
+| workerman | 186,221 | 58,677 |
+
+**这组数据不支持任何一方「更快」的结论**：三方 QPS 全部收敛到 ~185k，说明瓶颈在 wrk 压测端而非被测服务。
+
+CPU 效率指标同样**不足以支撑结论**——native 单轮取值在 56,083 ~ 78,016 之间跳动（离群轮次 78,016），
+`ps` 采样窗口精度与同机后台负载带来的方差远大于三方差值。此处如实记录，不作为优势主张。
+
+### 结果三：纯 CPU 微基准（`benchmarks/hotpath-micro.php`）
+
+隔离网络层，只跑每请求必须做的 PHP 工作（input → decode → rawHeader ×2 → encode）。
+为消除机器状态漂移，native 与 workerman 在**同一进程内背靠背**比较，共独立运行 6 次：
+
+| 运行时热路径（每 20 万次） | 典型耗时 | 相对 |
+|---------------------------|---------:|-----:|
+| **native** | **~78 ms** | — |
+| workerman | ~90 ms | +14~17% |
+
+- **方向 100% 稳定**：6 次独立运行中，native **每一次都快于 workerman**，领先幅度 5% ~ 29%（中位数约 17%）。
+- 跨进程的绝对数字会有波动（开发机后台负载），但同一进程内的背靠背比较始终 native 占优，
+  说明差距来自代码而非噪声。
+- 相比优化前 native 落后 28.4%，本轮调优后反转为**稳定领先**——直接回应了「自研用 PHP 8.3+
+  还打不过为低版本 PHP 设计的 workerman 是否不合适」的疑问：在可干净测量的请求热路径上，自研确实更快。
+
+反转来自四处改动（与 HTTP/2 解析、gzip、chunked 共用同一套请求预处理）：
+
+1. `SCAN_BODY_LIMIT` —— 大报文只在头块内搜索，不扫全文
+2. `Connection` 头单次扫描、多处复用（keep-alive 判定与 h2c 升级探测共享）
+3. 头部查找改为**单次 `stripos`** —— 实测 PHP 8 的 `stripos` 与 `strpos` 成本几乎相同
+   （40B 报文 25.7 vs 25.6 ns），原先「先 `strpos` 命中标准写法、未命中再 `stripos` 回退」
+   在 GET 无体请求上纯属多扫一遍报文
+4. `isHttp10()` 快判 —— keep-alive 每请求都要问协议版本，走 `protocol()` 会连带触发
+   请求行解析（含路径规范化，约 241 ns）；改为比对请求行末尾 8 字节后降到 55 ns
+
+> 一条反直觉的负面结果也记录在此：曾尝试缓存「头块小写副本」以加速查找，实测反而慢 60.2%——
+> `strtolower` + `substr` 两次内存分配的代价高于单次 `stripos` 扫描。该方向已撤除。
+
+### 结果四：HTTP/2 响应热路径（HPACK 编码）
+
+HTTP/2 是 v5.2.0 的旗舰特性，而每响应必付的 `Hpack::encode` 此前基本未调优——它成为响应热路径的主导成本。
+基准见 `benchmarks/hotpath-h2.php`，隔离 socket 与事件循环，量化「每响应必做的 PHP 工作量」。
+
+**主导成本**：`Hpack::encode` 对每个头值无条件调用 `huffmanEncode()` 后比长短。典型响应 6 个头值
+（content-type / content-length / cache-control / date / server / :status）逐一编码，约 **6.0 µs/响应**。
+由于响应头**名**多命中静态表（只写整数），真正走字面量编码的是**值**——且同一组响应头值在真实服务里被反复编码。
+
+**优化**：HPACK 字面量编码是纯函数（只依赖该字符串，与动态表状态无关），故对「值 → 已编码字节」加一层
+**有界缓存**（上限 1024 条，达上限后停止写入，内存恒定）。线格式逐字节不变，仅省去重复 Huffman 计算；
+新增 `Hpack::clearLiteralCache()` 供测试隔离。
+
+| 场景（每 20 万次） | 优化前 | 优化后 | 变化 |
+|-------------------|-------:|-------:|-----:|
+| `Hpack::encode` 冷（每轮清缓存） | ~6.18 µs | ~6.03 µs | 无回归 |
+| `Hpack::encode` 热（重复头命中缓存） | — | **~1.08 µs** | **约 5.7× 更快** |
+| feed+respond 每请求（热会话，补窗口） | — | ~9.5 µs | 含解码+编码+成帧+冲刷 |
+
+稳态下每响应省去约 5 µs 的重复 Huffman 计算；冷路径（首次遇到某值）完全不变，故兼容性与压缩率零损失。
+
+> **基准方法论修正（重要）**：早期一版持久会话基准报出 1.12 µs/请求，比纯 `Hpack::encode` 还快，明显自相矛盾。
+> 排查发现这是**基准假象而非真实加速**——无头会话从不回发 `WINDOW_UPDATE`，连接级 `sendWindow`（默认 65535）
+> 在约 5460 次响应后被耗尽，流无法关闭、堆积至 `maxConcurrentStreams`(128) 被 `RST_REFUSED`，
+> 此后 `respond()` 直接 `return false` 跳过了编码。真实客户端会持续回补窗口，不会触发。修正方式：每轮补发
+> `WINDOW_UPDATE(0, body长度)` 模拟消费，使流正常关闭——修正后测得真实的 ~9.5 µs/请求。
+
+### 诚实结论
+
+- **吞吐**：native 与 workerman 在同等条件下**持平**，互有胜负且差异落在噪声区间；两者均优于 swoole 的 CPU 效率。
+- **热路径 CPU**：native 每请求的解析+编码成本稳定低于 workerman（6/6 运行全胜，中位数约 -17%），
+  这是隔离了 socket 与事件循环噪声后唯一可干净复现的优势，也是「自研不输 workerman」的硬证据。
+- 吞吐持平的原因不在请求处理，而在 wrk 压测端先于服务端饱和；native 的差异化价值则集中在
+  **协议完备性**（HTTP/2、WebSocket 分片重组）、**错误处理分级**、**优雅关闭（GOAWAY）** 与**可测试性**上。
+
 ## 怎么复现
 
 ```bash
 # 需要 wrk：brew install wrk
 bash benchmarks/runtime-bench.sh 4 15 200 4
 # 结果写入 benchmarks/bench-result.txt
+
+# 三方交替轮转 + CPU 效率对比：workers duration connections threads rounds
+bash benchmarks/runtime-compare.sh 4 10 100 4 5
+# 结果写入 benchmarks/compare-result.txt
+
+# 纯 CPU 热路径微基准（无需 wrk）
+php benchmarks/hotpath-micro.php
+
+# HTTP/2 响应热路径微基准（HPACK 编码 + feed/respond，无需 wrk）
+php benchmarks/hotpath-h2.php [iterations]
 ```
 
 - `benchmarks/portable-server.php`：跨运行时通用的服务脚本（`Kode::serve(..., 'native'|'swoole'|'workerman')`）。

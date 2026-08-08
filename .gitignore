@@ -35,5 +35,8 @@ CHANGELOG
 /benchmarks/gate/gate-*.txt
 /benchmarks/gate/gate-*.json
 /benchmarks/bench-result.txt
+/benchmarks/bench-result*.txt
+/benchmarks/compare-result.txt
+/benchmarks/h2c-smoke.php
 /benchmarks/workerman.log
 /benchmarks/*.log

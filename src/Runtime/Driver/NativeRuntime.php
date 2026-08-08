@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 namespace Kode\Process\Runtime\Driver;
 
+use Kode\Process\Http\Request;
+use Kode\Process\Protocol\Http2\Frame;
+use Kode\Process\Protocol\Http2\Http2Exception;
+use Kode\Process\Protocol\Http2\Http2Session;
 use Kode\Process\Protocol\HttpProtocol;
 use Kode\Process\Protocol\LengthPrefix;
 use Kode\Process\Protocol\ProtocolFactory;
@@ -117,6 +121,22 @@ final class NativeRuntime extends AbstractRuntime
 
     private bool $gzipEnabled = true;
 
+    /** h2c（明文 HTTP/2）总开关，对 http:// 监听生效 */
+    private bool $http2Enabled = true;
+
+    private int $http2MaxConcurrentStreams = 128;
+
+    private int $http2InitialWindow = 1048576;
+
+    /** 优雅关闭宽限期（秒）：SIGTERM 后让在途请求/流完成的最长等待 */
+    private int $gracefulShutdownTimeout = 3;
+
+    /** 是否处于优雅关闭中（收到 SIGTERM/SIGINT 后置位） */
+    private bool $shuttingDown = false;
+
+    /** 监听套接字集合，关闭时用于停止接收新连接 */
+    private array $listenerSockets = [];
+
     private int $maxSendBuffer = NativeConnection::DEFAULT_MAX_SEND_BUFFER;
 
     private string $serverName = 'kode-process';
@@ -228,6 +248,14 @@ final class NativeRuntime extends AbstractRuntime
         $this->heartbeat       = max(0, (int)($opts['heartbeat'] ?? 0));
         $this->keepAlive       = (bool)($opts['keepAlive'] ?? true);
         $this->gzipEnabled     = (bool)($opts['gzip'] ?? true);
+
+        // HTTP/2（h2c）：默认开启，与 HTTP/1.1 在同一端口自动协商，
+        // 客户端不支持 h2 时完全不受影响（既不改握手也不加解析开销）。
+        $this->http2Enabled              = (bool)($opts['http2'] ?? true);
+        $this->http2MaxConcurrentStreams = max(1, (int)($opts['http2MaxConcurrentStreams'] ?? 128));
+        $this->http2InitialWindow        = max(Frame::DEFAULT_WINDOW_SIZE, (int)($opts['http2InitialWindow'] ?? 1048576));
+        $this->gracefulShutdownTimeout   = max(0, (int)($opts['gracefulShutdownTimeout'] ?? 3));
+
         $this->maxSendBuffer   = max(65536, (int)($opts['maxSendBuffer'] ?? NativeConnection::DEFAULT_MAX_SEND_BUFFER));
         $this->serverName      = (string)($opts['name'] ?? 'kode-process');
         $this->pidFile         = isset($opts['pidFile']) ? (string)$opts['pidFile'] : null;
@@ -465,10 +493,12 @@ final class NativeRuntime extends AbstractRuntime
         $loop       = LoopFactory::create($this->primaryOptions()['loop'] ?? null);
         $this->loop = $loop;
 
+        $this->listenerSockets = [];
         foreach ($entries as $entry) {
             $sock     = $entry['socket'];
             $listener = $entry['listener'];
             stream_set_blocking($sock, false);
+            $this->listenerSockets[] = $sock;
 
             if ($listener['scheme'] === 'udp') {
                 $loop->onReadable($sock, function ($s) use ($listener): void {
@@ -496,14 +526,50 @@ final class NativeRuntime extends AbstractRuntime
         foreach ($this->timers as $t) {
             $loop->addTimer($t['interval'], $t['callback'], $t['periodic']);
         }
+        // 共享粗时钟：每秒推进一次，供连接在收发时记录活跃时刻。
+        // 秒级精度对空闲回收（周期以十秒计）绰绰有余，却让热路径彻底摆脱 microtime()。
+        NativeConnection::tickClock(microtime(true));
+        $loop->addTimer(1.0, static function (): void {
+            NativeConnection::tickClock(microtime(true));
+        }, true);
+
         if ($this->heartbeat > 0) {
             $loop->addTimer(min(10.0, (float)$this->heartbeat), function (): void {
                 $this->recycleIdleConnections();
             }, true);
         }
 
-        $stop = static function () use ($loop): void {
-            $loop->stop();
+        $stop = function () use ($loop): void {
+            if ($this->shuttingDown) {
+                return; // 避免重复触发（同一信号可能被多次投递）
+            }
+            $this->shuttingDown = true;
+
+            // 1) 停止接收新连接：移除监听套接字的可读监听
+            foreach ($this->listenerSockets as $ls) {
+                if (is_resource($ls)) {
+                    $this->loop?->offReadable($ls);
+                }
+            }
+
+            // 2) HTTP/2 连接先发 GOAWAY，让对端干净地停止发起新流、
+            //    等待在途流完成，而不是被 RST 硬切断。
+            foreach ($this->connections as $conn) {
+                if (!$conn->isHttp2()) {
+                    continue;
+                }
+                $session = $conn->http2Session();
+                if ($session !== null && !$session->isClosed()) {
+                    $session->goaway(Frame::ERROR_NO_ERROR);
+                    $conn->flushHttp2();
+                }
+            }
+
+            // 3) 宽限期：让在途请求/流完成；期间连接自然关闭，或超时后强制退出。
+            //    所有连接都在宽限期内关闭时，closeConnection() 会提前结束循环。
+            $loop->addTimer(max(0.1, $this->gracefulShutdownTimeout), function () use ($loop): void {
+                $loop->stop();
+            });
         };
         $loop->onSignal(SIGTERM, $stop);
         $loop->onSignal(SIGUSR1, $stop);
@@ -513,7 +579,7 @@ final class NativeRuntime extends AbstractRuntime
         $loop->run();
 
         foreach ($this->connections as $conn) {
-            $conn->close();
+            $conn->gracefulClose();
         }
         $this->connections       = [];
         $this->connectionSockets = [];
@@ -565,7 +631,13 @@ final class NativeRuntime extends AbstractRuntime
     /** 心跳回收：关闭超过 heartbeat 秒没有任何读写的空闲连接 */
     private function recycleIdleConnections(): void
     {
-        $deadline = microtime(true) - $this->heartbeat;
+        $now = microtime(true);
+
+        // 推进连接共享时钟：热路径据此记录活跃时刻，无需自行取时间。
+        // 刷新与判定在同一次心跳内完成，两者看到的是同一个「现在」。
+        NativeConnection::tickClock($now);
+
+        $deadline = $now - $this->heartbeat;
         foreach ($this->connections as $conn) {
             if ($conn->lastActiveAt() < $deadline) {
                 $this->closeConnection($conn);
@@ -585,7 +657,7 @@ final class NativeRuntime extends AbstractRuntime
         if ($connSock === false) {
             return; // 惊群：其它 worker 已抢先 accept
         }
-        stream_set_blocking($connSock, false);
+        $this->tuneSocket($connSock);
 
         $scheme = (string)$listener['scheme'];
         $conn   = new NativeConnection(
@@ -615,6 +687,28 @@ final class NativeRuntime extends AbstractRuntime
     }
 
     /**
+     * 新连接的套接字调优——这是 Native 相对「照搬默认值」实现的主要吞吐来源。
+     *
+     * 1. 非阻塞：事件驱动的前提。
+     * 2. 关闭 PHP 流的用户态读写缓冲：默认 PHP 会把内核数据先拷进 8KB 的流缓冲、
+     *    再拷给 PHP 字符串，等于每个请求多一次 memcpy 和可能的多次 read()；
+     *    置 0 后 fread 直落 read(2)，一次系统调用取走整个请求。
+     * 3. chunk size 对齐单次读取上限：避免 fread(READ_CHUNK) 被默认 8KB 切成多次读。
+     *
+     * TCP_NODELAY 在监听套接字上设置并由 accept 继承，见 {@see openServerSocket()}。
+     *
+     * @param resource $sock
+     */
+    private function tuneSocket($sock): void
+    {
+        stream_set_blocking($sock, false);
+        // 关闭 PHP 用户态流缓冲：事件循环已按就绪读写，额外缓冲只增加拷贝与延迟。
+        stream_set_read_buffer($sock, 0);
+        stream_set_write_buffer($sock, 0);
+        stream_set_chunk_size($sock, self::READ_CHUNK);
+    }
+
+    /**
      * @param resource             $serverSock
      * @param array<string, mixed> $listener
      */
@@ -633,7 +727,7 @@ final class NativeRuntime extends AbstractRuntime
             $peer,
             $this->maxSendBuffer
         );
-        $this->fire('message', $conn, $data);
+        $this->fireMessage($conn, $data);
         $this->countRequest();
     }
 
@@ -655,6 +749,28 @@ final class NativeRuntime extends AbstractRuntime
         $conn->appendBuffer($data);
 
         $scheme = (string)$listener['scheme'];
+
+        // HTTP/2：已升级的连接后续字节全部交给会话状态机
+        if ($conn->isHttp2()) {
+            $this->handleHttp2Read($conn);
+            return;
+        }
+
+        // h2c prior-knowledge：客户端直接以连接前奏开场（curl --http2-prior-knowledge、
+        // gRPC 等）。只在协议尚未定型的首包比较 4 字节，定型后此分支被布尔短路跳过。
+        if ($scheme === 'http' && $this->http2Enabled && !$conn->isHandshakeDone()) {
+            $buf  = $conn->getBuffer();
+            $seen = min(strlen($buf), 4);
+            if (strncmp($buf, 'PRI ', $seen) === 0) {
+                if ($seen < 4) {
+                    return; // 还分不清是 h2 前奏还是 1.1 请求，等更多字节
+                }
+                $this->startHttp2($conn);
+                $this->handleHttp2Read($conn);
+                return;
+            }
+            $conn->setHandshakeDone(); // 判定为 HTTP/1.1，后续读不再探测
+        }
 
         // WebSocket：首包为 HTTP 握手，完成后转入帧处理
         if ($scheme === 'websocket' && !$conn->isHandshakeDone()) {
@@ -678,6 +794,9 @@ final class NativeRuntime extends AbstractRuntime
             return;
         }
 
+        $isHttp = $scheme === 'http';
+        $isWs   = $scheme === 'websocket';
+
         while (true) {
             $buf = $conn->getBuffer();
             if ($buf === '') {
@@ -693,15 +812,22 @@ final class NativeRuntime extends AbstractRuntime
                 return;
             }
 
-            $frame = substr($buf, 0, $len);
-            $conn->setBuffer(substr($buf, $len));
+            // 常态是「一次读到的就是恰好一条完整报文」，此时整段即为帧、剩余为空，
+            // 两次 substr 都只是把同样的字节再拷一遍。
+            if ($len === strlen($buf)) {
+                $frame = $buf;
+                $conn->clearBuffer();
+            } else {
+                $frame = substr($buf, 0, $len);
+                $conn->setBuffer(substr($buf, $len));
+            }
 
             $message = $protoClass::decode($frame, $conn);
 
             // WebSocket 控制帧由运行时自动处理，保持与 Swoole / Workerman 一致：
             // 对端 ping → 自动回 pong；对端 pong → 静默忽略。
             // 用户 on('message') 只收到应用消息（text / binary / close），无需自己处理保活。
-            if ($scheme === 'websocket' && is_array($message)) {
+            if ($isWs && is_array($message)) {
                 $type = $message['type'] ?? null;
                 if ($type === 'ping') {
                     $conn->sendRaw(WebSocketProtocol::encodePong($message['data'] ?? ''));
@@ -724,32 +850,193 @@ final class NativeRuntime extends AbstractRuntime
                 }
             }
 
-            // HTTP：依据 Accept-Encoding 自动启用 gzip 压缩（响应体达阈值才压缩，send 时判定）
-            if ($scheme === 'http' && $this->gzipEnabled && $this->acceptsGzip($this->headerLine($message['headers'] ?? [], 'Accept-Encoding'))) {
-                $conn->setGzipAuto(true);
+            // Connection 头在 h2c 升级与 keep-alive 两处都要用，是本轮唯一必然被读到的头部。
+            // 在这里扫一次往下传，避免同一行报文被反复定向查找。
+            $connectionHeader = null;
+
+            if ($isHttp && $message instanceof Request) {
+                // gzip / h2c / keep-alive 三处判定都走 Request::rawHeader() 的定向扫描：
+                // 只在原始报文里找那一行，不触发整块头部解析。业务不碰请求字段时，
+                // 一个请求从头到尾不会产生任何 header 数组。
+                if ($this->gzipEnabled && $this->acceptsGzip($message->rawHeader('Accept-Encoding'))) {
+                    $conn->setGzipAuto(true);
+                }
+
+                $connectionHeader = $message->rawHeader('Connection');
+
+                // `Upgrade: h2c` —— 回 101 并把本请求接管为流 1，连接转入 HTTP/2。
+                // RFC 7540 §3.2 要求升级请求必须同时带 `Connection: Upgrade, HTTP2-Settings`，
+                // 复用上面那一次 Connection 扫描即可把绝大多数普通请求挡在门外，
+                // 不必再为 Upgrade / HTTP2-Settings 各扫一遍报文。
+                if ($this->http2Enabled
+                    && $connectionHeader !== ''
+                    && stripos($connectionHeader, 'upgrade') !== false
+                    && $this->wantsH2cUpgrade($message)
+                ) {
+                    $this->upgradeToHttp2($conn, $message);
+                    return;
+                }
             }
 
-            $this->fire('message', $conn, $message);
+            $this->fireMessage($conn, $message);
             $this->countRequest();
 
-            if (!$conn->isAlive()) {
+            // 这里只需知道业务有没有在 handler 里主动关掉连接，用状态位判断即可；
+            // isAlive() 还会做一次 feof() 流探测，那是每请求都要付出的真实开销。
+            if ($conn->isClosed()) {
                 $this->closeConnection($conn);
                 return;
             }
 
+            if (!$isHttp) {
+                continue;
+            }
+
             // HTTP：流式响应（chunked）在 handler 返回后自动补发终止块
-            if ($scheme === 'http' && $conn->isChunkStarted()) {
+            if ($conn->isChunkStarted()) {
                 $conn->endChunk();
             }
 
-            // HTTP：按 keep-alive 决定复用还是收尾
-            if ($scheme === 'http' && !$this->shouldKeepAlive($message)) {
+            // HTTP：按 keep-alive 决定复用还是收尾（Connection 头上面已扫过，直接复用）
+            if (!$this->shouldKeepAlive($message, $connectionHeader)) {
                 $conn->closeAfterFlush();
-                if (!$conn->isAlive()) {
+                if ($conn->isClosed()) {
                     $this->closeConnection($conn);
                 }
                 return;
             }
+        }
+    }
+
+    // ------------------------------------------------------------- HTTP/2
+
+    /**
+     * 判断 HTTP/1.1 请求是否请求升级到 h2c（RFC 7540 §3.2）。
+     *
+     * 三个条件缺一不可：`Upgrade: h2c`、`Connection` 含 upgrade、
+     * 携带 `HTTP2-Settings`。不满足就当普通 1.1 请求处理，绝不误升级。
+     */
+    private function wantsH2cUpgrade(Request $request): bool
+    {
+        // 快速门禁：升级请求必然带 Upgrade 头，而现实中不带它的请求占绝大多数。
+        // rawHeader() 一次 strpos 就能排除，不必为一个几乎从不出现的头解析整块头部。
+        $upgrade = $request->rawHeader('Upgrade');
+        if ($upgrade === '' || strcasecmp($upgrade, 'h2c') !== 0) {
+            return false;
+        }
+
+        if (!str_contains(strtolower($request->rawHeader('Connection')), 'upgrade')) {
+            return false;
+        }
+
+        return $request->rawHeader('HTTP2-Settings') !== '';
+    }
+
+    /**
+     * 为连接创建 HTTP/2 会话并立刻发出本端 SETTINGS。
+     *
+     * 服务端 SETTINGS 是「服务端连接前奏」，允许在收到客户端前奏之前就发出，
+     * 提前发能省一个 RTT。
+     */
+    private function startHttp2(NativeConnection $conn): Http2Session
+    {
+        $session = new Http2Session($this->http2MaxConcurrentStreams, $this->http2InitialWindow);
+        $conn->attachHttp2($session);
+        $conn->setHandshakeDone();
+        $session->sendLocalSettings();
+        $conn->flushHttp2();
+
+        return $session;
+    }
+
+    /**
+     * 执行 h2c 升级：回 101 → 建会话 → 把触发升级的请求作为流 1 派发。
+     */
+    private function upgradeToHttp2(NativeConnection $conn, Request $request): void
+    {
+        $conn->sendRaw("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: h2c\r\n\r\n");
+
+        $session = $this->startHttp2($conn);
+        $session->applyUpgradeSettings($request->rawHeader('HTTP2-Settings'));
+
+        $adopted = $session->adoptUpgradedRequest($request->toArray());
+        $this->dispatchHttp2Request($conn, $session, $adopted);
+
+        if ($conn->isAlive()) {
+            // 101 之后客户端才补发连接前奏，剩余缓冲交给会话
+            $this->handleHttp2Read($conn);
+        }
+    }
+
+    /**
+     * HTTP/2 连接的读处理：喂字节 → 拿完整请求 → 逐条派发 → 冲刷输出。
+     */
+    private function handleHttp2Read(NativeConnection $conn): void
+    {
+        $session = $conn->http2Session();
+        if ($session === null) {
+            return;
+        }
+
+        $data = $conn->getBuffer();
+        if ($data !== '') {
+            $conn->clearBuffer();
+        }
+
+        try {
+            $requests = $session->feed($data);
+        } catch (Http2Exception $e) {
+            // 连接级错误：GOAWAY 带上最后处理的流 ID，写净后断开
+            $session->goaway($e->errorCode(), $e->getMessage());
+            $conn->flushHttp2();
+            $conn->closeAfterFlush();
+            if (!$conn->isAlive()) {
+                $this->closeConnection($conn);
+            }
+            return;
+        }
+
+        foreach ($requests as $item) {
+            $this->dispatchHttp2Request($conn, $session, $item);
+            if (!$conn->isAlive()) {
+                $this->closeConnection($conn);
+                return;
+            }
+        }
+
+        $conn->flushHttp2();
+
+        if ($session->isClosed()) {
+            $conn->closeAfterFlush();
+            if (!$conn->isAlive()) {
+                $this->closeConnection($conn);
+            }
+        }
+    }
+
+    /**
+     * 把一条 HTTP/2 请求包装成流视图后交给业务 handler。
+     *
+     * 业务拿到的 `$conn` 是 {@see Http2Stream}，`$request` 结构与 HTTP/1.1 完全一致，
+     * 因此同一份 handler 无需任何改动即可同时服务 1.1 与 2。
+     *
+     * @param array{stream: int, request: array<string, mixed>} $item
+     */
+    private function dispatchHttp2Request(NativeConnection $conn, Http2Session $session, array $item): void
+    {
+        $stream = new Http2Stream($conn, $session, $item['stream']);
+
+        if ($this->gzipEnabled && $this->acceptsGzip((string)($item['request']['headers']['accept-encoding'] ?? ''))) {
+            $stream->setGzipAuto(true);
+        }
+
+        // 与 HTTP/1.1 交付同一个类型：同一份 handler 无需分支即可服务 1.1 与 2
+        $this->fireMessage($stream, Request::fromArray($item['request']));
+        $this->countRequest();
+
+        // 业务只发了头没发体（beginChunked 风格）时补上结束标记，避免客户端一直等
+        if (!$stream->isResponded() && $stream->isChunkStarted()) {
+            $stream->endChunk();
         }
     }
 
@@ -824,40 +1111,23 @@ final class NativeRuntime extends AbstractRuntime
     }
 
     /**
-     * 大小写不敏感地读取请求头（HttpProtocol 解析出的 header 名保留原始大小写）。
+     * @param string|null $connectionHeader 调用方若已扫过 Connection 头可直接传入，避免重复扫描
      */
-    private function headerLine(array $headers, string $name): string
+    private function shouldKeepAlive(mixed $message, ?string $connectionHeader = null): bool
     {
-        foreach ($headers as $key => $value) {
-            if (strcasecmp((string)$key, $name) === 0) {
-                return (string)$value;
-            }
-        }
-        return '';
-    }
-
-    private function shouldKeepAlive(mixed $message): bool
-    {
-        if (!$this->keepAlive || !is_array($message)) {
+        if (!$this->keepAlive || !$message instanceof Request) {
             return false;
         }
 
-        $headers = $message['headers'] ?? [];
-        $value   = '';
-        if (is_array($headers)) {
-            foreach ($headers as $name => $v) {
-                if (strcasecmp((string)$name, 'Connection') === 0) {
-                    $value = strtolower((string)$v);
-                    break;
-                }
-            }
-        }
+        $value = $connectionHeader ?? $message->rawHeader('Connection');
 
         if ($value !== '') {
-            return !str_contains($value, 'close');
+            return stripos($value, 'close') === false;
         }
 
-        return ($message['protocol'] ?? 'HTTP/1.1') !== 'HTTP/1.0';
+        // 没带 Connection 头：HTTP/1.1 默认持久连接，只有 1.0 才收尾。
+        // isHttp10() 直接比对请求行末尾 8 字节，不为一个版本号触发整行解析。
+        return !$message->isHttp10();
     }
 
     /**
@@ -893,6 +1163,11 @@ final class NativeRuntime extends AbstractRuntime
         unset($this->connections[$id], $this->connectionSockets[$id]);
         $this->fire('close', $conn);
         $conn->close();
+
+        // 优雅关闭期间：所有连接都自然关闭后，提前结束循环，无需等满宽限期。
+        if ($this->shuttingDown && $this->connections === []) {
+            $this->loop?->stop();
+        }
     }
 
     /** maxRequest 计数：达到阈值后停止事件循环，由 master 拉起新 worker */
@@ -1016,8 +1291,14 @@ final class NativeRuntime extends AbstractRuntime
             if ($reusePort && defined('SO_REUSEPORT')) {
                 $ctx['socket']['so_reuseport'] = 1;
             }
-            if (!empty($opts['backlog'])) {
-                $ctx['socket']['backlog'] = (int)$opts['backlog'];
+            // 默认加大半连接队列：默认 backlog（多数系统 128）在瞬时高并发下会丢 SYN，
+            // 表现为压测客户端出现连接错误与长尾延迟。
+            $ctx['socket']['backlog'] = max(128, (int)($opts['backlog'] ?? 1024));
+
+            // 关闭 Nagle。HTTP 响应基本是「一次写完就等下一个请求」，
+            // Nagle 的合并等待只会平白增加 RTT；accept 出来的连接继承此选项。
+            if ($transport === 'tcp' && ($opts['tcpNoDelay'] ?? true)) {
+                $ctx['socket']['tcp_nodelay'] = true;
             }
         }
 

@@ -30,6 +30,7 @@ Kode Process 是一个「进程编排内核 + 多运行时兼容层」：你只�
 | 🧱 **进程编排内核** | 复用宿主的 master-worker 模型、监督重启、平滑重载、优雅停机、信号管理 |
 | 🔁 **统一事件循环** | `Kode::loop()` 基于 `ext-event` / `ext-ev` 加速，`stream_select` 零扩展兜底 |
 | 🌐 **多协议** | HTTP、WebSocket、TCP、Text、Unix Socket、SSL（UDP 取决于宿主运行时） |
+| 🚀 **HTTP/2（h2c）** | Native 内置，默认开启、与 HTTP/1.1 同端口自动协商；多路复用 + HPACK + 流控，业务 handler 零改动 |
 | 🗄️ **共享数据（零安装兜底）** | 同主机多进程共享表，apcu → sysvshm 自动择优；也可复用 Swoole/Workerman 表 |
 | 🕸️ **分布式集群** | 服务发现、分布式锁、Leader 选举、负载均衡（5 策略）、分布式 ID(Snowflake)、限流、集群 RPC；可零依赖（包内 GlobalData）或基于 Redis |
 | 🧵 **多线程并行** | 真正的 CPU 多线程（需 ZTS + ext-parallel），与协程桥接 |
@@ -365,6 +366,7 @@ kode info              # 版本信息
 - [运行时兼容层（架构与 API）](docs/runtime.md)
 - [事件循环（Reactor）](docs/reactor.md)
 - [协议系统](docs/protocol.md)
+- [HTTP/2](docs/http2.md)
 - [共享数据](docs/global-data.md)
 - [并行（多线程）](docs/parallel.md)
 - [定时器](docs/timer.md)

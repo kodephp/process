@@ -21,17 +21,24 @@
 
 ### HTTP 协议
 
+`$request` 是 `Kode\Process\Http\Request`，三个运行时交付的是同一个类，
+字段与方法完全一致。完整 API 见 [HTTP 请求对象](request.md)。
+
 ```php
 use Kode\Process\Kode;
 
 Kode::serve('http://0.0.0.0:8080', ['workers' => 4])
     ->on('message', function ($conn, $request) {
-        $method = $request['method'];
-        $path   = $request['path'];
+        $method = $request->method();
+        $path   = $request->path();          // 已消解 ../ 与重复斜杠
+        $page   = $request->get('page', 1);
         $conn->send(json_encode(['code' => 0, 'path' => $path]));
     })
     ->start();
 ```
+
+请求对象按字段惰性解析：上面这段只碰了 method / path / page，
+头部与请求体一个字节都不会被解析。
 
 ### WebSocket 协议
 

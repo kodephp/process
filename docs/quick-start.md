@@ -72,17 +72,21 @@ Kode::serve('http://0.0.0.0:8080', [
     'reusePort' => true,
 ])
     ->on('message', function ($connection, $request) {
+        // $request 是 Kode\Process\Http\Request，三个运行时交付同一个类
         $connection->send(json_encode([
             'code'    => 0,
             'message' => 'success',
             'data'    => [
-                'path'   => $request['path'] ?? '/',
-                'method' => $request['method'] ?? 'GET',
+                'path'   => $request->path(),
+                'method' => $request->method(),
             ],
         ]));
     })
     ->start();
 ```
+
+请求对象的完整 API（查询参数、头部、JSON 体、Cookie、Bearer token 等）
+见 [HTTP 请求对象](request.md)。
 
 ## 定时器与编排原语
 

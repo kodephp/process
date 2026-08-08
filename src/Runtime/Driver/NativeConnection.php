@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Kode\Process\Runtime\Driver;
 
+use Kode\Process\Protocol\Http2\Frame;
+use Kode\Process\Protocol\Http2\Http2Session;
 use Kode\Process\Protocol\HttpProtocol;
 use Kode\Process\Reactor\LoopInterface;
 use Kode\Process\Runtime\ConnectionInterface;
@@ -65,7 +67,23 @@ final class NativeConnection implements ConnectionInterface
 
     private bool $wsFragmenting = false;
 
+    /** HTTP/2 会话状态机，非 null 表示本连接已升级到 h2c */
+    private ?Http2Session $http2Session = null;
+
     private readonly int $connId;
+
+    /**
+     * 共享粗时钟（秒，带小数）。
+     *
+     * `lastActiveAt` 只服务于「空闲连接回收」，判定粒度是心跳周期（默认数十秒），
+     * 却要在每次收发上写入——按每请求两次 `microtime()` 计，纯属把系统调用摊到热路径。
+     * 这里改由运行时心跳统一推进：刷新时钟与检查空闲发生在同一个定时器里，
+     * 二者天然同步，回收语义不受影响，热路径只剩一次静态属性读取。
+     *
+     * 值为 0.0 表示尚未有运行时接管（例如连接被单独构造用于测试），
+     * 此时退回 `microtime()` 保证语义正确。
+     */
+    private static float $clock = 0.0;
 
     private float $lastActiveAt;
 
@@ -88,8 +106,18 @@ final class NativeConnection implements ConnectionInterface
         private readonly int $maxSendBuffer = self::DEFAULT_MAX_SEND_BUFFER,
     ) {
         $this->connId      = ++self::$seq;
-        $this->lastActiveAt = microtime(true);
+        $this->lastActiveAt = self::$clock !== 0.0 ? self::$clock : microtime(true);
         $this->sslReady    = true;
+    }
+
+    /**
+     * 由运行时心跳推进共享时钟，随后即可用同一时刻做空闲判定。
+     *
+     * 传 0.0 可重置为「无运行时接管」，让连接退回自行取时间。
+     */
+    public static function tickClock(float $now): void
+    {
+        self::$clock = $now;
     }
 
     public function id(): int
@@ -237,7 +265,7 @@ final class NativeConnection implements ConnectionInterface
             return false;
         }
 
-        $this->lastActiveAt = microtime(true);
+        $this->lastActiveAt = self::$clock ?: microtime(true);
 
         if ($this->udpPeer !== null) {
             $n = @stream_socket_sendto($this->socket, $bytes, 0, $this->udpPeer);
@@ -399,6 +427,19 @@ final class NativeConnection implements ConnectionInterface
         return $this->udpPeer !== null || !@feof($this->socket);
     }
 
+    /**
+     * 连接是否已被本端关闭——纯状态位判断，不触碰套接字。
+     *
+     * 与 `isAlive()` 的区别在于不做 `feof()` 探测：那是一次真实的流操作，
+     * 在每请求都要问一次的热路径上代价可观（实测约 0.24µs/次），而在
+     * 「handler 执行完，问一句业务是否主动关掉了连接」这种场景里，
+     * 对端是否已发 FIN 并不影响后续处理——读到 EOF 时读回调自会收尾。
+     */
+    public function isClosed(): bool
+    {
+        return $this->closed;
+    }
+
     public function native(): mixed
     {
         return $this->socket;
@@ -419,13 +460,82 @@ final class NativeConnection implements ConnectionInterface
         $this->loop = $loop;
     }
 
+    // -------------------------------------------------------- HTTP/2 会话
+
+    /**
+     * 绑定 HTTP/2 会话（h2c prior-knowledge 或 Upgrade 成功后由运行时调用）。
+     *
+     * 绑定后本连接进入多路复用模式：字节流交给会话状态机解析，
+     * 业务响应通过 {@see Http2Stream} 回写，再由 {@see flushHttp2()} 落到套接字。
+     */
+    public function attachHttp2(Http2Session $session): void
+    {
+        $this->http2Session = $session;
+    }
+
+    /** 已绑定的 HTTP/2 会话，未启用 h2 时为 null */
+    public function http2Session(): ?Http2Session
+    {
+        return $this->http2Session;
+    }
+
+    /** 本连接是否运行在 HTTP/2 之上 */
+    public function isHttp2(): bool
+    {
+        return $this->http2Session !== null;
+    }
+
+    /**
+     * 把会话待发字节写入套接字。
+     *
+     * 会话只负责生成帧，IO 全部收敛到这里：一次写不完自动挂可写监听续写，
+     * 因此 HEADERS/DATA 的产生与发送解耦，慢客户端不会阻塞 worker。
+     */
+    public function flushHttp2(): bool
+    {
+        if ($this->closed || $this->http2Session === null) {
+            return false;
+        }
+
+        $bytes = $this->http2Session->drain();
+        if ($bytes === '') {
+            return true;
+        }
+
+        return $this->write($bytes);
+    }
+
+    /**
+     * 优雅关闭本连接。
+     *
+     * HTTP/2 连接会先发 GOAWAY 再关 TCP，让对端收到「服务端即将离开」的信号，
+     * 可以干净地停止发起新流、等待在途流完成，而不是被 RST 硬切断——
+     * 否则正在进行的多路复用请求会全部失败，且 `bin/kode restart` 会中断在途连接。
+     * 普通（HTTP/1.1）连接等价于直接 {@see close()}。
+     */
+    public function gracefulClose(): void
+    {
+        if ($this->http2Session !== null && !$this->http2Session->isClosed()) {
+            $this->http2Session->goaway(Frame::ERROR_NO_ERROR);
+            $this->flushHttp2();
+        }
+        $this->close();
+    }
+
     // ---------------------------------------------------------- 接收缓冲
 
     public function appendBuffer(string $data): void
     {
-        $this->recvBuffer  .= $data;
+        // keep-alive 下每轮请求结束都会把缓冲清空，此时直接接管字符串即可，
+        // `.=` 会为「空串 + 新串」再分配一次并整体拷贝，纯属浪费。
+        if ($this->recvBuffer === '') {
+            $this->recvBuffer = $data;
+        } else {
+            $this->recvBuffer .= $data;
+        }
+
         $this->bytesRead   += strlen($data);
-        $this->lastActiveAt = microtime(true);
+        $this->lastActiveAt = self::$clock ?: microtime(true);
     }
 
     public function getBuffer(): string
@@ -537,7 +647,7 @@ final class NativeConnection implements ConnectionInterface
 
     public function touch(): void
     {
-        $this->lastActiveAt = microtime(true);
+        $this->lastActiveAt = self::$clock ?: microtime(true);
     }
 
     public function pendingBytes(): int

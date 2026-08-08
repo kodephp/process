@@ -1,0 +1,681 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Kode\Process\Tests;
+
+use Kode\Process\Protocol\Http2\Frame;
+use Kode\Process\Protocol\Http2\Hpack;
+use Kode\Process\Protocol\Http2\Http2Exception;
+use Kode\Process\Protocol\Http2\Http2Session;
+use PHPUnit\Framework\TestCase;
+
+/**
+ * HTTP/2 连接层测试：前奏握手、流状态机、头块拼接、流控与错误分级。
+ *
+ * 这里把 Session 当成纯字节的状态机来测（喂字节 → 收请求 / 看 drain 出来的帧），
+ * 不牵扯 socket，因此可以精确构造半包、越界、超限等真实链路上难复现的场景。
+ */
+final class Http2SessionTest extends TestCase
+{
+    /** 客户端侧 HPACK 编码器（与 Session 内的 decoder 相互独立） */
+    private Hpack $client;
+
+    protected function setUp(): void
+    {
+        $this->client = new Hpack();
+    }
+
+    /**
+     * 构造一个 HEADERS 帧。
+     *
+     * @param list<array{0: string, 1: string}> $headers
+     */
+    private function headersFrame(int $stream, array $headers, int $flags): string
+    {
+        return Frame::encode(Frame::TYPE_HEADERS, $flags, $stream, $this->client->encode($headers));
+    }
+
+    /** @return list<array{0: string, 1: string}> 一组最小可用的请求伪头 */
+    private static function getHeaders(string $path = '/', string $authority = 'example.com'): array
+    {
+        return [
+            [':method', 'GET'],
+            [':scheme', 'http'],
+            [':path', $path],
+            [':authority', $authority],
+        ];
+    }
+
+    /** 完成前奏握手并清空自动发出的 SETTINGS */
+    private function handshake(Http2Session $session): void
+    {
+        $session->feed(Frame::PREFACE);
+        $session->drain();
+    }
+
+    // ------------------------------------------------------------ 连接前奏
+
+    public function testPartialPrefaceIsBufferedNotRejected(): void
+    {
+        $session = new Http2Session();
+
+        $this->assertSame([], $session->feed(substr(Frame::PREFACE, 0, 10)));
+        $this->assertFalse($session->isPrefaceReceived());
+
+        $session->feed(substr(Frame::PREFACE, 10));
+        $this->assertTrue($session->isPrefaceReceived());
+    }
+
+    public function testInvalidPrefaceIsRejectedEarly(): void
+    {
+        $session = new Http2Session();
+
+        $this->expectException(Http2Exception::class);
+        // 只喂 3 字节就能判定不是 h2：不必等收满 24 字节
+        $session->feed('GET');
+    }
+
+    public function testPrefaceTriggersLocalSettings(): void
+    {
+        $session = new Http2Session();
+        $session->feed(Frame::PREFACE);
+
+        $decoded = Frame::decode($session->drain());
+        $this->assertNotNull($decoded);
+        $this->assertSame(Frame::TYPE_SETTINGS, $decoded['type'], '收到前奏后必须立即回 SETTINGS');
+    }
+
+    // -------------------------------------------------------------- 请求组装
+
+    public function testSimpleGetRequestIsAssembled(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $requests = $session->feed($this->headersFrame(
+            1,
+            self::getHeaders('/hello'),
+            Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM
+        ));
+
+        $this->assertCount(1, $requests);
+        $this->assertSame(1, $requests[0]['stream']);
+
+        $req = $requests[0]['request'];
+        $this->assertSame('GET', $req['method']);
+        $this->assertSame('/hello', $req['path']);
+        $this->assertSame('HTTP/2', $req['protocol']);
+        $this->assertSame('', $req['body']);
+        // :authority 必须映射成 Host，让依赖 Host 的业务代码零改动
+        $this->assertSame('example.com', $req['headers']['host']);
+    }
+
+    public function testQueryStringIsParsed(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $requests = $session->feed($this->headersFrame(
+            1,
+            self::getHeaders('/search?q=php&page=2'),
+            Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM
+        ));
+
+        $req = $requests[0]['request'];
+        $this->assertSame('/search', $req['path']);
+        $this->assertSame(['q' => 'php', 'page' => '2'], $req['query']);
+        $this->assertSame($req['query'], $req['get']);
+        $this->assertSame('/search?q=php&page=2', $req['uri']);
+    }
+
+    public function testPostBodyIsCollectedFromDataFrames(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $headers = [
+            [':method', 'POST'],
+            [':scheme', 'http'],
+            [':path', '/submit'],
+            [':authority', 'example.com'],
+            ['content-type', 'application/x-www-form-urlencoded'],
+        ];
+
+        // HEADERS 不带 END_STREAM → 请求尚未完整
+        $this->assertSame([], $session->feed($this->headersFrame(1, $headers, Frame::FLAG_END_HEADERS)));
+
+        $requests = $session->feed(
+            Frame::encode(Frame::TYPE_DATA, 0, 1, 'name=kode&')
+            . Frame::encode(Frame::TYPE_DATA, Frame::FLAG_END_STREAM, 1, 'lang=php')
+        );
+
+        $this->assertCount(1, $requests);
+        $req = $requests[0]['request'];
+        $this->assertSame('name=kode&lang=php', $req['body'], '多个 DATA 帧必须按序拼接');
+        $this->assertSame(['name' => 'kode', 'lang' => 'php'], $req['post']);
+    }
+
+    public function testJsonBodyIsDecodedIntoPost(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $headers = [
+            [':method', 'POST'],
+            [':scheme', 'http'],
+            [':path', '/api'],
+            [':authority', 'example.com'],
+            ['content-type', 'application/json'],
+        ];
+        $session->feed($this->headersFrame(1, $headers, Frame::FLAG_END_HEADERS));
+        $requests = $session->feed(
+            Frame::encode(Frame::TYPE_DATA, Frame::FLAG_END_STREAM, 1, '{"a":1,"b":[2,3]}')
+        );
+
+        $this->assertSame(['a' => 1, 'b' => [2, 3]], $requests[0]['request']['post']);
+    }
+
+    public function testHeaderBlockSplitAcrossContinuation(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $block = $this->client->encode(self::getHeaders('/big'));
+        $half  = intdiv(strlen($block), 2);
+
+        // HEADERS 不带 END_HEADERS，余下部分走 CONTINUATION
+        $bytes = Frame::encode(Frame::TYPE_HEADERS, Frame::FLAG_END_STREAM, 1, substr($block, 0, $half))
+            . Frame::encode(Frame::TYPE_CONTINUATION, Frame::FLAG_END_HEADERS, 1, substr($block, $half));
+
+        $requests = $session->feed($bytes);
+
+        $this->assertCount(1, $requests);
+        $this->assertSame('/big', $requests[0]['request']['path']);
+    }
+
+    public function testOrphanContinuationIsProtocolError(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $this->expectException(Http2Exception::class);
+        $session->feed(Frame::encode(Frame::TYPE_CONTINUATION, Frame::FLAG_END_HEADERS, 1, 'x'));
+    }
+
+    public function testRequestSurvivesByteByByteDelivery(): void
+    {
+        $session = new Http2Session();
+        $bytes   = Frame::PREFACE . $this->headersFrame(
+            1,
+            self::getHeaders('/drip'),
+            Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM
+        );
+
+        $requests = [];
+        $len      = strlen($bytes);
+        for ($i = 0; $i < $len; $i++) {
+            foreach ($session->feed($bytes[$i]) as $r) {
+                $requests[] = $r;
+            }
+        }
+
+        $this->assertCount(1, $requests, '逐字节投递必须与整包投递等价');
+        $this->assertSame('/drip', $requests[0]['request']['path']);
+    }
+
+    public function testTwoRequestsInOneTcpSegment(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $flags    = Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM;
+        $requests = $session->feed(
+            $this->headersFrame(1, self::getHeaders('/one'), $flags)
+            . $this->headersFrame(3, self::getHeaders('/two'), $flags)
+        );
+
+        $this->assertCount(2, $requests);
+        $this->assertSame('/one', $requests[0]['request']['path']);
+        $this->assertSame('/two', $requests[1]['request']['path']);
+    }
+
+    // -------------------------------------------------------------- 流 ID 规则
+
+    public function testEvenStreamIdIsRejected(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $this->expectException(Http2Exception::class);
+        $session->feed($this->headersFrame(2, self::getHeaders(), Frame::FLAG_END_HEADERS));
+    }
+
+    public function testNonMonotonicStreamIdIsRejected(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $flags = Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM;
+        $session->feed($this->headersFrame(5, self::getHeaders(), $flags));
+
+        $this->expectException(Http2Exception::class);
+        // 流 3 小于已见过的 5：RFC 7540 §5.1.1 要求单调递增
+        $session->feed($this->headersFrame(3, self::getHeaders(), $flags));
+    }
+
+    public function testExceedingMaxConcurrentStreamsRefusesInsteadOfKillingConnection(): void
+    {
+        $session = new Http2Session(maxConcurrentStreams: 2);
+        $this->handshake($session);
+
+        // 三个流都不带 END_STREAM，保持活动状态
+        $session->feed($this->headersFrame(1, self::getHeaders(), Frame::FLAG_END_HEADERS));
+        $session->feed($this->headersFrame(3, self::getHeaders(), Frame::FLAG_END_HEADERS));
+        $session->drain();
+
+        $session->feed($this->headersFrame(5, self::getHeaders(), Frame::FLAG_END_HEADERS));
+
+        $this->assertSame(2, $session->activeStreams(), '超限的流不得占用槽位');
+        $this->assertFalse($session->isClosed(), '超并发是流级问题，连接必须存活');
+
+        $decoded = Frame::decode($session->drain());
+        $this->assertNotNull($decoded);
+        $this->assertSame(Frame::TYPE_RST_STREAM, $decoded['type']);
+        $this->assertSame(5, $decoded['stream']);
+    }
+
+    // ---------------------------------------------------------- 连接级控制帧
+
+    public function testPingIsAnsweredWithAck(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $session->feed(Frame::encode(Frame::TYPE_PING, 0, 0, '12345678'));
+
+        $decoded = Frame::decode($session->drain());
+        $this->assertNotNull($decoded);
+        $this->assertSame(Frame::TYPE_PING, $decoded['type']);
+        $this->assertSame(Frame::FLAG_ACK, $decoded['flags']);
+        $this->assertSame('12345678', $decoded['payload'], 'PING ACK 必须原样回显负载');
+    }
+
+    public function testPingAckIsNotEchoedAgain(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $session->feed(Frame::encode(Frame::TYPE_PING, Frame::FLAG_ACK, 0, '87654321'));
+
+        $this->assertFalse($session->hasPendingOutput(), '收到 PING ACK 不得再回 ACK，否则会无限乒乓');
+    }
+
+    public function testPeerSettingsAreAcknowledged(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $session->feed(Frame::settings([Frame::SETTINGS_MAX_FRAME_SIZE => 32768]));
+
+        $decoded = Frame::decode($session->drain());
+        $this->assertNotNull($decoded);
+        $this->assertSame(Frame::TYPE_SETTINGS, $decoded['type']);
+        $this->assertSame(Frame::FLAG_ACK, $decoded['flags']);
+        $this->assertSame(32768, $session->stats()['peer_max_frame'], '对端 SETTINGS 必须生效');
+    }
+
+    public function testSettingsAckDoesNotTriggerAnotherAck(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $session->feed(Frame::settingsAck());
+
+        $this->assertFalse($session->hasPendingOutput());
+    }
+
+    public function testGoawayClosesSession(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $session->feed(Frame::goaway(0, Frame::ERROR_NO_ERROR));
+
+        $this->assertTrue($session->isClosed());
+        $this->assertSame([], $session->feed(Frame::PREFACE), '关闭后不再处理任何输入');
+    }
+
+    public function testRstStreamReleasesTheStream(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $session->feed($this->headersFrame(1, self::getHeaders(), Frame::FLAG_END_HEADERS));
+        $this->assertSame(1, $session->activeStreams());
+
+        $session->feed(Frame::rstStream(1, Frame::ERROR_CANCEL));
+
+        $this->assertSame(0, $session->activeStreams());
+        $this->assertFalse($session->isClosed(), 'RST_STREAM 只影响单流');
+    }
+
+    public function testPriorityFrameIsIgnoredWithoutError(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        // 本实现不做优先级调度，但必须容忍该帧
+        $session->feed(Frame::encode(Frame::TYPE_PRIORITY, 0, 1, pack('NC', 0, 16)));
+
+        $this->assertFalse($session->isClosed());
+    }
+
+    public function testUnknownFrameTypeIsIgnored(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        // RFC 7540 §4.1：必须丢弃并忽略未知类型的帧
+        $session->feed(Frame::encode(0xFA, 0, 0, 'whatever'));
+
+        $this->assertFalse($session->isClosed());
+    }
+
+    // -------------------------------------------------------------- 流控
+
+    public function testWindowUpdateGrowsSendWindow(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $before = $session->stats()['send_window'];
+        $session->feed(Frame::windowUpdate(0, 1000));
+
+        $this->assertSame($before + 1000, $session->stats()['send_window']);
+    }
+
+    public function testZeroWindowUpdateIsProtocolError(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $this->expectException(Http2Exception::class);
+        // RFC 7540 §6.9：增量为 0 是错误
+        $session->feed(Frame::encode(Frame::TYPE_WINDOW_UPDATE, 0, 0, pack('N', 0)));
+    }
+
+    public function testReceivingDataReplenishesRecvWindow(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $headers = [
+            [':method', 'POST'],
+            [':scheme', 'http'],
+            [':path', '/upload'],
+            [':authority', 'example.com'],
+        ];
+        $session->feed($this->headersFrame(1, $headers, Frame::FLAG_END_HEADERS));
+        $session->drain();
+
+        // 送一大块 DATA，触发窗口补充逻辑
+        $session->feed(Frame::encode(Frame::TYPE_DATA, 0, 1, str_repeat('x', 16384)));
+
+        $this->assertGreaterThan(
+            0,
+            $session->stats()['recv_window'],
+            '接收窗口不得被耗尽到 0，否则后续上传会永久停顿'
+        );
+    }
+
+    // -------------------------------------------------------------- 响应
+
+    public function testRespondEmitsHeadersAndData(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+        $session->feed($this->headersFrame(
+            1,
+            self::getHeaders(),
+            Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM
+        ));
+        $session->drain();
+
+        $this->assertTrue($session->respond(1, 200, ['content-type' => 'text/plain'], 'hello'));
+
+        $out    = $session->drain();
+        $header = Frame::decode($out);
+        $this->assertNotNull($header);
+        $this->assertSame(Frame::TYPE_HEADERS, $header['type']);
+        $this->assertSame(1, $header['stream']);
+        $this->assertSame(Frame::FLAG_END_HEADERS, $header['flags'] & Frame::FLAG_END_HEADERS);
+
+        $data = Frame::decode($out, $header['size']);
+        $this->assertNotNull($data);
+        $this->assertSame(Frame::TYPE_DATA, $data['type']);
+        $this->assertSame('hello', $data['payload']);
+        $this->assertSame(Frame::FLAG_END_STREAM, $data['flags'] & Frame::FLAG_END_STREAM);
+
+        $this->assertSame(0, $session->activeStreams(), '响应结束后必须释放流');
+    }
+
+    /**
+     * 回归：流式响应收尾时 pending 已排空，若不补一帧就没有任何帧带 END_STREAM，
+     * 流会被静默关闭而客户端永远等不到响应结束（真实 curl 会挂起）。
+     */
+    public function testEndingStreamWithEmptyPendingStillSendsEndStream(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+        $session->feed($this->headersFrame(
+            1,
+            self::getHeaders(),
+            Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM
+        ));
+
+        $session->respondHeaders(1, 200, ['content-type' => 'text/plain']);
+        $session->writeData(1, 'chunk-1');
+        $session->drain(); // 把头和第一块数据都取走，使 pending 归空
+
+        // 收尾：不带新数据，只标记结束
+        $session->writeData(1, '', true);
+
+        $frame = Frame::decode($session->drain());
+        $this->assertNotNull($frame, '收尾必须产生一帧，否则客户端会一直等待');
+        $this->assertSame(Frame::TYPE_DATA, $frame['type']);
+        $this->assertSame('', $frame['payload']);
+        $this->assertSame(
+            Frame::FLAG_END_STREAM,
+            $frame['flags'] & Frame::FLAG_END_STREAM,
+            '收尾帧必须携带 END_STREAM'
+        );
+        $this->assertSame(0, $session->activeStreams());
+    }
+
+    public function testEndStreamIsNotDuplicatedWhenLastChunkCarriesIt(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+        $session->feed($this->headersFrame(
+            1,
+            self::getHeaders(),
+            Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM
+        ));
+        $session->drain();
+
+        // 数据与结束标记一起提交：END_STREAM 应搭在这帧数据上，不应再补空帧
+        $session->respond(1, 200, [], 'body');
+
+        $out    = $session->drain();
+        $offset = 0;
+        $data   = [];
+        while (($f = Frame::decode($out, $offset, Frame::MAX_MAX_FRAME_SIZE)) !== null) {
+            if ($f['type'] === Frame::TYPE_DATA) {
+                $data[] = $f;
+            }
+            $offset += $f['size'];
+        }
+
+        $this->assertCount(1, $data, '不应产生多余的空 DATA 帧');
+        $this->assertSame('body', $data[0]['payload']);
+        $this->assertSame(Frame::FLAG_END_STREAM, $data[0]['flags'] & Frame::FLAG_END_STREAM);
+    }
+
+    public function testRespondOnUnknownStreamIsRejected(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $this->assertFalse($session->respond(99, 200, [], 'x'), '未知流上的响应必须被拒绝而不是抛异常');
+    }
+
+    public function testLargeBodyIsSplitByPeerMaxFrameSize(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+        $session->feed($this->headersFrame(
+            1,
+            self::getHeaders(),
+            Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM
+        ));
+        $session->drain();
+
+        $body = str_repeat('a', Frame::MIN_MAX_FRAME_SIZE * 2 + 100);
+        $session->respond(1, 200, [], $body);
+
+        $out    = $session->drain();
+        $offset = 0;
+        $seen   = '';
+        $frames = 0;
+        while (($f = Frame::decode($out, $offset, Frame::MAX_MAX_FRAME_SIZE)) !== null) {
+            if ($f['type'] === Frame::TYPE_DATA) {
+                $this->assertLessThanOrEqual(
+                    Frame::MIN_MAX_FRAME_SIZE,
+                    strlen($f['payload']),
+                    'DATA 帧不得超过对端通告的 max frame size'
+                );
+                $seen .= $f['payload'];
+                $frames++;
+            }
+            $offset += $f['size'];
+        }
+
+        $this->assertGreaterThan(1, $frames, '超长响应体必须被切成多帧');
+        $this->assertSame($body, $seen, '切帧后拼回来必须与原始响应体一致');
+    }
+
+    // ---------------------------------------------------------- h2c 升级
+
+    public function testAdoptUpgradedRequestOpensStreamOne(): void
+    {
+        $session = new Http2Session();
+        $session->markPrefaceReceived();
+
+        $result = $session->adoptUpgradedRequest([
+            'method'  => 'GET',
+            'uri'     => '/upgraded',
+            'headers' => [
+                'Host'       => 'example.com',
+                'Connection' => 'Upgrade, HTTP2-Settings', // 逐跳头必须被剥离
+                'User-Agent' => 'curl/8',
+            ],
+            'body'    => '',
+        ]);
+
+        $this->assertSame(1, $result['stream'], 'h2c 升级后的请求固定落在流 1');
+        $this->assertSame('/upgraded', $result['request']['path']);
+        $this->assertSame('HTTP/2', $result['request']['protocol']);
+        $this->assertSame('example.com', $result['request']['headers']['host'], '头名必须归一为小写');
+        $this->assertArrayNotHasKey(
+            'connection',
+            $result['request']['headers'],
+            'RFC 7540 §8.1.2.2：逐跳头在 HTTP/2 中被禁止，升级时必须剥离'
+        );
+        $this->assertSame(1, $session->activeStreams());
+    }
+
+    // ------------------------------------------------------- 响应头书写形式
+
+    /**
+     * 响应头允许重复（多个 Set-Cookie 是刚需），单纯的 name => value
+     * 表达不了，因此 respond() 额外接受「值为数组」与「列表对」两种写法。
+     *
+     * @return array<string, array{0: array<mixed, mixed>}>
+     */
+    public static function multiValueHeaderForms(): array
+    {
+        return [
+            '值为数组'  => [['set-cookie' => ['sid=a', 'csrf=b']]],
+            '列表对'    => [[['set-cookie', 'sid=a'], ['set-cookie', 'csrf=b']]],
+        ];
+    }
+
+    /**
+     * @param array<mixed, mixed> $headers
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('multiValueHeaderForms')]
+    public function testDuplicateResponseHeadersArePreserved(array $headers): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+        $session->feed($this->headersFrame(
+            1,
+            self::getHeaders(),
+            Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM
+        ));
+        $session->drain();
+
+        $session->respond(1, 200, $headers, '');
+
+        $frame = Frame::decode($session->drain());
+        $this->assertNotNull($frame);
+        // 用独立解码器还原头块，验证两个 set-cookie 都在且保序
+        $decoded = (new Hpack())->decode($frame['payload']);
+
+        $cookies = [];
+        foreach ($decoded as [$name, $value]) {
+            if ($name === 'set-cookie') {
+                $cookies[] = $value;
+            }
+        }
+
+        $this->assertSame(['sid=a', 'csrf=b'], $cookies, '同名响应头不得被覆盖或塌缩');
+    }
+
+    public function testHopByHopResponseHeadersAreStripped(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+        $session->feed($this->headersFrame(
+            1,
+            self::getHeaders(),
+            Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM
+        ));
+        $session->drain();
+
+        $session->respond(1, 200, [
+            'Content-Type'      => 'text/plain',
+            'Connection'        => 'keep-alive',
+            'Transfer-Encoding' => 'chunked',
+        ], '');
+
+        $frame = Frame::decode($session->drain());
+        $this->assertNotNull($frame);
+        $names = array_column((new Hpack())->decode($frame['payload']), 0);
+
+        $this->assertContains('content-type', $names);
+        $this->assertNotContains('connection', $names);
+        $this->assertNotContains('transfer-encoding', $names);
+    }
+
+    public function testApplyUpgradeSettingsAcceptsBase64Url(): void
+    {
+        $session = new Http2Session();
+        // HTTP2-Settings 头是 base64url 编码的 SETTINGS 负载（不含帧头）
+        $payload = pack('nN', Frame::SETTINGS_MAX_FRAME_SIZE, 32768);
+        $session->applyUpgradeSettings(rtrim(strtr(base64_encode($payload), '+/', '-_'), '='));
+
+        $this->assertSame(32768, $session->stats()['peer_max_frame']);
+    }
+}

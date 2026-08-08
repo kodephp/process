@@ -834,6 +834,112 @@ PHP;
         return $this->invokeMethod($class, $method, $args, false);
     }
 
+    /**
+     * HTTP/2 优雅关闭：服务端收到 SIGTERM 后必须先给每条 h2 连接发 GOAWAY，
+     * 再继续服务在途请求直至宽限期结束，而不是把连接直接 RST——
+     * 否则正在进行的多路复用请求会全部失败，restart 也会中断在途连接。
+     */
+    public function testNativeHttp2GracefulShutdownSendsGoaway(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port   = $this->findFreePort();
+        $script = $this->writeHttp2ServerScript($port);
+        $proc   = proc_open([PHP_BINARY, $script], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native h2c 服务器子进程');
+        $this->waitForPort($port, 4.0);
+
+        try {
+            $fp = @fsockopen('127.0.0.1', $port, $errno, $errstr, 2.0);
+            $this->assertNotFalse($fp, "连接失败: {$errstr} ({$errno})");
+            stream_set_blocking($fp, false);
+
+            // h2c prior-knowledge：发送连接前奏 + 一个空 SETTINGS 帧
+            $preface  = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+            $settings = "\x00\x00\x00\x04\x00\x00\x00\x00\x00"; // len0 type4 flags0 stream0
+            fwrite($fp, $preface . $settings);
+
+            // 读取服务端初始 SETTINGS，证明 h2c 协商成功、连接已升级
+            $initial = $this->readHttp2UntilType($fp, 0x04, 2.0);
+            $this->assertTrue($initial, '服务端应回送 SETTINGS，确认 h2c 协商');
+
+            // 触发优雅关闭
+            $status = proc_get_status($proc);
+            $pid    = $status['pid'] ?? null;
+            $this->assertNotNull($pid, '取不到服务器 PID');
+            posix_kill($pid, SIGTERM);
+
+            // 宽限期内应读到 GOAWAY
+            $gotGoaway = $this->readHttp2UntilType($fp, 0x07, 3.0);
+            $this->assertTrue($gotGoaway, 'SIGTERM 后必须向 h2 连接发送 GOAWAY');
+
+            fclose($fp);
+        } finally {
+            if (isset($proc) && is_resource($proc)) {
+                $status = proc_get_status($proc);
+                $pid    = $status['pid'] ?? null;
+                if ($pid !== null && $pid > 0) {
+                    @posix_kill($pid, SIGKILL);
+                }
+                proc_close($proc);
+            }
+            @unlink($script);
+        }
+    }
+
+    private function writeHttp2ServerScript(int $port): string
+    {
+        $autoload = realpath(__DIR__ . '/../vendor/autoload.php');
+        $code = <<<PHP
+<?php
+require '{$autoload}';
+use Kode\\Process\\Kode;
+
+Kode::serve('http://127.0.0.1:{$port}', ['workers' => 1], 'native')
+    ->on('message', function (\$conn, \$data): void {
+        \$conn->send('ok');
+    })
+    ->start();
+PHP;
+        $file = tempnam(sys_get_temp_dir(), 'kode_h2_');
+        file_put_contents($file, $code);
+        return $file;
+    }
+
+    /**
+     * 从非阻塞套接字逐帧解析 HTTP/2，遇到指定类型帧即返回 true（超时返回 false）。
+     *
+     * @param resource $fp
+     */
+    private function readHttp2UntilType($fp, int $type, float $timeout): bool
+    {
+        $deadline = microtime(true) + $timeout;
+        $buf      = '';
+        while (microtime(true) < $deadline) {
+            $chunk = @fread($fp, 8192);
+            if ($chunk === '' || $chunk === false) {
+                usleep(5000);
+                continue;
+            }
+            $buf .= $chunk;
+            while (strlen($buf) >= 9) {
+                $length = (ord($buf[0]) << 16) | (ord($buf[1]) << 8) | ord($buf[2]);
+                $t      = ord($buf[3]);
+                if (strlen($buf) < 9 + $length) {
+                    break; // 帧未完整，等更多数据
+                }
+                if ($t === $type) {
+                    return true;
+                }
+                $buf = substr($buf, 9 + $length);
+            }
+        }
+
+        return false;
+    }
+
     private function invokePrivate(string $class, string $method, array $args): mixed
     {
         return $this->invokeMethod($class, $method, $args, true);

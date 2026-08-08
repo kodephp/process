@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Kode\Process\Runtime\Driver;
 
+use Kode\Process\Http\Request;
 use Kode\Process\Runtime\AbstractRuntime;
 use Kode\Process\Protocol\HttpProtocol;
 use Kode\Process\Runtime\Capability;
@@ -165,7 +166,10 @@ final class SwooleRuntime extends AbstractRuntime
                 if ($this->gzipEnabled && HttpProtocol::acceptsGzip((string)($req->header['accept-encoding'] ?? ''))) {
                     $conn->setGzipAuto(true);
                 }
-                $this->fire('message', $conn, $req);
+                // 统一交付 Kode\Process\Http\Request，而不是把 Swoole\Http\Request 直接抛给业务：
+                // 三个运行时的 handler 因此看到同一个类型、同一套字段。需要 Swoole 专有能力时
+                // 用 $request->native() 取回原对象。
+                $this->fireMessage($conn, Request::fromSwoole($req));
                 if ($conn->isChunkStarted()) {
                     $conn->endChunk();
                 }
@@ -180,7 +184,7 @@ final class SwooleRuntime extends AbstractRuntime
                 });
             }
             $server->on('message', function (object $srv, object $frame): void {
-                $this->fire('message', new SwooleConnection($srv, (int)$frame->fd), $frame->data);
+                $this->fireMessage(new SwooleConnection($srv, (int)$frame->fd), $frame->data);
             });
             if ($this->hasHandler('close')) {
                 $server->on('close', function (object $srv, int $fd): void {
@@ -199,11 +203,11 @@ final class SwooleRuntime extends AbstractRuntime
 
         if ($scheme === 'udp') {
             $server->on('packet', function (object $srv, string $data, array $info): void {
-                $this->fire('message', new SwooleConnection($srv, (int)($info['server_socket'] ?? 0)), $data);
+                $this->fireMessage(new SwooleConnection($srv, (int)($info['server_socket'] ?? 0)), $data);
             });
         } else {
             $server->on('receive', function (object $srv, int $fd, int $reactorId, string $data): void {
-                $this->fire('message', new SwooleConnection($srv, $fd), $data);
+                $this->fireMessage(new SwooleConnection($srv, $fd), $data);
             });
         }
 
