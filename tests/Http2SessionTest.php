@@ -678,4 +678,83 @@ final class Http2SessionTest extends TestCase
 
         $this->assertSame(32768, $session->stats()['peer_max_frame']);
     }
+
+    // ----------------------------------------------------- CONTINUATION 洪泛防护
+
+    /**
+     * 头块序列由许多「单帧合法但累计超限」的 HEADERS+CONTINUATION 拼成：超过体积上限即 RST，
+     * 不进入 HPACK 解码，不在内存里无限累积（单帧本身都小于等于 maxFrameSize，绕过了帧层校验）。
+     */
+    public function testOversizedHeaderBlockIsRejectedWithoutAccumulating(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        // 每段都远低于单帧上限（默认 16 KiB），但累计远超头块上限（64 KiB）
+        $chunk = str_repeat('x', 16380);
+
+        $session->feed(Frame::encode(
+            Frame::TYPE_HEADERS,
+            Frame::FLAG_END_STREAM,           // 不含 END_HEADERS
+            1,
+            $chunk
+        ));
+        for ($i = 0; $i < 4; $i++) {          // 累计 5 段 ≈ 80 KiB > 64 KiB
+            $session->feed(Frame::encode(
+                Frame::TYPE_CONTINUATION,
+                0,
+                1,
+                $chunk
+            ));
+        }
+
+        $this->assertSame(0, $session->activeStreams(), '被拒绝的流不得残留');
+
+        $out = $session->drain();
+        $this->assertNotSame('', $out, '应写出 RST_STREAM');
+        $rst = Frame::decode($out);
+        $this->assertSame(Frame::TYPE_RST_STREAM, $rst['type']);
+        $this->assertSame(Frame::ERROR_PROTOCOL, unpack('N', $rst['payload'])[1]);
+    }
+
+    /**
+     * HEADERS + 大量无 END_HEADERS 的 CONTINUATION：超过帧数上限即 RST，防止逐帧累积耗尽内存。
+     */
+    public function testContinuationFloodIsRejected(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $session->feed(Frame::encode(
+            Frame::TYPE_HEADERS,
+            Frame::FLAG_END_STREAM,           // 不含 END_HEADERS
+            1,
+            'partial-headers'
+        ));
+
+        // 16 个 CONTINUATION（均无 END_HEADERS）：第 16 个使累计帧数达到上限 → 被拒绝
+        for ($i = 0; $i < 16; $i++) {
+            $session->feed(Frame::encode(
+                Frame::TYPE_CONTINUATION,
+                0,
+                1,
+                'fragment-' . $i
+            ));
+        }
+
+        $this->assertSame(0, $session->activeStreams(), '洪泛流必须被丢弃');
+        $out = $session->drain();
+        $this->assertNotSame('', $out, '应写出 RST_STREAM');
+        $rst = Frame::decode($out);
+        $this->assertSame(Frame::TYPE_RST_STREAM, $rst['type']);
+        $this->assertSame(Frame::ERROR_PROTOCOL, unpack('N', $rst['payload'])[1]);
+
+        // 洪泛之后连接仍可正常服务新流（隔离性）
+        $ok = $session->feed($this->headersFrame(
+            3,
+            self::getHeaders('/after'),
+            Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM
+        ));
+        $this->assertCount(1, $ok);
+    }
 }

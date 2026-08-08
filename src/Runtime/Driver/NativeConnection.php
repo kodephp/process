@@ -60,6 +60,10 @@ final class NativeConnection implements ConnectionInterface
     // HTTP 自动 gzip 压缩标记（运行时依据 Accept-Encoding 设置）
     private bool $gzipAuto = false;
 
+    // gzip 自动标记是否已求解：客户端能力在一条 keep-alive 连接内恒定，
+    // 只需在首请求探测一次，后续请求直接复用，省去每请求一次报文扫描。
+    private bool $gzipAutoResolved = false;
+
     // WebSocket 分片重组缓冲（RFC 6455 §5.4），仅 websocket 连接使用
     private string $wsFragmentBuffer = '';
 
@@ -171,9 +175,16 @@ final class NativeConnection implements ConnectionInterface
         return $this->gzipAuto;
     }
 
+    /** gzip 自动标记是否已求解（一次连接只探测一次 Accept-Encoding） */
+    public function isGzipAutoResolved(): bool
+    {
+        return $this->gzipAutoResolved;
+    }
+
     public function setGzipAuto(bool $enabled): void
     {
         $this->gzipAuto = $enabled;
+        $this->gzipAutoResolved = true;
     }
 
     public function gzip(string $data, int $status = 200, array $headers = []): bool

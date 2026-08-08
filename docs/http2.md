@@ -113,6 +113,25 @@ Kode::serve('http://0.0.0.0:8080', [
 | **流级** | 只发 `RST_STREAM` 重置该流，连接与其它流照常服务 | 超出并发流上限、单流上的畸形头 |
 | **连接级** | 发 `GOAWAY` 后断开 | 无效连接前奏、非法流 ID、孤立的 CONTINUATION 帧 |
 
+## 安全加固（CONTINUATION 洪泛防护）
+
+HTTP/2 的头块由 `HEADERS` + 任意多个 `CONTINUATION` 帧拼成，框架只在看到
+`END_HEADERS` 时才做 HPACK 解码。若对端只发帧、不置 `END_HEADERS`，许多实现会
+把分片**无上限地**攒在内存里却不解码——这正是 2024 年的 CONTINUATION 洪泛
+（CVE-2024-27316 同类）拒绝服务漏洞。
+
+自研实现在拼接阶段即设了两道硬上限（见 `Http2Session`）：
+
+- **头块体积上限** `MAX_HEADER_BLOCK_SIZE = 64 KiB`：累计压缩字节超过即视为攻击，
+  立即 `RST_STREAM(PROTOCOL_ERROR)` 该流并丢弃，**不进入 HPACK 解码、不在内存中累积**。
+- **CONTINUATION 帧数上限** `MAX_CONTINUATION_FRAMES = 16`：单条头块序列的帧数超过即拒绝，
+  防止「每帧都很小、但数量巨大」的逐帧堆积。
+
+两道上限均为**流级**处理：被攻击的流被重置，连接与其余多路复用流照常服务，攻击者可
+继续发新流（同样会被拒），但不会拖垮进程。该行为有 `Http2SessionTest` 的
+`testOversizedHeaderBlockIsRejectedWithoutAccumulating` / `testContinuationFloodIsRejected`
+两个用例守护，并已证明洪泛后连接仍能正常服务新流。
+
 ## 优雅关闭（GOAWAY）
 
 进程收到 `SIGTERM`（`bin/kode stop` / `restart` 也是经由此信号）时，Native 运行时

@@ -73,6 +73,18 @@ final class Http2Session
 
     private bool $continuationEndStream = false;
 
+    /** HEADERS/CONTINUATION 序列已收到的帧数（含首帧 HEADERS），用于洪泛防护 */
+    private int $continuationFrames = 0;
+
+    /**
+     * 单条头块序列允许的最大压缩字节数（CONTINUATION 洪泛防护，CVE-2024-27316 同类）。
+     * 超过即视为攻击：RST_STREAM(PROTOCOL_ERROR) 并丢弃，避免 continuationBuffer 无限增长。
+     */
+    private const int MAX_HEADER_BLOCK_SIZE = 65536;
+
+    /** 单条头块序列允许的最大 CONTINUATION 帧数（同上，防止帧数洪泛） */
+    private const int MAX_CONTINUATION_FRAMES = 16;
+
     private int $lastStreamId = 0;
 
     private int $highestClientStream = 0;
@@ -368,9 +380,15 @@ final class Http2Session
         $endStream = ($frame['flags'] & Frame::FLAG_END_STREAM) !== 0;
 
         if (($frame['flags'] & Frame::FLAG_END_HEADERS) === 0) {
+            // 头块序列起步：单帧已超上限直接拒绝（洪泛防护）
+            if (strlen($payload) > self::MAX_HEADER_BLOCK_SIZE) {
+                $this->abortHeaderBlock($streamId);
+                return null;
+            }
             $this->continuationStream    = $streamId;
             $this->continuationBuffer    = $payload;
             $this->continuationEndStream = $endStream;
+            $this->continuationFrames    = 1;
             return null;
         }
 
@@ -387,7 +405,15 @@ final class Http2Session
             throw Http2Exception::protocol('孤立的 CONTINUATION 帧');
         }
 
-        $this->continuationBuffer .= $frame['payload'];
+        $this->continuationBuffer  .= $frame['payload'];
+        $this->continuationFrames  += 1;
+
+        // 头块体积或帧数越界：判定为 CONTINUATION 洪泛，RST 该流并丢弃，不再累积。
+        if (strlen($this->continuationBuffer) > self::MAX_HEADER_BLOCK_SIZE
+            || $this->continuationFrames > self::MAX_CONTINUATION_FRAMES) {
+            $this->abortHeaderBlock($this->continuationStream);
+            return null;
+        }
 
         if (($frame['flags'] & Frame::FLAG_END_HEADERS) === 0) {
             return null;
@@ -400,8 +426,23 @@ final class Http2Session
         $this->continuationStream    = 0;
         $this->continuationBuffer    = '';
         $this->continuationEndStream = false;
+        $this->continuationFrames    = 0;
 
         return $this->completeHeaders($streamId, $block, $endStream);
+    }
+
+    /**
+     * 头块序列越界（体积 / 帧数）：RST_STREAM(PROTOCOL_ERROR) 该流并复位拼接状态，
+     * 防止 continuationBuffer 无限增长导致内存耗尽（CONTINUATION 洪泛，CVE-2024-27316）。
+     */
+    private function abortHeaderBlock(int $streamId): void
+    {
+        $this->outBuffer           .= Frame::rstStream($streamId, Frame::ERROR_PROTOCOL);
+        $this->continuationStream   = 0;
+        $this->continuationBuffer   = '';
+        $this->continuationEndStream = false;
+        $this->continuationFrames   = 0;
+        unset($this->streams[$streamId]);
     }
 
     /**
@@ -790,8 +831,6 @@ final class Http2Session
             $this->streams[$streamId]['pending']         = $body;
             $this->streams[$streamId]['endAfterPending'] = true;
             $this->flushPending();
-        } else {
-            $this->closeStream($streamId);
         }
 
         return true;

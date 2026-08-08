@@ -858,8 +858,10 @@ final class NativeRuntime extends AbstractRuntime
                 // gzip / h2c / keep-alive 三处判定都走 Request::rawHeader() 的定向扫描：
                 // 只在原始报文里找那一行，不触发整块头部解析。业务不碰请求字段时，
                 // 一个请求从头到尾不会产生任何 header 数组。
-                if ($this->gzipEnabled && $this->acceptsGzip($message->rawHeader('Accept-Encoding'))) {
-                    $conn->setGzipAuto(true);
+                // gzip 自动标记按连接求解一次即可：客户端能力在 keep-alive 内恒定，
+                // 首请求探测后置位 resolved，后续请求免扫描（小响应占比高时省去大量无效查找）。
+                if ($this->gzipEnabled && !$conn->isGzipAutoResolved()) {
+                    $conn->setGzipAuto($this->acceptsGzip($message->rawHeader('Accept-Encoding')));
                 }
 
                 $connectionHeader = $message->rawHeader('Connection');
