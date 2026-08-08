@@ -54,6 +54,102 @@ final class Http2SessionTest extends TestCase
         $session->drain();
     }
 
+    // -------------------------------------------------- 安全：洪泛防护
+
+    /**
+     * Rapid Reset（CVE-2023-44487）：只开流不完成、立刻 RST_STREAM 的连接
+     * 必须在预算耗尽后被 GOAWAY(ENHANCE_YOUR_CALM) 掐断。
+     */
+    public function testRapidResetFloodTriggersGoaway(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $limit  = $session->stats()['reset_limit'];
+        $stream = 1;
+
+        for ($i = 0; $i <= $limit; $i++) {
+            $session->feed($this->headersFrame($stream, self::getHeaders(), Frame::FLAG_END_HEADERS));
+            $session->feed(Frame::rstStream($stream, Frame::ERROR_CANCEL));
+            $stream += 2;
+        }
+
+        $this->assertTrue($session->isClosed(), 'RST_STREAM 洪泛必须导致连接关闭');
+        $this->assertStringContainsString(
+            "\x0b",
+            $session->drain(),
+            'GOAWAY 必须携带 ENHANCE_YOUR_CALM(0xb)'
+        );
+    }
+
+    /**
+     * 正常客户端偶尔取消请求不得被误判：完成一条流会抵扣一点预算，
+     * 因此「完成一条 + 取消一条」交替进行时预算稳定在 0 附近。
+     */
+    public function testOccasionalResetIsNotTreatedAsFlood(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $limit  = $session->stats()['reset_limit'];
+        $stream = 1;
+
+        for ($i = 0; $i <= $limit * 2; $i++) {
+            // 一条正常完成
+            $session->feed($this->headersFrame(
+                $stream,
+                self::getHeaders(),
+                Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM
+            ));
+            $session->respond($stream, 200, ['content-type' => 'text/plain'], 'ok');
+            $stream += 2;
+
+            // 一条被取消
+            $session->feed($this->headersFrame($stream, self::getHeaders(), Frame::FLAG_END_HEADERS));
+            $session->feed(Frame::rstStream($stream, Frame::ERROR_CANCEL));
+            $stream += 2;
+
+            $session->drain();
+        }
+
+        $this->assertFalse($session->isClosed(), '正常取消不得被判为洪泛');
+        $this->assertLessThanOrEqual(1, $session->stats()['reset_budget'], '预算应被完成的流抵扣');
+    }
+
+    /**
+     * PING 洪泛：对端只发不读时，排队的 ACK 不得无限堆积。
+     */
+    public function testPingFloodTriggersGoaway(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        // 不调用 drain()，模拟对端只灌不读
+        for ($i = 0; $i < 1200; $i++) {
+            $session->feed(Frame::encode(Frame::TYPE_PING, 0, 0, '12345678'));
+        }
+
+        $this->assertTrue($session->isClosed(), 'PING 洪泛必须导致连接关闭');
+    }
+
+    /**
+     * drain() 表示缓冲已交给传输层，控制帧排队计数随之归零，
+     * 因此正常的心跳 PING（发一次读一次）永远不会触发洪泛防护。
+     */
+    public function testDrainResetsControlFrameBudget(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        for ($i = 0; $i < 5000; $i++) {
+            $session->feed(Frame::encode(Frame::TYPE_PING, 0, 0, '12345678'));
+            $session->drain();
+        }
+
+        $this->assertFalse($session->isClosed(), '正常心跳不得被判为洪泛');
+        $this->assertSame(0, $session->stats()['queued_control']);
+    }
+
     // ------------------------------------------------------------ 连接前奏
 
     public function testPartialPrefaceIsBufferedNotRejected(): void

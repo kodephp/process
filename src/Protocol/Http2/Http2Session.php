@@ -98,6 +98,35 @@ final class Http2Session
     private const int STREAM_POOL_LIMIT = 64;
 
     /**
+     * RST_STREAM 洪泛预算（HTTP/2 Rapid Reset，CVE-2023-44487）。
+     *
+     * 攻击手法：客户端不断「HEADERS → 立刻 RST_STREAM」。因为流被立即销毁，
+     * 并发数永远不触及 SETTINGS_MAX_CONCURRENT_STREAMS，却已迫使服务端完成
+     * HPACK 解码、分配流、派发请求——单连接即可打满 CPU。
+     *
+     * 防护采用「预算 + 抵扣」而非时间窗口：收到对端 RST_STREAM 预算 +1，
+     * 每有一条流**正常完成响应**（{@see closeStream}）预算 -1（不低于 0）。
+     * 正常客户端偶尔取消请求时完成数远多于取消数，预算稳定在 0 附近；
+     * 而 Rapid Reset 只重置不完成，预算线性累积，很快触顶。
+     * 这样无需依赖时钟，行为确定、可测试，也不会误伤正常取消。
+     */
+    private int $resetStreamBudget = 0;
+
+    /** 预算上限 = maxConcurrentStreams × 此系数，触顶即 GOAWAY(ENHANCE_YOUR_CALM) */
+    private const int RESET_STREAM_BUDGET_FACTOR = 4;
+
+    /**
+     * 两次 {@see drain} 之间因对端控制帧而排队的 ACK 数（PING / SETTINGS 洪泛防护）。
+     *
+     * 对端可以只发不读，疯狂灌 PING / SETTINGS 迫使本端无限堆积 ACK 到 outBuffer，
+     * 造成内存放大。drain() 表示已把缓冲交给传输层，计数随之归零；若在一次
+     * drain 之间就堆到上限，说明对端明显异常。
+     */
+    private int $queuedControlFrames = 0;
+
+    private const int MAX_QUEUED_CONTROL_FRAMES = 1000;
+
+    /**
      * 响应头块缓存：键为 `serialize([status, headers])`，值为已 HPACK 编码的整块。
      *
      * 服务端编码器严格走「不索引 / 从不索引」表示（见 {@see Hpack::encode()}），
@@ -713,6 +742,7 @@ final class Http2Session
         $this->applySettings($frame['payload']);
 
         $this->outBuffer .= Frame::settingsAck();
+        $this->countControlFrame();
 
         return null;
     }
@@ -818,9 +848,21 @@ final class Http2Session
         }
         if (($frame['flags'] & Frame::FLAG_ACK) === 0) {
             $this->outBuffer .= Frame::pingAck($frame['payload']);
+            $this->countControlFrame();
         }
 
         return null;
+    }
+
+    /**
+     * 记一次因对端控制帧而排队的 ACK；超过上限视为洪泛（见 $queuedControlFrames）。
+     */
+    private function countControlFrame(): void
+    {
+        $this->queuedControlFrames++;
+        if ($this->queuedControlFrames > self::MAX_QUEUED_CONTROL_FRAMES) {
+            $this->goaway(Frame::ERROR_ENHANCE_YOUR_CALM, '控制帧洪泛');
+        }
     }
 
     /**
@@ -836,7 +878,19 @@ final class Http2Session
         }
         $this->freeStream($frame['stream']);
 
+        // Rapid Reset 防护：只重置不完成的连接会让预算线性累积（见 $resetStreamBudget）
+        $this->resetStreamBudget++;
+        if ($this->resetStreamBudget > $this->maxResetStreamBudget()) {
+            $this->goaway(Frame::ERROR_ENHANCE_YOUR_CALM, 'RST_STREAM 洪泛');
+        }
+
         return null;
+    }
+
+    /** RST_STREAM 洪泛预算上限（随并发上限缩放，至少 100，避免小并发配置误伤） */
+    private function maxResetStreamBudget(): int
+    {
+        return max(100, $this->maxConcurrentStreams * self::RESET_STREAM_BUDGET_FACTOR);
     }
 
     private function onGoaway(): null
@@ -1119,9 +1173,17 @@ final class Http2Session
         }
     }
 
+    /**
+     * 一条流「正常完成响应」后关闭：抵扣一点 RST_STREAM 洪泛预算。
+     * 与 {@see freeStream}（纯粹的底层回收）区分开，语义即防护依据。
+     */
     private function closeStream(int $streamId): void
     {
         $this->freeStream($streamId);
+
+        if ($this->resetStreamBudget > 0) {
+            $this->resetStreamBudget--;
+        }
     }
 
     /** 主动重置一条流 */
@@ -1150,6 +1212,9 @@ final class Http2Session
         $out             = $this->outBuffer;
         $this->outBuffer = '';
 
+        // 缓冲已交给传输层，控制帧排队计数随之归零（洪泛防护只针对「堆积」）
+        $this->queuedControlFrames = 0;
+
         return $out;
     }
 
@@ -1168,6 +1233,10 @@ final class Http2Session
             'recv_window'    => $this->recvWindow,
             'peer_max_frame' => $this->peerMaxFrameSize,
             'closed'         => $this->closed,
+            // 安全水位：持续上涨说明对端在打 Rapid Reset / 控制帧洪泛
+            'reset_budget'   => $this->resetStreamBudget,
+            'reset_limit'    => $this->maxResetStreamBudget(),
+            'queued_control' => $this->queuedControlFrames,
         ];
     }
 }

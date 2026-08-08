@@ -194,6 +194,30 @@ final class Hpack
     private const int LITERAL_CACHE_LIMIT = 1024;
 
     /**
+     * Huffman 解码结果缓存：键为已编码字节串，值为解码后的原始字符串。
+     *
+     * 与 {@see $literalCache}（明文 → 编码字节）严格对称，方向相反：Huffman 解码同样
+     * 是纯函数，只依赖输入字节本身，与动态表状态无关。真实请求头中的字面量
+     * （user-agent / accept / accept-language / cookie 等）在稳态下高度重复，
+     * 且客户端对同一值总是产出同一段 Huffman 字节，因此命中率很高。
+     *
+     * 只缓存解码成功的结果：抛异常的非法输入不会写入，攻击者无法用畸形数据占位。
+     * 超长输入（> {@see HUFFMAN_CACHE_MAX_INPUT}）不缓存——这类值多为一次性大头，
+     * 重复率低却占内存。
+     *
+     * @var array<string, string>
+     */
+    private static array $huffmanCache = [];
+
+    /** 已缓存条目数（达到上限后停止写入） */
+    private static int $huffmanCacheCount = 0;
+
+    private const int HUFFMAN_CACHE_LIMIT = 1024;
+
+    /** 单条可缓存的最大编码长度（字节） */
+    private const int HUFFMAN_CACHE_MAX_INPUT = 512;
+
+    /**
      * 动态表：下标 0 为最新插入项（对应 HPACK 索引 62）。
      *
      * @var list<array{0: string, 1: string, 2: int}> [name, value, size]
@@ -234,6 +258,16 @@ final class Hpack
     {
         self::$literalCache       = [];
         self::$literalCacheCount  = 0;
+    }
+
+    /**
+     * 清空 Huffman 解码缓存（主要用于测试隔离与基准冷启动）。
+     * 与 {@see clearLiteralCache} 对称，仅丢弃可重新计算的缓存。
+     */
+    public static function clearHuffmanCache(): void
+    {
+        self::$huffmanCache      = [];
+        self::$huffmanCacheCount = 0;
     }
 
     public function maxDynamicSize(): int
@@ -524,6 +558,11 @@ final class Hpack
      */
     public static function huffmanDecode(string $data): string
     {
+        // 纯函数缓存：同一段编码字节恒解出同一明文（见 self::$huffmanCache）
+        if (isset(self::$huffmanCache[$data])) {
+            return self::$huffmanCache[$data];
+        }
+
         self::bootTables();
         $fast    = self::$huffFast;
         $out     = '';
@@ -577,6 +616,14 @@ final class Hpack
             if ($cur !== (1 << $curBits) - 1) {
                 throw Http2Exception::compression('Huffman 填充非法');
             }
+        }
+
+        // 只有走到这里（未抛异常）才是合法输入，才值得缓存
+        if (self::$huffmanCacheCount < self::HUFFMAN_CACHE_LIMIT
+            && $len <= self::HUFFMAN_CACHE_MAX_INPUT
+        ) {
+            self::$huffmanCache[$data] = $out;
+            self::$huffmanCacheCount++;
         }
 
         return $out;

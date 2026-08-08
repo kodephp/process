@@ -340,7 +340,7 @@ print_r(Kode\Process\Runtime::diagnose());
     'preferred'      => 'native',
     'loop'           => ['event' => ['supported'=>true,'priority'=>100,'preferred'=>true], ...],
     'runtimes'       => [
-        'native'    => ['available'=>true,  'version'=>'5.0.0', 'priority'=>100, 'preferred'=>true],
+        'native'    => ['available'=>true,  'version'=>'5.2.5', 'priority'=>100, 'preferred'=>true],
         'swoole'    => ['available'=>true,  'version'=>'6.2.2', 'priority'=>90,  'preferred'=>false],
         'workerman' => ['available'=>true,  'version'=>'5.2.2', 'priority'=>80,  'preferred'=>false],
     ],

@@ -155,6 +155,53 @@ CONTINUATION 洪泛防护限的是**压缩后**的头块体积（`MAX_HEADER_BLO
 活跃流归零）/ `testHeaderListBelowLimitIsAccepted`（未超上限正常组装）/
 `testMaxHeaderListSizeAnnouncedInSettings`（SETTINGS 帧携带正确的上限值）三个用例守护。
 
+## Rapid Reset 防护（CVE-2023-44487）
+
+前两道防线管的是「单条头块有多大」，但还有一类攻击**每条请求都完全合法**：客户端
+不断「发 `HEADERS` → 立刻发 `RST_STREAM`」。因为流被立即销毁，并发数永远触不到
+`SETTINGS_MAX_CONCURRENT_STREAMS`，却已迫使服务端完成 HPACK 解码、分配流、派发请求——
+单条连接就能打满 CPU。这就是 2023 年击垮多家大厂的 **HTTP/2 Rapid Reset**。
+
+自研实现采用「**预算 + 抵扣**」而非时间窗口：
+
+- 每收到一个对端 `RST_STREAM`，预算 **+1**；
+- 每有一条流**正常完成响应**，预算 **−1**（不低于 0）；
+- 预算超过 `max(100, maxConcurrentStreams × 4)`（默认并发 128 → 上限 512）时，
+  立即 `GOAWAY(ENHANCE_YOUR_CALM)` 并关闭连接。
+
+这样设计的好处：
+
+- **不误伤正常客户端**。浏览器取消请求（用户点停止、图片中断）本就会发 `RST_STREAM`，
+  但正常连接的「完成数」远多于「取消数」，预算稳定在 0 附近。
+- **不依赖时钟**。行为完全确定、可复现、可测试，也不会因机器负载导致窗口漂移。
+- **攻击一定触顶**。Rapid Reset 只重置不完成，预算只增不减，很快触线。
+
+## 控制帧洪泛防护（PING / SETTINGS）
+
+对端还可以「只发不读」：疯狂灌 `PING` / `SETTINGS`，迫使本端把 ACK 无限堆进发送缓冲，
+造成内存放大。框架为此统计**两次 `drain()` 之间**排队的 ACK 数，超过 `1000` 即
+`GOAWAY(ENHANCE_YOUR_CALM)`。
+
+`drain()` 表示缓冲已交给传输层，计数随之归零——因此正常的心跳 PING（发一次、读一次）
+永远不会触发该防护，只有「堆积」才会。
+
+### 安全水位可观测
+
+四道防线的实时水位可通过 `Http2Session::stats()` 读取，便于接监控告警：
+
+```php
+$s = $session->stats();
+$s['reset_budget'];    // 当前 RST_STREAM 洪泛预算占用
+$s['reset_limit'];     // 触发 GOAWAY 的上限
+$s['queued_control'];  // 两次 drain 之间排队的控制帧 ACK 数
+```
+
+持续上涨即说明对端正在打 Rapid Reset 或控制帧洪泛。
+
+> 四道防线小结：`MAX_HEADER_BLOCK_SIZE`（压缩后体积）、`MAX_HEADER_LIST_SIZE`（解压后体积）、
+> RST_STREAM 预算（Rapid Reset）、控制帧排队上限（PING/SETTINGS 洪泛），分别覆盖
+> 「分片堆积」「高压缩比膨胀」「合法请求高频重置」「ACK 堆积」四类攻击面。
+
 ## 优雅关闭（GOAWAY）
 
 进程收到 `SIGTERM`（`bin/kode stop` / `restart` 也是经由此信号）时，Native 运行时

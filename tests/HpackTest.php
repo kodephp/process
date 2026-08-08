@@ -300,4 +300,104 @@ final class HpackTest extends TestCase
 
         Hpack::clearLiteralCache();
     }
+
+    /**
+     * Huffman 解码缓存必须完全透明：命中与否解出的明文一律一致。
+     */
+    public function testHuffmanCacheDecodesIdentically(): void
+    {
+        Hpack::clearHuffmanCache();
+
+        $samples = [
+            'www.example.com',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+            'application/json; charset=utf-8',
+            'gzip, deflate, br',
+            '/api/v1/users?page=2&size=20',
+            '',
+        ];
+
+        foreach ($samples as $plain) {
+            $encoded = Hpack::huffmanEncode($plain);
+
+            $first = Hpack::huffmanDecode($encoded);   // 冷启动，实算
+            $hit   = Hpack::huffmanDecode($encoded);   // 命中缓存
+
+            $this->assertSame($plain, $first, 'Huffman 解码结果必须还原原文');
+            $this->assertSame($first, $hit, '缓存命中不得改变解码结果');
+
+            Hpack::clearHuffmanCache();
+            $this->assertSame($plain, Hpack::huffmanDecode($encoded), '清空缓存后重算结果一致');
+        }
+
+        Hpack::clearHuffmanCache();
+    }
+
+    /**
+     * 非法 Huffman 输入必须抛异常，且不得被写入缓存（否则攻击者可用畸形数据占位）。
+     */
+    public function testHuffmanCacheDoesNotStoreInvalidInput(): void
+    {
+        Hpack::clearHuffmanCache();
+
+        // 尾部填充必须全 1，这里故意给 0 位填充
+        $invalid = "\xff\xff\xff\xf0";
+
+        for ($i = 0; $i < 2; $i++) {
+            try {
+                Hpack::huffmanDecode($invalid);
+                $this->fail('非法 Huffman 输入必须抛 Http2Exception');
+            } catch (Http2Exception) {
+                // 预期
+            }
+        }
+
+        $prop = (new \ReflectionClass(Hpack::class))->getProperty('huffmanCache');
+        $prop->setAccessible(true);
+        $this->assertSame([], $prop->getValue(), '非法输入不得进入缓存');
+
+        Hpack::clearHuffmanCache();
+    }
+
+    /**
+     * Huffman 解码缓存设有条目上限，面对海量不同值时不得无限增长。
+     */
+    public function testHuffmanCacheIsBounded(): void
+    {
+        Hpack::clearHuffmanCache();
+
+        for ($i = 0; $i < 5000; $i++) {
+            Hpack::huffmanDecode(Hpack::huffmanEncode('uniq-value-' . $i));
+        }
+
+        $prop = (new \ReflectionClass(Hpack::class))->getProperty('huffmanCache');
+        $prop->setAccessible(true);
+        $this->assertLessThanOrEqual(
+            1024,
+            count($prop->getValue()),
+            'Huffman 解码缓存不得超过上限'
+        );
+
+        Hpack::clearHuffmanCache();
+    }
+
+    /**
+     * 超长编码值不进缓存：这类值多为一次性大头，重复率低却占内存。
+     */
+    public function testHuffmanCacheSkipsOversizedInput(): void
+    {
+        Hpack::clearHuffmanCache();
+
+        $big     = str_repeat('a', 4096);
+        $encoded = Hpack::huffmanEncode($big);
+        $this->assertGreaterThan(512, strlen($encoded), '样本编码后需超过缓存长度上限');
+
+        $this->assertSame($big, Hpack::huffmanDecode($encoded));
+
+        $prop = (new \ReflectionClass(Hpack::class))->getProperty('huffmanCache');
+        $prop->setAccessible(true);
+        $this->assertSame([], $prop->getValue(), '超长输入不得进入缓存');
+
+        Hpack::clearHuffmanCache();
+    }
 }
