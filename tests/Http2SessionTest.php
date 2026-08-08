@@ -757,4 +757,65 @@ final class Http2SessionTest extends TestCase
         ));
         $this->assertCount(1, $ok);
     }
+
+    // ----------------------------------------- SETTINGS_MAX_HEADER_LIST_SIZE 防御
+
+    /**
+     * 未压缩头列表超过本端通告上限即 RST 该流（RFC 7540 §6.5.2）。
+     * 把上限压到 200 字节，构造 4 伪头 + 1 自定义头（累计 ≈220 字节）触发拒绝。
+     */
+    public function testOversizedHeaderListIsRejected(): void
+    {
+        $session = new Http2Session(maxHeaderListSize: 200);
+        $this->handshake($session);
+
+        $requests = $session->feed($this->headersFrame(
+            1,
+            array_merge(self::getHeaders('/'), [['x-test', 'hello']]),
+            Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM
+        ));
+
+        // 超限即拒：不组装请求、流被回收
+        $this->assertSame([], $requests);
+        $this->assertSame(0, $session->activeStreams());
+
+        $out = $session->drain();
+        $this->assertNotSame('', $out, '超限必须写出 RST_STREAM');
+        $rst = Frame::decode($out);
+        $this->assertSame(Frame::TYPE_RST_STREAM, $rst['type']);
+        $this->assertSame(Frame::ERROR_PROTOCOL, unpack('N', $rst['payload'])[1]);
+    }
+
+    /** 未压缩头列表低于上限时正常组装，不能误伤合法请求 */
+    public function testHeaderListBelowLimitIsAccepted(): void
+    {
+        $session = new Http2Session(maxHeaderListSize: 200);
+        $this->handshake($session);
+
+        // 仅 4 个伪头（累计 ≈177 字节）低于 200，应正常组装
+        $requests = $session->feed($this->headersFrame(
+            1,
+            self::getHeaders('/'),
+            Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM
+        ));
+
+        $this->assertCount(1, $requests);
+        $this->assertSame('/', $requests[0]['request']['path']);
+    }
+
+    /** 本端 SETTINGS 必须通告 MAX_HEADER_LIST_SIZE，让对端知晓上限 */
+    public function testMaxHeaderListSizeAnnouncedInSettings(): void
+    {
+        $session = new Http2Session(maxHeaderListSize: 8192);
+        $session->markPrefaceReceived();
+        $session->sendLocalSettings();
+        $out = $session->drain();
+
+        // 缓冲里可能还含一条 WINDOW_UPDATE（initialWindow 高于默认时），
+        // 只取首个 SETTINGS 帧解析其负载。
+        $frame = Frame::decode($out);
+        $this->assertSame(Frame::TYPE_SETTINGS, $frame['type']);
+        $settings = Frame::decodeSettings($frame['payload']);
+        $this->assertSame(8192, $settings[Frame::SETTINGS_MAX_HEADER_LIST_SIZE] ?? null);
+    }
 }

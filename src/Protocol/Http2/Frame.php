@@ -134,7 +134,11 @@ final class Frame
             return null;
         }
 
-        $stream = unpack('N', substr($buffer, $offset + 5, 4))[1] & 0x7FFFFFFF;
+        $p = $offset + 5;
+        $stream = ((ord($buffer[$p]) << 24)
+            | (ord($buffer[$p + 1]) << 16)
+            | (ord($buffer[$p + 2]) << 8)
+            | ord($buffer[$p + 3])) & 0x7FFFFFFF;
 
         return [
             'type'    => ord($buffer[$offset + 3]),

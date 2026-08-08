@@ -128,6 +128,8 @@ final class NativeRuntime extends AbstractRuntime
 
     private int $http2InitialWindow = 1048576;
 
+    private int $http2MaxHeaderListSize = 65536;
+
     /** 优雅关闭宽限期（秒）：SIGTERM 后让在途请求/流完成的最长等待 */
     private int $gracefulShutdownTimeout = 3;
 
@@ -226,20 +228,18 @@ final class NativeRuntime extends AbstractRuntime
         return $this->connections;
     }
 
-    // ------------------------------------------------------------- 启动
-
-    public function start(): void
+    /**
+     * 把 serve 选项落到运行时属性。抽出来便于单测（无需真正启动 server）。
+     *
+     * @param array<string, mixed> $opts
+     */
+    protected function applyOptions(array $opts): void
     {
-        $listener = $this->requireListener();
-        $opts     = $listener['options'];
-
         // SO_REUSEPORT 默认策略因平台而异（经同机 A/B 实测验证）：
         //  - Linux：默认开启。每个 worker 拥有独立监听 socket，由内核将新连接直接分发到
-        //    某一 worker，彻底消除「fork 共享监听 socket 的惊群争抢」（否则高并发下 accept
-        //    会唤醒所有 worker 只留一个成功，上下文切换风暴导致 P99 飙升）。
+        //    某一 worker，彻底消除「fork 共享监听 socket 的惊群争抢」。
         //  - macOS / BSD：默认关闭。其 kqueue + 共享监听 socket 的实现反而比 SO_REUSEPORT
-        //    更高效（实测开启后吞吐下降约 1/3、尾部延迟更差），故沿用共享 socket 路径。
-        // 不支持 SO_REUSEPORT 的平台一律回退为共享 socket。
+        //    更高效，故沿用共享 socket 路径。不支持 SO_REUSEPORT 的平台一律回退为共享 socket。
         $this->reusePort       = (bool)($opts['reusePort'] ?? self::defaultReusePort());
         $this->workerCount     = max(1, (int)($opts['workers'] ?? 4));
         $this->taskWorkerCount = max(0, (int)($opts['taskWorkers'] ?? 0));
@@ -254,11 +254,29 @@ final class NativeRuntime extends AbstractRuntime
         $this->http2Enabled              = (bool)($opts['http2'] ?? true);
         $this->http2MaxConcurrentStreams = max(1, (int)($opts['http2MaxConcurrentStreams'] ?? 128));
         $this->http2InitialWindow        = max(Frame::DEFAULT_WINDOW_SIZE, (int)($opts['http2InitialWindow'] ?? 1048576));
+        $this->http2MaxHeaderListSize    = max(0, (int)($opts['http2MaxHeaderListSize'] ?? Http2Session::DEFAULT_MAX_HEADER_LIST_SIZE));
         $this->gracefulShutdownTimeout   = max(0, (int)($opts['gracefulShutdownTimeout'] ?? 3));
 
         $this->maxSendBuffer   = max(65536, (int)($opts['maxSendBuffer'] ?? NativeConnection::DEFAULT_MAX_SEND_BUFFER));
         $this->serverName      = (string)($opts['name'] ?? 'kode-process');
         $this->pidFile         = isset($opts['pidFile']) ? (string)$opts['pidFile'] : null;
+    }
+
+    // ------------------------------------------------------------- 启动
+
+    public function start(): void
+    {
+        $listener = $this->requireListener();
+        $opts     = $listener['options'];
+
+        // SO_REUSEPORT 默认策略因平台而异（经同机 A/B 实测验证）：
+        //  - Linux：默认开启。每个 worker 拥有独立监听 socket，由内核将新连接直接分发到
+        //    某一 worker，彻底消除「fork 共享监听 socket 的惊群争抢」（否则高并发下 accept
+        //    会唤醒所有 worker 只留一个成功，上下文切换风暴导致 P99 飙升）。
+        //  - macOS / BSD：默认关闭。其 kqueue + 共享监听 socket 的实现反而比 SO_REUSEPORT
+        //    更高效（实测开启后吞吐下降约 1/3、尾部延迟更差），故沿用共享 socket 路径。
+        // 不支持 SO_REUSEPORT 的平台一律回退为共享 socket。
+        $this->applyOptions($opts);
 
         if (!empty($opts['daemonize'])) {
             $this->daemonize((string)($opts['logFile'] ?? '/dev/null'));
@@ -942,7 +960,11 @@ final class NativeRuntime extends AbstractRuntime
      */
     private function startHttp2(NativeConnection $conn): Http2Session
     {
-        $session = new Http2Session($this->http2MaxConcurrentStreams, $this->http2InitialWindow);
+        $session = new Http2Session(
+            maxConcurrentStreams: $this->http2MaxConcurrentStreams,
+            initialWindowSize: $this->http2InitialWindow,
+            maxHeaderListSize: $this->http2MaxHeaderListSize,
+        );
         $conn->attachHttp2($session);
         $conn->setHandshakeDone();
         $session->sendLocalSettings();

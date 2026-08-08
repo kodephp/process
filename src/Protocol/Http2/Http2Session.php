@@ -32,6 +32,12 @@ final class Http2Session
 
     private int $maxFrameSize;
 
+    /** 本端接受的最大「未压缩」头列表字节数（SETTINGS_MAX_HEADER_LIST_SIZE），防御超大头 */
+    private int $maxHeaderListSize;
+
+    /** 流状态对象池：关闭的流回收于此，新建时复用，省去哈希桶反复分配 */
+    private array $streamPool = [];
+
     /** 对端通告的设置（发送方向受其约束） */
     private int $peerInitialWindowSize = Frame::DEFAULT_WINDOW_SIZE;
 
@@ -85,6 +91,12 @@ final class Http2Session
     /** 单条头块序列允许的最大 CONTINUATION 帧数（同上，防止帧数洪泛） */
     private const int MAX_CONTINUATION_FRAMES = 16;
 
+    /** 本端接受的最大「未压缩」头列表字节数（SETTINGS_MAX_HEADER_LIST_SIZE 默认值） */
+    public const int DEFAULT_MAX_HEADER_LIST_SIZE = 65536;
+
+    /** 流状态对象池上限：超过即不再回收，避免长连接下池无限增长 */
+    private const int STREAM_POOL_LIMIT = 64;
+
     private int $lastStreamId = 0;
 
     private int $highestClientStream = 0;
@@ -103,10 +115,12 @@ final class Http2Session
         int $initialWindowSize = 1048576,
         int $maxFrameSize = Frame::MIN_MAX_FRAME_SIZE,
         int $headerTableSize = 4096,
+        int $maxHeaderListSize = self::DEFAULT_MAX_HEADER_LIST_SIZE,
     ) {
         $this->maxConcurrentStreams = max(1, $maxConcurrentStreams);
         $this->initialWindowSize    = min(max(Frame::DEFAULT_WINDOW_SIZE, $initialWindowSize), Frame::MAX_WINDOW_SIZE);
         $this->maxFrameSize         = min(max(Frame::MIN_MAX_FRAME_SIZE, $maxFrameSize), Frame::MAX_MAX_FRAME_SIZE);
+        $this->maxHeaderListSize    = max(0, $maxHeaderListSize);
         $this->recvWindow           = $this->initialWindowSize;
         $this->decoder              = new Hpack($headerTableSize);
         $this->encoder              = new Hpack($headerTableSize);
@@ -152,6 +166,7 @@ final class Http2Session
             Frame::SETTINGS_MAX_CONCURRENT_STREAMS => $this->maxConcurrentStreams,
             Frame::SETTINGS_INITIAL_WINDOW_SIZE    => $this->initialWindowSize,
             Frame::SETTINGS_MAX_FRAME_SIZE         => $this->maxFrameSize,
+            Frame::SETTINGS_MAX_HEADER_LIST_SIZE   => $this->maxHeaderListSize,
             Frame::SETTINGS_ENABLE_PUSH            => 0,
         ]);
 
@@ -210,22 +225,17 @@ final class Http2Session
         $this->highestClientStream = 1;
         $this->lastStreamId        = 1;
 
-        $this->streams[1] = [
-            'state'           => self::STATE_HALF_CLOSED_REMOTE,
-            'headers'         => $headers,
-            'pseudo'          => [
-                ':method'    => (string)($request['method'] ?? 'GET'),
-                ':path'      => (string)($request['uri'] ?? '/'),
-                ':scheme'    => 'http',
-                ':authority' => $headers['host'] ?? '',
-            ],
-            'body'            => (string)($request['body'] ?? ''),
-            'sendWindow'      => $this->peerInitialWindowSize,
-            'recvWindow'      => $this->initialWindowSize,
-            'pending'         => '',
-            'endAfterPending' => false,
-            'headersSent'     => false,
+        $stream = $this->acquireStream();
+        $stream['state']   = self::STATE_HALF_CLOSED_REMOTE;
+        $stream['headers'] = $headers;
+        $stream['pseudo']  = [
+            ':method'    => (string)($request['method'] ?? 'GET'),
+            ':path'      => (string)($request['uri'] ?? '/'),
+            ':scheme'    => 'http',
+            ':authority' => $headers['host'] ?? '',
         ];
+        $stream['body']   = (string)($request['body'] ?? '');
+        $this->streams[1] = $stream;
 
         return ['stream' => 1, 'request' => $this->buildRequest(1)];
     }
@@ -365,17 +375,7 @@ final class Http2Session
         $this->highestClientStream = $streamId;
         $this->lastStreamId        = $streamId;
 
-        $this->streams[$streamId] = [
-            'state'           => self::STATE_OPEN,
-            'headers'         => [],
-            'pseudo'          => [],
-            'body'            => '',
-            'sendWindow'      => $this->peerInitialWindowSize,
-            'recvWindow'      => $this->initialWindowSize,
-            'pending'         => '',
-            'endAfterPending' => false,
-            'headersSent'     => false,
-        ];
+        $this->streams[$streamId] = $this->acquireStream();
 
         $endStream = ($frame['flags'] & Frame::FLAG_END_STREAM) !== 0;
 
@@ -442,7 +442,7 @@ final class Http2Session
         $this->continuationBuffer   = '';
         $this->continuationEndStream = false;
         $this->continuationFrames   = 0;
-        unset($this->streams[$streamId]);
+        $this->freeStream($streamId);
     }
 
     /**
@@ -455,6 +455,7 @@ final class Http2Session
         $pseudoDone = false;
         $pseudo     = [];
         $headers    = [];
+        $listSize   = 0;
 
         foreach ($this->decoder->decode($block) as [$name, $value]) {
             if ($name === '') {
@@ -469,6 +470,8 @@ final class Http2Session
                     throw Http2Exception::protocol('重复伪头 ' . $name, $streamId);
                 }
                 $pseudo[$name] = $value;
+                // 未压缩头列表体积（RFC 7540 §6.5.2：name+value+32 固定开销），边解码边累计
+                $listSize += strlen($name) + strlen($value) + 32;
                 continue;
             }
 
@@ -483,12 +486,25 @@ final class Http2Session
                 throw Http2Exception::protocol('禁止的逐跳头：' . $name, $streamId);
             }
 
-            // 同名头合并：cookie 用 "; " 拼接，其余用 ", "（RFC 7540 §8.1.2.5）
+            // 同名头合并：cookie 用 "; " 拼接，其余用 ", "（RFC 7540 §8.1.2.5）。
+            // 合并时「头字段固定开销」已在首次计入，这里只追加合并部分的字节。
             if (isset($headers[$name])) {
-                $headers[$name] .= ($name === 'cookie' ? '; ' : ', ') . $value;
+                $appended     = ($name === 'cookie' ? '; ' : ', ') . $value;
+                $headers[$name] .= $appended;
+                $listSize     += strlen($appended);
             } else {
                 $headers[$name] = $value;
+                $listSize      += strlen($name) + strlen($value) + 32;
             }
+        }
+
+        // SETTINGS_MAX_HEADER_LIST_SIZE 防御：未压缩头列表超过本端通告上限即拒。
+        // 与 CONTINUATION 洪泛防护互补——后者限「压缩后」体积，这里限「解压后」体积，
+        // 防止一条低冗余却被解压成巨大的头列表耗尽内存（RFC 7540 §6.5.2）。
+        // listSize 已在解码循环中累计，无需二次遍历。
+        if ($this->maxHeaderListSize > 0 && $listSize > $this->maxHeaderListSize) {
+            $this->resetStream($streamId, Frame::ERROR_PROTOCOL);
+            return null;
         }
 
         if (!isset($pseudo[':method'], $pseudo[':path'], $pseudo[':scheme'])) {
@@ -785,7 +801,7 @@ final class Http2Session
         if (strlen($frame['payload']) !== 4) {
             throw Http2Exception::frameSize('RST_STREAM 负载必须为 4 字节');
         }
-        unset($this->streams[$frame['stream']]);
+        $this->freeStream($frame['stream']);
 
         return null;
     }
@@ -1016,16 +1032,58 @@ final class Http2Session
         }
     }
 
+    /**
+     * 取一条可复用的流状态数组（对象池）。
+     *
+     * 高并发 h2 连接上每条请求都新建一条流；若每次都 new 一个 9 字段的关联数组，
+     * 其哈希桶要反复分配 / 回收，给内存分配器与 GC 带来稳定压力。这里在连接内维护
+     * 一个小数组池：流关闭时回收、新建时复用。由于所有流数组的键集合恒为那 9 个，
+     * 复用可避免哈希表重建。池有上限，长连接下也不会无限增长。
+     */
+    private function acquireStream(): array
+    {
+        if ($this->streamPool !== []) {
+            $stream = array_pop($this->streamPool);
+        } else {
+            $stream = [];
+        }
+
+        $stream['state']           = self::STATE_OPEN;
+        $stream['headers']         = [];
+        $stream['pseudo']          = [];
+        $stream['body']            = '';
+        $stream['sendWindow']      = $this->peerInitialWindowSize;
+        $stream['recvWindow']      = $this->initialWindowSize;
+        $stream['pending']         = '';
+        $stream['endAfterPending'] = false;
+        $stream['headersSent']     = false;
+
+        return $stream;
+    }
+
+    /**
+     * 回收一条已关闭的流（归还对象池），防止哈希桶反复分配。
+     */
+    private function freeStream(int $streamId): void
+    {
+        if (isset($this->streams[$streamId])) {
+            if (count($this->streamPool) < self::STREAM_POOL_LIMIT) {
+                $this->streamPool[] = $this->streams[$streamId];
+            }
+            unset($this->streams[$streamId]);
+        }
+    }
+
     private function closeStream(int $streamId): void
     {
-        unset($this->streams[$streamId]);
+        $this->freeStream($streamId);
     }
 
     /** 主动重置一条流 */
     public function resetStream(int $streamId, int $errorCode = Frame::ERROR_CANCEL): void
     {
         if (isset($this->streams[$streamId])) {
-            unset($this->streams[$streamId]);
+            $this->freeStream($streamId);
             $this->outBuffer .= Frame::rstStream($streamId, $errorCode);
         }
     }

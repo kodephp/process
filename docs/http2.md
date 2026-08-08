@@ -95,12 +95,14 @@ $conn->endChunk();
 | `http2` | `true` | 是否启用 h2c；设为 `false` 后完全按 HTTP/1.1 处理 |
 | `http2MaxConcurrentStreams` | `128` | 单连接并发流上限，超出的流回 `RST_STREAM(REFUSED_STREAM)`，连接本身不受影响 |
 | `http2InitialWindow` | `1048576`（1 MiB） | 本端通告的初始接收窗口，下限为协议默认的 64 KiB |
+| `http2MaxHeaderListSize` | `65536`（64 KiB） | 解压后（展开）头列表的最大体积（RFC 7540 §6.5.2）。超过即 `RST_STREAM(PROTOCOL_ERROR)` 该流，用于防御「压缩后很小、解压后极大」的头膨胀攻击，与 CONTINUATION 洪泛防护互补 |
 
 ```php
 Kode::serve('http://0.0.0.0:8080', [
     'workers'                   => 4,
     'http2MaxConcurrentStreams' => 256,
     'http2InitialWindow'        => 2 * 1024 * 1024,
+    'http2MaxHeaderListSize'    => 65536,
 ]);
 ```
 
@@ -131,6 +133,27 @@ HTTP/2 的头块由 `HEADERS` + 任意多个 `CONTINUATION` 帧拼成，框架�
 继续发新流（同样会被拒），但不会拖垮进程。该行为有 `Http2SessionTest` 的
 `testOversizedHeaderBlockIsRejectedWithoutAccumulating` / `testContinuationFloodIsRejected`
 两个用例守护，并已证明洪泛后连接仍能正常服务新流。
+
+## 解压后头列表体积上限（MAX_HEADER_LIST_SIZE）
+
+CONTINUATION 洪泛防护限的是**压缩后**的头块体积（`MAX_HEADER_BLOCK_SIZE`）。但 HPACK
+的压缩比在理论上可非常高——一个很小的压缩块解压后可能膨胀成巨大的头列表（即
+「压缩后很小、解压后极大」的头膨胀攻击）。为此 RFC 7540 §6.5.2 规定端点应声明自己
+能接受的最大**解压后**头列表体积，并在超出时拒绝该流。
+
+自研实现默认按 `DEFAULT_MAX_HEADER_LIST_SIZE = 65536`（64 KiB）向客户端通告
+`SETTINGS_MAX_HEADER_LIST_SIZE`，并在解码循环内**边解边累加**展开体积，一旦超过即
+`RST_STREAM(PROTOCOL_ERROR)` 该流并丢弃，不进入业务分发：
+
+- **累加发生在 HPACK 解码循环内**：每个伪头 / 普通头首次出现计 `strlen(name)+strlen(value)+32`、
+  同名多值合并计追加部分，省去解码后二次遍历，零额外开销。
+- **与 CONTINUATION 洪泛防护互补**：前者限「压缩后」体积，后者限「解压后」体积，
+  两道独立防线覆盖「分片堆积」与「高压缩比膨胀」两类攻击面。
+- **可调**：通过 `http2MaxHeaderListSize` 选项调整上限，或设为 `0` 关闭该检查（不推荐）。
+
+该行为由 `Http2SessionTest` 的 `testOversizedHeaderListIsRejected`（头列表超上限即被 RST，
+活跃流归零）/ `testHeaderListBelowLimitIsAccepted`（未超上限正常组装）/
+`testMaxHeaderListSizeAnnouncedInSettings`（SETTINGS 帧携带正确的上限值）三个用例守护。
 
 ## 优雅关闭（GOAWAY）
 

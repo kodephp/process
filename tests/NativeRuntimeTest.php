@@ -8,6 +8,7 @@ use Kode\Process\Kode;
 use Kode\Process\Protocol\ProtocolFactory;
 use Kode\Process\Runtime;
 use Kode\Process\Runtime\Capability;
+use Kode\Process\Protocol\Http2\Http2Session;
 use Kode\Process\Runtime\Driver\NativeRuntime;
 use Kode\Process\Runtime\RuntimeType;
 use Kode\Process\Tests\Fixtures\EchoProtocol;
@@ -125,6 +126,24 @@ final class NativeRuntimeTest extends TestCase
             $this->assertArrayHasKey($key, $stats, "stats 缺少键 {$key}");
         }
         $this->assertSame('native', $stats['runtime']);
+    }
+
+    /** serve 选项 http2MaxHeaderListSize 必须被读取（默认取 Http2Session 常量） */
+    public function testHttp2MaxHeaderListSizeOptionIsRead(): void
+    {
+        $ref = new \ReflectionClass(NativeRuntime::class);
+        $prop = $ref->getProperty('http2MaxHeaderListSize');
+        $prop->setAccessible(true);
+        $method = $ref->getMethod('applyOptions');
+        $method->setAccessible(true);
+
+        $rt = new NativeRuntime();
+        $method->invoke($rt, ['http2MaxHeaderListSize' => 8192]);
+        $this->assertSame(8192, $prop->getValue($rt));
+
+        $rtDefault = new NativeRuntime();
+        $method->invoke($rtDefault, []);
+        $this->assertSame(Http2Session::DEFAULT_MAX_HEADER_LIST_SIZE, $prop->getValue($rtDefault));
     }
 
     /**
