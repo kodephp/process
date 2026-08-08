@@ -44,8 +44,15 @@ $server->on('workerStart', function () use ($runtime, $workers): void {
     ));
 });
 
-// 固定小响应：把压力集中在「请求体接收 + recv 流控」而非发送方向
-$response = 'OK';
+// 响应体大小：默认小响应（压力集中在请求体接收方向）；设 KODE_RESP_KB 后可回大响应，
+// 形成「大请求体接收 + 大响应发送」双向同时压——混合负载健壮性验证（§5.2）。
+$respKb = (int)(getenv('KODE_RESP_KB') ?: 0);
+if ($respKb > 0) {
+    $response = str_repeat('x', $respKb * 1024);
+    fwrite(STDERR, sprintf("[%s] mixed-load: responding with %d KB body\n", $runtime, $respKb));
+} else {
+    $response = 'OK';
+}
 
 // 每处理 N 次请求打印一次内存峰值（按 worker 独立计数），用于检测请求体缓冲泄漏
 $logEvery = (int)(getenv('KODE_MEM_EVERY') ?: 10000);

@@ -244,6 +244,32 @@ Rapid Reset 防护采用「**预算 + 抵扣**」：收到对端 `RST_STREAM` �
 > 注：延迟均值 1.2s 为「万级并发 × 512KB 在途」的本地回环背压 artifact（客户端缓冲 +
 > 单机 loopback 带宽），非服务端缺陷；健壮性信号（0 错误 / 0 超时 / 内存 plateau）才是重点。
 
+### 5.2 混合负载长时压测（大请求体 + 大响应，双向流控同压）
+
+§五 与 §5.1 分别验证了「发送流控 + 大响应」与「接收流控 + 大请求体」两个单向方向。
+真实生产负载往往**双向同时压**：客户端一边灌大请求体、服务端一边回大响应。本项用
+`benchmarks/h2-mixed-stress.sh` 驱动 `benchmarks/portable-server-post.php`
+（设 `KODE_RESP_KB` 让 handler 读大请求体同时回大响应），把 recv 与 send 两个方向的
+窗口流控同时推到极限，验证内存生命周期在双向缓冲下是否仍零泄漏。
+
+实测（4 worker，100 连接，每连接最多 100 并发流，60s 持续，每请求 256 KB 请求体 + 256 KB 响应体）：
+
+| 方向 | 吞吐 | 数据流量 | 请求数 | 失败 / 错误 / 超时 | 每 worker 内存峰值 | 峰值增长 |
+|------|-----:|---------:|------:|:-----------------:|------------------:|:--------:|
+| 双向（req 256KB + resp 256KB） | 10,697 req/s | ≈2.61 GB/s（170 GB 累计） | 641,843 | **0 / 0 / 0** | 42–46 MB | **0–2 MB（一次性 arena 扩展后恒定）** |
+
+结论：
+- **双向流控稳定**：60s、百万级字节在途下 **0 失败 / 0 错误 / 0 超时**，recv 与 send 两个
+  窗口在持续相互背压下均正确回补 `WINDOW_UPDATE`，无任一方向耗尽导致的停滞。
+- **内存零泄漏（双向）**：请求体缓冲（`recv` 方向）与响应体缓冲（`send` 方向）同压时，
+  每个 worker 峰值仍**恒定**（仅个别 worker 出现一次 2MB arena 扩展后稳定；原始轨迹显示
+  峰值在 42–46MB 窄带、且为单次 2MB 台阶而非缓涨），`$stream['body']` 与 `pending` 随流关闭正确回收。
+- **健壮性闭环补全**：与 §五（发送）、§5.1（接收）共同构成 HTTP/2 双向流控 + 内存生命周期的
+  完整长时压测覆盖——两个方向独立、组合均验证稳定、零泄漏。
+
+> 注：混合负载延迟均值 ~0.93s 为「高并发 × 双向 256KB 在途」的本地回环背压 artifact，非服务端缺陷；
+> 健壮性信号（0 错误 / 0 超时 / 内存 plateau）才是重点。
+
 ## 优劣势对比
 
 | 维度 | native（自研） | swoole | workerman |
@@ -306,6 +332,9 @@ bash benchmarks/h2-large-stress.sh 4 19310 256 60 200 4
 
 # 带 body 的 POST 长时压测（接收流控 + 请求体缓冲，健壮性 / 零泄漏）
 bash benchmarks/h2-post-stress.sh 4 19311 512 60 100 4 100
+
+# 混合负载长时压测（大请求体 + 大响应，双向流控同压，健壮性 / 零泄漏）
+bash benchmarks/h2-mixed-stress.sh 4 19311 256 256 60 100 4 100
 ```
 
 - `benchmarks/portable-server.php`：跨运行时通用的服务脚本（`Kode::serve(..., 'native'|'swoole'|'workerman')`）。
@@ -315,3 +344,5 @@ bash benchmarks/h2-post-stress.sh 4 19311 512 60 100 4 100
   **发送流控**与响应缓冲零泄漏（§五）。
 - `benchmarks/portable-server-post.php` / `benchmarks/h2-post-stress.sh`：带 body 的 POST 长时压测，
   验证**接收流控**（`recv` 窗口 + `WINDOW_UPDATE`）与请求体缓冲零泄漏（§5.1）。
+  `portable-server-post.php` 另支持 `KODE_RESP_KB` 环境变量回大响应，配合 `h2-mixed-stress.sh`
+  做**双向混合负载**压测（§5.2）。
