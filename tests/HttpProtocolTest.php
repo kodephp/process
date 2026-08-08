@@ -8,7 +8,7 @@ use Kode\Process\Protocol\HttpProtocol;
 use PHPUnit\Framework\TestCase;
 
 /**
- * HttpProtocol 分块编码助手（beginChunked / chunkFrame / chunkEnd）单测。
+ * HttpProtocol 分块编码助手（beginChunked / chunkFrame / chunkEnd）与 gzip 压缩单测。
  */
 final class HttpProtocolTest extends TestCase
 {
@@ -63,5 +63,51 @@ final class HttpProtocolTest extends TestCase
             . "0\r\n\r\n";
 
         $this->assertSame($expected, $wire);
+    }
+
+    // ----------------------------------------------------------- gzip
+
+    public function testEncodeCompressedAddsHeaderAndCanRoundTrip(): void
+    {
+        $body = str_repeat('hello world ', 100); // > GZIP_MIN_SIZE
+        $wire = HttpProtocol::encodeCompressed($body, -1);
+
+        $this->assertStringContainsString("Content-Encoding: gzip\r\n", $wire);
+        $this->assertStringStartsWith("HTTP/1.1 200 OK\r\n", $wire);
+
+        // 取出压缩后的 Content-Length 与体，验证可 gzdecode 还原
+        preg_match('/Content-Length: (\d+)\r\n/', $wire, $m);
+        $len = (int)$m[1];
+        $payload = substr($wire, -(strlen($wire) - strpos($wire, "\r\n\r\n") - 4));
+        $this->assertSame($len, strlen($payload));
+        $this->assertSame($body, @gzdecode($payload));
+    }
+
+    public function testEncodeCompressedRespectsStatusAndCustomHeaders(): void
+    {
+        $wire = HttpProtocol::encodeCompressed(
+            ['status' => 201, 'headers' => ['Content-Type' => 'application/json'], 'body' => str_repeat('x', 2048)]
+        );
+        $this->assertStringStartsWith("HTTP/1.1 201 Created\r\n", $wire);
+        $this->assertStringContainsString("Content-Type: application/json\r\n", $wire);
+        $this->assertStringContainsString("Content-Encoding: gzip\r\n", $wire);
+    }
+
+    public function testEncodeCompressedPassesThroughCompleteResponse(): void
+    {
+        $full = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi";
+        $this->assertSame($full, HttpProtocol::encodeCompressed($full));
+    }
+
+    public function testAcceptsGzip(): void
+    {
+        $this->assertTrue(HttpProtocol::acceptsGzip('gzip'));
+        $this->assertTrue(HttpProtocol::acceptsGzip('gzip, deflate'));
+        $this->assertTrue(HttpProtocol::acceptsGzip('deflate, gzip'));
+        $this->assertTrue(HttpProtocol::acceptsGzip('gzip;q=0.8'));
+        $this->assertFalse(HttpProtocol::acceptsGzip('gzip;q=0'));
+        $this->assertFalse(HttpProtocol::acceptsGzip('gzip;q=0.0'));
+        $this->assertFalse(HttpProtocol::acceptsGzip('deflate'));
+        $this->assertFalse(HttpProtocol::acceptsGzip(''));
     }
 }

@@ -162,4 +162,20 @@ final class RecordingConnection implements ConnectionInterface
     {
         return false;
     }
+
+    public function gzip(string $data, int $status = 200, array $headers = []): bool
+    {
+        $this->sent[] = $data;
+
+        return true;
+    }
+
+    public function setGzipAuto(bool $enabled): void
+    {
+    }
+
+    public function isGzipAuto(): bool
+    {
+        return false;
+    }
 }

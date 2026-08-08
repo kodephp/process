@@ -59,6 +59,25 @@ interface ConnectionInterface
     /** 是否已处于 chunked 流式模式（首个分块已发出） */
     public function isChunkStarted(): bool;
 
+    /**
+     * 发送 gzip 压缩的完整 HTTP 响应（Content-Encoding: gzip）。
+     *
+     * 可自定义状态码与响应头（覆盖默认 200 / text/html），适合已知体积偏大、确定要压缩的
+     * 场景（例如大 JSON、静态资源）。非 HTTP 连接等价 {@see send()}，业务代码无需感知差异。
+     */
+    public function gzip(string $data, int $status = 200, array $headers = []): bool;
+
+    /**
+     * 运行时据此决定是否对随后的 HTTP 响应自动压缩。
+     *
+     * 仅当请求携带 `Accept-Encoding: gzip` 且响应体达到压缩阈值时生效；业务 handler 仍
+     * 只需普通 `send()`，运行时在写出前自动压缩，切换运行时零改动。
+     */
+    public function setGzipAuto(bool $enabled): void;
+
+    /** 当前连接是否被标记为自动 gzip 压缩 */
+    public function isGzipAuto(): bool;
+
     /** 对端地址，格式 ip:port */
     public function remoteAddress(): string;
 

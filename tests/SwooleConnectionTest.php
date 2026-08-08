@@ -70,6 +70,53 @@ final class SwooleConnectionTest extends TestCase
         $this->assertFalse($conn->endChunk());
         $this->assertSame([], $server->sent);
     }
+
+    public function testHttpModeAutoGzip(): void
+    {
+        $resp = new SwooleFakeResponse();
+        $conn = new SwooleConnection(new SwooleFakeServer(), 1, $resp);
+        $conn->setGzipAuto(true);
+
+        $body = str_repeat('A', 5000);
+        $conn->send($body);
+
+        $this->assertSame('gzip', $resp->headers['Content-Encoding'] ?? null);
+        $this->assertSame((string)strlen($resp->endData), $resp->headers['Content-Length'] ?? '');
+        $this->assertSame($body, @gzdecode($resp->endData));
+        $this->assertTrue($resp->ended);
+    }
+
+    public function testHttpModeNoGzipWithoutFlag(): void
+    {
+        $resp = new SwooleFakeResponse();
+        $conn = new SwooleConnection(new SwooleFakeServer(), 1, $resp);
+
+        $conn->send(str_repeat('A', 5000));
+
+        $this->assertArrayNotHasKey('Content-Encoding', $resp->headers);
+        $this->assertSame(str_repeat('A', 5000), $resp->endData);
+    }
+
+    public function testHttpModeExplicitGzip(): void
+    {
+        $resp = new SwooleFakeResponse();
+        $conn = new SwooleConnection(new SwooleFakeServer(), 1, $resp);
+
+        $body = str_repeat('B', 5000);
+        $conn->gzip($body, 200, ['Content-Type' => 'text/plain']);
+
+        $this->assertSame('gzip', $resp->headers['Content-Encoding'] ?? null);
+        $this->assertSame('text/plain', $resp->headers['Content-Type'] ?? null);
+        $this->assertSame($body, @gzdecode($resp->endData));
+    }
+
+    public function testRawModeGzipFallsBackToSend(): void
+    {
+        $server = new SwooleFakeServer();
+        $conn   = new SwooleConnection($server, 7, null);
+        $this->assertTrue($conn->gzip('payload', 200, []));
+        $this->assertSame(['payload'], $server->sent);
+    }
 }
 
 final class SwooleFakeServer
@@ -102,6 +149,8 @@ final class SwooleFakeResponse
 
     public bool $ended = false;
 
+    public string $endData = '';
+
     public function status(int $code): void
     {
         $this->statuses[] = $code;
@@ -119,6 +168,7 @@ final class SwooleFakeResponse
 
     public function end(string $data = ''): void
     {
-        $this->ended = true;
+        $this->ended   = true;
+        $this->endData = $data;
     }
 }

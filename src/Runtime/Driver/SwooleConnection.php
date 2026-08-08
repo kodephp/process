@@ -26,6 +26,8 @@ final class SwooleConnection implements ConnectionInterface
 
     private bool $chunkStarted = false;
 
+    private bool $gzipAuto = false;
+
     /**
      * @param object $server   Swoole\Server 实例
      * @param int    $fd       连接标识
@@ -49,6 +51,17 @@ final class SwooleConnection implements ConnectionInterface
             if ($this->responded) {
                 return false; // HTTP 响应只能写一次
             }
+            // 自动 gzip：请求接受压缩且响应体达阈值
+            if ($this->gzipAuto && is_string($data) && strlen($data) >= HttpProtocol::GZIP_MIN_SIZE) {
+                $gz = @gzencode($data, -1);
+                if ($gz !== false && $gz !== '') {
+                    $this->response->header('Content-Encoding', 'gzip');
+                    $this->response->header('Content-Length', (string)strlen($gz));
+                    $this->responded = true;
+                    $this->response->end($gz);
+                    return true;
+                }
+            }
             $this->responded = true;
             $this->response->end($data);
             return true;
@@ -60,6 +73,38 @@ final class SwooleConnection implements ConnectionInterface
         }
 
         return (bool)$this->server->send($this->fd, $data);
+    }
+
+    public function isGzipAuto(): bool
+    {
+        return $this->gzipAuto;
+    }
+
+    public function setGzipAuto(bool $enabled): void
+    {
+        $this->gzipAuto = $enabled;
+    }
+
+    public function gzip(string $data, int $status = 200, array $headers = []): bool
+    {
+        if ($this->response !== null) {
+            $gz = @gzencode($data, -1);
+            if ($gz === false || $gz === '') {
+                return false;
+            }
+            $this->response->status($status);
+            foreach ($headers as $name => $value) {
+                $this->response->header($name, $value);
+            }
+            $this->response->header('Content-Encoding', 'gzip');
+            $this->response->header('Content-Length', (string)strlen($gz));
+            $this->responded = true;
+            $this->response->end($gz);
+            return true;
+        }
+
+        // 非 HTTP 模式（裸 TCP / WebSocket）：降级为普通发送
+        return $this->send($data);
     }
 
     public function isChunkStarted(): bool

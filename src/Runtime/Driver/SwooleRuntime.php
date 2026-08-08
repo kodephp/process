@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Kode\Process\Runtime\Driver;
 
 use Kode\Process\Runtime\AbstractRuntime;
+use Kode\Process\Protocol\HttpProtocol;
 use Kode\Process\Runtime\Capability;
 use Kode\Process\Runtime\Exception\RuntimeNotSupportedException;
 use Kode\Process\Runtime\RuntimeType;
@@ -27,6 +28,8 @@ final class SwooleRuntime extends AbstractRuntime
     private int $currentWorkerId = 0;
 
     private int $taskWorkerCount = 0;
+
+    private bool $gzipEnabled = true;
 
     public static function isAvailable(): bool
     {
@@ -82,6 +85,7 @@ final class SwooleRuntime extends AbstractRuntime
         $scheme   = $listener['scheme'];
 
         $this->taskWorkerCount = max(0, (int)($opts['taskWorkers'] ?? 0));
+        $this->gzipEnabled     = (bool)($opts['gzip'] ?? true);
 
         // Task 进程必须由 PROCESS 模式承载，配置了 taskWorkers 时自动切换
         $mode = ($opts['mode'] ?? null) === 'process' || $this->taskWorkerCount > 0
@@ -157,6 +161,10 @@ final class SwooleRuntime extends AbstractRuntime
             $server->on('request', function (object $req, object $resp) use ($server): void {
                 $fd   = (int)($req->fd ?? 0);
                 $conn = new SwooleConnection($server, $fd, $resp);
+                // 依据 Accept-Encoding 自动启用 gzip（响应体达阈值才压缩，send 时判定）
+                if ($this->gzipEnabled && HttpProtocol::acceptsGzip((string)($req->header['accept-encoding'] ?? ''))) {
+                    $conn->setGzipAuto(true);
+                }
                 $this->fire('message', $conn, $req);
                 if ($conn->isChunkStarted()) {
                     $conn->endChunk();

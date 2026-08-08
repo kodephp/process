@@ -28,6 +28,8 @@ final class WorkermanRuntime extends AbstractRuntime
 
     private ?object $currentWorker = null;
 
+    private bool $gzipEnabled = true;
+
     public static function isAvailable(): bool
     {
         return class_exists(self::WORKER_CLASS);
@@ -87,6 +89,7 @@ final class WorkermanRuntime extends AbstractRuntime
         foreach ($this->listeners as $index => $listener) {
             $opts    = $listener['options'];
             $address = $this->buildAddress($listener);
+            $this->gzipEnabled = (bool)($opts['gzip'] ?? true);
 
             $context = [];
             if (isset($opts['ssl'])) {
@@ -184,6 +187,14 @@ final class WorkermanRuntime extends AbstractRuntime
         if ($this->hasHandler('message')) {
             $worker->onMessage = function (object $conn, mixed $data): void {
                 $wrap = new WorkermanConnection($conn);
+                // 依据 Accept-Encoding 自动启用 gzip（响应体达阈值才压缩，send 时判定）
+                if (
+                    $this->gzipEnabled
+                    && is_array($data)
+                    && HttpProtocol::acceptsGzip((string)($data['headers']['accept-encoding'] ?? ''))
+                ) {
+                    $wrap->setGzipAuto(true);
+                }
                 $this->fire('message', $wrap, $data);
                 if ($wrap->isChunkStarted()) {
                     $wrap->endChunk();

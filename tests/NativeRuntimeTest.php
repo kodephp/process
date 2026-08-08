@@ -658,6 +658,177 @@ PHP;
         return $body;
     }
 
+    // ------------------------------------------------------- HTTP gzip 自动压缩
+
+    public function testNativeHttpGzipAutoWhenAccepted(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port   = $this->findFreePort();
+        $script = $this->writeHttpServerScript(
+            $port,
+            ['workers' => 1],
+            'function ($conn, $req): void { $conn->send(str_repeat(\'K\', 4000)); }'
+        );
+        $proc = proc_open([PHP_BINARY, $script, (string)$port], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native 服务器子进程');
+        $this->waitForPort($port, 4.0);
+
+        try {
+            // 携带 Accept-Encoding: gzip → 响应应被压缩
+            $resp = $this->httpGet($port, ['Accept-Encoding: gzip']);
+            $this->assertStringContainsString('Content-Encoding: gzip', $resp);
+            $this->assertSame(str_repeat('K', 4000), @gzdecode($this->httpBody($resp)));
+
+            // 不携带 Accept-Encoding → 不压缩
+            $resp2 = $this->httpGet($port, []);
+            $this->assertStringNotContainsString('Content-Encoding: gzip', $resp2);
+            $this->assertSame(str_repeat('K', 4000), $this->httpBody($resp2));
+        } finally {
+            $this->stopProc($proc, $script);
+        }
+    }
+
+    public function testNativeHttpGzipDisabledByOption(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port   = $this->findFreePort();
+        $script = $this->writeHttpServerScript(
+            $port,
+            ['workers' => 1, 'gzip' => false],
+            'function ($conn, $req): void { $conn->send(str_repeat(\'K\', 4000)); }'
+        );
+        $proc = proc_open([PHP_BINARY, $script, (string)$port], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native 服务器子进程');
+        $this->waitForPort($port, 4.0);
+
+        try {
+            $resp = $this->httpGet($port, ['Accept-Encoding: gzip']);
+            $this->assertStringNotContainsString('Content-Encoding: gzip', $resp);
+            $this->assertSame(str_repeat('K', 4000), $this->httpBody($resp));
+        } finally {
+            $this->stopProc($proc, $script);
+        }
+    }
+
+    public function testNativeHttpGzipExplicitApi(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port   = $this->findFreePort();
+        $script = $this->writeHttpServerScript(
+            $port,
+            ['workers' => 1],
+            'function ($conn, $req): void { $conn->gzip(str_repeat(\'Z\', 4000), 200, [\'Content-Type\' => \'text/plain\']); }'
+        );
+        $proc = proc_open([PHP_BINARY, $script, (string)$port], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native 服务器子进程');
+        $this->waitForPort($port, 4.0);
+
+        try {
+            // 显式 gzip() 即使不带 Accept-Encoding 也压缩
+            $resp = $this->httpGet($port, []);
+            $this->assertStringContainsString('Content-Encoding: gzip', $resp);
+            $this->assertStringContainsString('Content-Type: text/plain', $resp);
+            $this->assertSame(str_repeat('Z', 4000), @gzdecode($this->httpBody($resp)));
+        } finally {
+            $this->stopProc($proc, $script);
+        }
+    }
+
+    public function testNativeHttpGzipSkippedForSmallBody(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port   = $this->findFreePort();
+        $script = $this->writeHttpServerScript(
+            $port,
+            ['workers' => 1],
+            'function ($conn, $req): void { $conn->send(\'hi\'); }'
+        );
+        $proc = proc_open([PHP_BINARY, $script, (string)$port], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native 服务器子进程');
+        $this->waitForPort($port, 4.0);
+
+        try {
+            $resp = $this->httpGet($port, ['Accept-Encoding: gzip']);
+            $this->assertStringNotContainsString('Content-Encoding: gzip', $resp);
+            $this->assertStringContainsString("\r\n\r\nhi", $resp);
+        } finally {
+            $this->stopProc($proc, $script);
+        }
+    }
+
+    private function writeHttpServerScript(int $port, array $opts, string $handlerCode): string
+    {
+        $autoload = realpath(__DIR__ . '/../vendor/autoload.php');
+        $optCode  = var_export($opts, true);
+        $code = <<<PHP
+<?php
+require '{$autoload}';
+use Kode\\Process\\Kode;
+
+Kode::serve('http://127.0.0.1:{$port}', {$optCode}, 'native')
+    ->on('message', {$handlerCode})
+    ->start();
+PHP;
+        $file = tempnam(sys_get_temp_dir(), 'kode_http_');
+        file_put_contents($file, $code);
+        return $file;
+    }
+
+    private function httpGet(int $port, array $extraHeaders): string
+    {
+        $fp = @fsockopen('127.0.0.1', $port, $errno, $errstr, 2.0);
+        $this->assertNotFalse($fp, "连接失败: {$errstr} ({$errno})");
+
+        $req = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n";
+        foreach ($extraHeaders as $h) {
+            $req .= $h . "\r\n";
+        }
+        $req .= "\r\n";
+
+        fwrite($fp, $req);
+
+        $buf = '';
+        while (($c = @fread($fp, 8192)) !== '' && $c !== false) {
+            $buf .= $c;
+        }
+        fclose($fp);
+        return $buf;
+    }
+
+    private function httpBody(string $resp): string
+    {
+        $pos = strpos($resp, "\r\n\r\n");
+        return $pos === false ? '' : substr($resp, $pos + 4);
+    }
+
+    private function stopProc($proc, string $script): void
+    {
+        $status = proc_get_status($proc);
+        $pid    = $status['pid'] ?? null;
+        if ($pid !== null && $pid > 0) {
+            @posix_kill($pid, SIGTERM);
+            usleep(300_000);
+            $still = proc_get_status($proc);
+            if ($still['running']) {
+                @posix_kill($pid, SIGKILL);
+            }
+        }
+        proc_close($proc);
+        @unlink($script);
+    }
+
     private function invokeProtected(string $class, string $method, array $args): mixed
     {
         return $this->invokeMethod($class, $method, $args, false);

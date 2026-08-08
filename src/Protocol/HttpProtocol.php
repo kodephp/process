@@ -15,6 +15,9 @@ final class HttpProtocol implements ProtocolInterface
     /** 请求报文总长度上限 */
     public const int MAX_LENGTH = 10485760;
 
+    /** 自动 gzip 压缩的最小响应体字节数（过小压缩收益不抵开销） */
+    public const int GZIP_MIN_SIZE = 1024;
+
     /** @var array<int, string> */
     private const array STATUS_TEXTS = [
         100 => 'Continue',
@@ -297,5 +300,70 @@ final class HttpProtocol implements ProtocolInterface
     public static function chunkEnd(): string
     {
         return '0' . self::HEADER_EOF . self::HEADER_EOF;
+    }
+
+    /**
+     * 判断请求是否接受 gzip 压缩。
+     *
+     * 兼容 `Accept-Encoding: gzip, deflate` 与普通 `gzip`；忽略 `q=0`（显式拒绝）。
+     */
+    public static function acceptsGzip(string $header): bool
+    {
+        if ($header === '') {
+            return false;
+        }
+        foreach (explode(',', $header) as $part) {
+            $part = strtolower(trim($part));
+            if ($part === 'gzip' || str_starts_with($part, 'gzip;')) {
+                // gzip;q=0 表示拒绝；q=0.8 等仍接受（注意 q=0 不能误匹配 q=0.8）
+                return !preg_match('/q\s*=\s*0(\.0+)?(?=$|;)/', $part);
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 生成 gzip 压缩的完整 HTTP 响应报文。
+     *
+     * 入参语义与 {@see encode} 一致：字符串视为响应体；数组为
+     * `['status'=>int, 'headers'=>array, 'body'=>string]`；以 `HTTP/` 开头的完整
+     * 报文原样透传（避免对已压缩响应二次压缩）。
+     *
+     * 自动附加 `Content-Encoding: gzip` 与压缩后的 `Content-Length`。压缩失败时
+     * 安全回退为非压缩响应（{@see encode}）。
+     *
+     * @param string|array<string, mixed> $data
+     * @param int $level 压缩级别：-1=Z_DEFAULT_STRATEGY(6)、0=不压缩、1~9
+     */
+    public static function encodeCompressed(mixed $data, int $level = -1): string
+    {
+        if (is_string($data) && str_starts_with($data, 'HTTP/')) {
+            return $data;
+        }
+        if (is_string($data)) {
+            $data = ['body' => $data];
+        }
+        if (!is_array($data)) {
+            return '';
+        }
+
+        $status  = (int)($data['status'] ?? 200);
+        $headers = $data['headers'] ?? ['Content-Type' => 'text/html; charset=utf-8'];
+        $body    = (string)($data['body'] ?? '');
+
+        $encoded = @gzencode($body, $level);
+        if ($encoded === false || $encoded === '') {
+            return self::encode($data);
+        }
+
+        $headers['Content-Encoding'] = 'gzip';
+        $headers['Content-Length']   = strlen($encoded);
+
+        $resp = 'HTTP/1.1 ' . $status . ' ' . self::getStatusText($status) . self::HEADER_EOF;
+        foreach ($headers as $name => $value) {
+            $resp .= $name . ': ' . $value . self::HEADER_EOF;
+        }
+
+        return $resp . self::HEADER_EOF . $encoded;
     }
 }

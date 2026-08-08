@@ -234,6 +234,27 @@ Kode::serve('http://0.0.0.0:8080', ['workers' => 4])
 - **自动收尾**：handler 返回后，运行时自动补发终止块。如需长流（如 SSE），可显式调用 `endChunk()` 结束。
 - Swoole HTTP 模式底层走 `Swoole\Http\Response::write()`（自动 chunked）；Native / Workerman 走裸 chunked 字节——统一抽象掩盖了差异。
 
+### HTTP 响应 gzip 压缩（Accept-Encoding 自动）
+
+服务端可透明地按客户端能力压缩响应，省带宽、降首屏。默认开启，**业务代码零改动**：
+
+```php
+// 业务照常 send()，运行时依据请求的 Accept-Encoding 自动压缩（≥1KB 才压缩）
+$conn->send($bigHtml);
+
+// 或在确定要压缩时显式调用（可覆盖状态码/响应头）
+$conn->gzip($bigJson, 200, ['Content-Type' => 'application/json']);
+```
+
+要点：
+
+- **自动压缩（透明）**：HTTP 请求携带 `Accept-Encoding: gzip` 且响应体 ≥ `HttpProtocol::GZIP_MIN_SIZE`(1 KB) 时，运行时自动以 `Content-Encoding: gzip` 返回；handler 只需普通 `send()`，切换运行时零改动。
+- **显式压缩**：`$conn->gzip($data, $status, $headers)` 强制发送压缩响应（即使客户端未声明），适合大 JSON / 静态资源等已知场景。
+- **可按需关闭**：serve 选项 `'gzip' => false` 全局禁用自动压缩（默认 `true`）。
+- **非 HTTP 连接**（`tcp` / `websocket` / `text`）调用 `gzip()` 等价 `send()`，语义自动降级。
+- 实现差异被隐藏：Native / Workerman 拼完整压缩响应报文；Swoole HTTP 模式经 `gzencode` 后由 `Swoole\Http\Response` 发出——统一抽象掩盖了差异。
+- 兼容 `Accept-Encoding: gzip, deflate`；`gzip;q=0` 视为拒绝，不压缩。
+
 ## 异步任务（Task）
 
 把耗时操作甩给独立的 task 进程，避免阻塞 I/O 循环：

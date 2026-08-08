@@ -121,4 +121,73 @@ final class NativeConnectionTest extends TestCase
         $conn->close();
         $this->assertFalse($conn->isChunkStarted());
     }
+
+    // ----------------------------------------------------- HTTP gzip 压缩
+
+    public function testGzipAutoCompressesOnSend(): void
+    {
+        $conn = $this->makeHttpConn();
+        $conn->setGzipAuto(true);
+
+        $body = str_repeat('X', 4000);
+        $conn->send($body);
+
+        $wire = $this->drain($conn);
+        $this->assertStringContainsString("Content-Encoding: gzip\r\n", $wire);
+        $this->assertSame($body, @gzdecode($this->httpBody($wire)));
+    }
+
+    public function testGzipSkippedWhenFlagOff(): void
+    {
+        $conn = $this->makeHttpConn();
+        $conn->send(str_repeat('X', 4000));
+
+        $wire = $this->drain($conn);
+        $this->assertStringNotContainsString('Content-Encoding: gzip', $wire);
+    }
+
+    public function testGzipSkippedForSmallBodyEvenWhenAuto(): void
+    {
+        $conn = $this->makeHttpConn();
+        $conn->setGzipAuto(true);
+        $conn->send('hi');
+
+        $wire = $this->drain($conn);
+        $this->assertStringNotContainsString('Content-Encoding: gzip', $wire);
+    }
+
+    public function testGzipExplicitApi(): void
+    {
+        $conn = $this->makeHttpConn();
+        $body = str_repeat('Y', 4000);
+        $conn->gzip($body, 200, ['Content-Type' => 'text/plain']);
+
+        $wire = $this->drain($conn);
+        $this->assertStringContainsString("Content-Encoding: gzip\r\n", $wire);
+        $this->assertStringContainsString("Content-Type: text/plain\r\n", $wire);
+        $this->assertSame($body, @gzdecode($this->httpBody($wire)));
+    }
+
+    public function testGzipOnNonHttpConnFallsBackToSend(): void
+    {
+        $conn = $this->makeConn(); // protocolClass 为 null
+        $this->assertTrue($conn->gzip('raw-payload', 200, []));
+        $wire = $this->drain($conn);
+        $this->assertSame('raw-payload', $wire);
+    }
+
+    private function drain(NativeConnection $conn): string
+    {
+        $sock = $conn->native();
+        rewind($sock);
+        $data = (string)stream_get_contents($sock);
+        rewind($sock);
+        return $data;
+    }
+
+    private function httpBody(string $wire): string
+    {
+        $pos = strpos($wire, "\r\n\r\n");
+        return $pos === false ? '' : substr($wire, $pos + 4);
+    }
 }

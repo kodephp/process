@@ -115,6 +115,8 @@ final class NativeRuntime extends AbstractRuntime
 
     private bool $keepAlive = true;
 
+    private bool $gzipEnabled = true;
+
     private int $maxSendBuffer = NativeConnection::DEFAULT_MAX_SEND_BUFFER;
 
     private string $serverName = 'kode-process';
@@ -225,6 +227,7 @@ final class NativeRuntime extends AbstractRuntime
         $this->stopTimeout     = max(1, (int)($opts['stopTimeout'] ?? 5));
         $this->heartbeat       = max(0, (int)($opts['heartbeat'] ?? 0));
         $this->keepAlive       = (bool)($opts['keepAlive'] ?? true);
+        $this->gzipEnabled     = (bool)($opts['gzip'] ?? true);
         $this->maxSendBuffer   = max(65536, (int)($opts['maxSendBuffer'] ?? NativeConnection::DEFAULT_MAX_SEND_BUFFER));
         $this->serverName      = (string)($opts['name'] ?? 'kode-process');
         $this->pidFile         = isset($opts['pidFile']) ? (string)$opts['pidFile'] : null;
@@ -721,6 +724,11 @@ final class NativeRuntime extends AbstractRuntime
                 }
             }
 
+            // HTTP：依据 Accept-Encoding 自动启用 gzip 压缩（响应体达阈值才压缩，send 时判定）
+            if ($scheme === 'http' && $this->gzipEnabled && $this->acceptsGzip($this->headerLine($message['headers'] ?? [], 'Accept-Encoding'))) {
+                $conn->setGzipAuto(true);
+            }
+
             $this->fire('message', $conn, $message);
             $this->countRequest();
 
@@ -807,6 +815,27 @@ final class NativeRuntime extends AbstractRuntime
     /**
      * HTTP/1.1 默认长连接，HTTP/1.0 默认短连接，`Connection` 头显式覆盖。
      */
+    /**
+     * 判断请求是否接受 gzip 压缩（委托 {@see HttpProtocol::acceptsGzip}）。
+     */
+    private function acceptsGzip(string $header): bool
+    {
+        return HttpProtocol::acceptsGzip($header);
+    }
+
+    /**
+     * 大小写不敏感地读取请求头（HttpProtocol 解析出的 header 名保留原始大小写）。
+     */
+    private function headerLine(array $headers, string $name): string
+    {
+        foreach ($headers as $key => $value) {
+            if (strcasecmp((string)$key, $name) === 0) {
+                return (string)$value;
+            }
+        }
+        return '';
+    }
+
     private function shouldKeepAlive(mixed $message): bool
     {
         if (!$this->keepAlive || !is_array($message)) {

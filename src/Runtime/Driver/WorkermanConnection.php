@@ -19,6 +19,8 @@ final class WorkermanConnection implements ConnectionInterface
 
     private bool $chunkStarted = false;
 
+    private bool $gzipAuto = false;
+
     /**
      * @param object $conn Workerman\Connection\TcpConnection
      */
@@ -33,7 +35,39 @@ final class WorkermanConnection implements ConnectionInterface
 
     public function send(string $data, bool $raw = false): bool
     {
+        // 自动 gzip：仅 HTTP 连接、未分块、字符串响应体达阈值时拼完整压缩报文（raw 发送）
+        if (
+            !$raw
+            && $this->gzipAuto
+            && !$this->chunkStarted
+            && is_string($data)
+            && strlen($data) >= HttpProtocol::GZIP_MIN_SIZE
+        ) {
+            $compressed = HttpProtocol::encodeCompressed($data);
+            if ($compressed !== '') {
+                return (bool)$this->conn->send($compressed, true);
+            }
+        }
         return (bool)$this->conn->send($data, $raw);
+    }
+
+    public function isGzipAuto(): bool
+    {
+        return $this->gzipAuto;
+    }
+
+    public function setGzipAuto(bool $enabled): void
+    {
+        $this->gzipAuto = $enabled;
+    }
+
+    public function gzip(string $data, int $status = 200, array $headers = []): bool
+    {
+        $compressed = HttpProtocol::encodeCompressed(['status' => $status, 'headers' => $headers, 'body' => $data]);
+        if ($compressed === '') {
+            return false;
+        }
+        return (bool)$this->conn->send($compressed, true);
     }
 
     public function isChunkStarted(): bool

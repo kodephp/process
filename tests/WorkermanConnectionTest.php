@@ -53,6 +53,54 @@ final class WorkermanConnectionTest extends TestCase
         $this->assertFalse($conn->endChunk());
         $this->assertSame([], $conn->native()->sent);
     }
+
+    public function testAutoGzipSendsCompressedRaw(): void
+    {
+        $conn = new WorkermanConnection(new WorkermanFakeTcp());
+        $conn->setGzipAuto(true);
+
+        $body = str_repeat('A', 5000);
+        $ok   = $conn->send($body);
+
+        $this->assertTrue($ok);
+        [$wire, $raw] = $conn->native()->sent[0];
+        $this->assertTrue($raw);
+        $this->assertStringContainsString("Content-Encoding: gzip\r\n", $wire);
+        $this->assertSame($body, @gzdecode($this->httpBody($wire)));
+    }
+
+    public function testNoAutoGzipWithoutFlag(): void
+    {
+        $conn = new WorkermanConnection(new WorkermanFakeTcp());
+
+        $body = str_repeat('A', 5000);
+        $conn->send($body);
+
+        [$data, $raw] = $conn->native()->sent[0];
+        $this->assertFalse($raw);
+        $this->assertSame($body, $data);
+    }
+
+    public function testExplicitGzip(): void
+    {
+        $conn = new WorkermanConnection(new WorkermanFakeTcp());
+
+        $body = str_repeat('B', 5000);
+        $ok   = $conn->gzip($body, 200, ['Content-Type' => 'text/plain']);
+
+        $this->assertTrue($ok);
+        [$wire, $raw] = $conn->native()->sent[0];
+        $this->assertTrue($raw);
+        $this->assertStringContainsString("Content-Encoding: gzip\r\n", $wire);
+        $this->assertStringContainsString("Content-Type: text/plain\r\n", $wire);
+        $this->assertSame($body, @gzdecode($this->httpBody($wire)));
+    }
+
+    private function httpBody(string $wire): string
+    {
+        $pos = strpos($wire, "\r\n\r\n");
+        return $pos === false ? '' : substr($wire, $pos + 4);
+    }
 }
 
 final class WorkermanFakeTcp

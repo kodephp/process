@@ -55,6 +55,9 @@ final class NativeConnection implements ConnectionInterface
 
     private bool $httpChunkEnded = false;
 
+    // HTTP 自动 gzip 压缩标记（运行时依据 Accept-Encoding 设置）
+    private bool $gzipAuto = false;
+
     // WebSocket 分片重组缓冲（RFC 6455 §5.4），仅 websocket 连接使用
     private string $wsFragmentBuffer = '';
 
@@ -104,7 +107,61 @@ final class NativeConnection implements ConnectionInterface
             ? $data
             : ($this->protocolClass)::encode($data, $this);
 
+        // HTTP 自动 gzip：仅在运行时标记、未分块、响应体达阈值时压缩
+        if (
+            !$raw
+            && $this->protocolClass === HttpProtocol::class
+            && $this->gzipAuto
+            && !$this->httpChunkStarted
+            && $this->bodySize($data) >= HttpProtocol::GZIP_MIN_SIZE
+        ) {
+            $compressed = HttpProtocol::encodeCompressed($data);
+            if ($compressed !== '') {
+                $bytes = $compressed;
+            }
+        }
+
         return $this->write($bytes);
+    }
+
+    /**
+     * 估算待发送响应体的字节数（字符串取长度；数组取 body 段）。
+     */
+    private function bodySize(mixed $data): int
+    {
+        if (is_string($data)) {
+            return strlen($data);
+        }
+        if (is_array($data)) {
+            return strlen((string)($data['body'] ?? ''));
+        }
+        return 0;
+    }
+
+    public function isGzipAuto(): bool
+    {
+        return $this->gzipAuto;
+    }
+
+    public function setGzipAuto(bool $enabled): void
+    {
+        $this->gzipAuto = $enabled;
+    }
+
+    public function gzip(string $data, int $status = 200, array $headers = []): bool
+    {
+        if ($this->closed) {
+            return false;
+        }
+
+        // 非 HTTP 连接：降级为普通发送，保持跨运行时语义一致
+        if ($this->protocolClass !== HttpProtocol::class) {
+            return $this->send($data);
+        }
+
+        return $this->write(
+            HttpProtocol::encodeCompressed(['status' => $status, 'headers' => $headers, 'body' => $data])
+        );
     }
 
     /** 写裸字节，跳过协议编码（WebSocket 握手响应、SSL 前置等场景） */
@@ -298,6 +355,7 @@ final class NativeConnection implements ConnectionInterface
         $this->unwatchWritable();
         $this->httpChunkStarted = false;
         $this->httpChunkEnded   = false;
+        $this->gzipAuto         = false;
 
         // UDP 复用服务端套接字，不能在单个报文结束时关闭
         if ($this->udpPeer === null && is_resource($this->socket)) {
