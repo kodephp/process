@@ -194,6 +194,22 @@ final class Hpack
     private const int LITERAL_CACHE_LIMIT = 1024;
 
     /**
+     * 整头（name + value）已编码结果缓存：name => value => 完整编码字节。
+     *
+     * 与 {@see $literalCache}（仅缓存值）相比，这里缓存「整头」——一次命中即可直接
+     * 拼回字节，省去静态表查对、整数编码、字面量编码与多次字符串拼接。稳态下响应头
+     * 组合高度固定，命中率极高，且线格式完全不变。上限 {@see HEADER_CACHE_LIMIT}。
+     *
+     * @var array<string, array<string, string>>
+     */
+    private static array $headerCache = [];
+
+    /** 已缓存整头数（达到上限后停止写入） */
+    private static int $headerCacheCount = 0;
+
+    private const int HEADER_CACHE_LIMIT = 1024;
+
+    /**
      * Huffman 解码结果缓存：键为已编码字节串，值为解码后的原始字符串。
      *
      * 与 {@see $literalCache}（明文 → 编码字节）严格对称，方向相反：Huffman 解码同样
@@ -268,6 +284,15 @@ final class Hpack
     {
         self::$huffmanCache      = [];
         self::$huffmanCacheCount = 0;
+    }
+
+    /**
+     * 清空整头编码缓存（测试隔离用）。仅丢弃可重新计算的缓存，不影响上下文。
+     */
+    public static function clearHeaderCache(): void
+    {
+        self::$headerCache      = [];
+        self::$headerCacheCount = 0;
     }
 
     public function maxDynamicSize(): int
@@ -458,9 +483,20 @@ final class Hpack
         $out = '';
 
         foreach ($headers as [$name, $value]) {
-            $pair = self::$staticPairIndex[$name . "\0" . $value] ?? null;
+            // 整头缓存命中：直接拼接已编码字节，省去查表 / 整数编码 / 字面量编码 / 拼接链。
+            // 键为 (name, value)，稳态下响应头组合高度固定，命中率极高；线格式逐字节不变。
+            $hc = self::$headerCache[$name][$value] ?? null;
+            if ($hc !== null) {
+                $out .= $hc;
+                continue;
+            }
+
+            // 静态表整对命中（§6.1）：1xxxxxxx
+            $pair = self::$staticPairIndex[$name][$value] ?? null;
             if ($pair !== null) {
-                $out .= $this->writeInteger($pair, 7, 0x80);
+                $hc = $this->writeInteger($pair, 7, 0x80);
+                $this->storeHeader($name, $value, $hc);
+                $out .= $hc;
                 continue;
             }
 
@@ -469,18 +505,28 @@ final class Hpack
 
             $nameIndex = self::$staticNameIndex[$name] ?? null;
             if ($nameIndex !== null) {
-                $out .= $this->writeInteger($nameIndex, 4, $prefix);
+                $hc = $this->writeInteger($nameIndex, 4, $prefix) . $this->writeString($value);
             } else {
-                $out .= chr($prefix) . $this->writeString($name);
+                $hc = chr($prefix) . $this->writeString($name) . $this->writeString($value);
             }
-
-            $out .= $this->writeString($value);
+            $this->storeHeader($name, $value, $hc);
+            $out .= $hc;
         }
 
         return $out;
     }
 
-    /** 变长整数编码（RFC 7541 §5.1），$flags 为首字节的高位标志 */
+    /**
+     * 写入整头缓存（达到上限后停止，避免内存增长）。
+     */
+    private function storeHeader(string $name, string $value, string $hc): void
+    {
+        if (self::$headerCacheCount < self::HEADER_CACHE_LIMIT) {
+            self::$headerCache[$name][$value] = $hc;
+            self::$headerCacheCount++;
+        }
+    }
+
     private function writeInteger(int $value, int $prefixBits, int $flags): string
     {
         $mask = (1 << $prefixBits) - 1;
@@ -725,7 +771,7 @@ final class Hpack
         $pairs = [];
         $names = [];
         foreach (self::STATIC_TABLE as $index => [$name, $value]) {
-            $pairs[$name . "\0" . $value] = $index;
+            $pairs[$name][$value] = $index;
             if (!isset($names[$name])) {
                 $names[$name] = $index;
             }

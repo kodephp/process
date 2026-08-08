@@ -46,7 +46,7 @@ $typicalHeaders = [
     'content-length' => '13',
     'cache-control'  => 'no-cache',
     'date'           => 'Mon, 08 Aug 2026 00:00:00 GMT',
-    'server'         => 'kode/5.2.6',
+    'server'         => 'kode/5.2.7',
 ];
 $body = 'Hello, Kode!';
 

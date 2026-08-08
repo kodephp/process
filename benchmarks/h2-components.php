@@ -19,7 +19,7 @@ $reqBlock = $enc->encode([
 $respBlock = $enc->encode([
     [':status', '200'],
     ['content-type', 'text/html; charset=utf-8'], ['content-length', '13'],
-    ['cache-control', 'no-cache'], ['date', 'Mon, 08 Aug 2026 00:00:00 GMT'], ['server', 'kode/5.2.6'],
+    ['cache-control', 'no-cache'], ['date', 'Mon, 08 Aug 2026 00:00:00 GMT'], ['server', 'kode/5.2.7'],
 ]);
 
 // 1) Frame::decode（单帧）
@@ -49,7 +49,7 @@ $t = hrtime(true);
 $list = [
     [':status', '200'],
     ['content-type', 'text/html; charset=utf-8'], ['content-length', '13'],
-    ['cache-control', 'no-cache'], ['date', 'Mon, 08 Aug 2026 00:00:00 GMT'], ['server', 'kode/5.2.6'],
+    ['cache-control', 'no-cache'], ['date', 'Mon, 08 Aug 2026 00:00:00 GMT'], ['server', 'kode/5.2.7'],
 ];
 for ($i = 0; $i < $n; $i++) {
     $enc->encode($list);

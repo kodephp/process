@@ -400,4 +400,67 @@ final class HpackTest extends TestCase
 
         Hpack::clearHuffmanCache();
     }
+
+    /**
+     * 整头缓存命中与冷启动产出逐字节一致；清空后重算仍一致（纯函数缓存不影响线格式）。
+     */
+    public function testHeaderCacheProducesIdenticalWireFormat(): void
+    {
+        $headers = [
+            [':status', '200'], ['content-type', 'text/html; charset=utf-8'],
+            ['cache-control', 'no-cache'], ['server', 'kode/5.2.6'],
+        ];
+
+        Hpack::clearHeaderCache();
+
+        $first = (new Hpack())->encode($headers);          // 冷启动，逐头实算并写入整头缓存
+        $second = (new Hpack())->encode($headers);         // 命中整头缓存
+        $this->assertSame($first, $second, '整头缓存命中与冷启动字节一致');
+
+        Hpack::clearHeaderCache();
+        $third = (new Hpack())->encode($headers);          // 清空后走静态表 + 字面量路径
+        $this->assertSame($first, $third, '清空整头缓存后重算结果一致');
+        $this->assertSame($headers, (new Hpack())->decode($first));
+
+        Hpack::clearHeaderCache();
+    }
+
+    /**
+     * 同名不同值的头不得相互污染：整头缓存以 (name, value) 为键，逐头独立。
+     */
+    public function testHeaderCacheDoesNotCollideOnSameName(): void
+    {
+        Hpack::clearHeaderCache();
+
+        $a = (new Hpack())->encode([['x-dup', 'alpha']]);
+        $b = (new Hpack())->encode([['x-dup', 'beta']]);
+        $this->assertNotSame($a, $b, '同名不同值应编码为不同字节');
+        $this->assertSame([['x-dup', 'alpha']], (new Hpack())->decode($a));
+        $this->assertSame([['x-dup', 'beta']], (new Hpack())->decode($b));
+
+        Hpack::clearHeaderCache();
+    }
+
+    /**
+     * 整头缓存达到上限后停止写入（与 literalCache 对称），避免内存增长。
+     */
+    public function testHeaderCacheIsBounded(): void
+    {
+        Hpack::clearHeaderCache();
+
+        for ($i = 0; $i < 5000; $i++) {
+            (new Hpack())->encode([['x-uniq', 'value-' . $i]]);
+        }
+
+        $prop = (new \ReflectionClass(Hpack::class))->getProperty('headerCache');
+        $prop->setAccessible(true);
+        $cache = $prop->getValue();
+        $entries = 0;
+        foreach ($cache as $byValue) {
+            $entries += count($byValue);
+        }
+        $this->assertLessThanOrEqual(1024, $entries, '整头缓存不得超过上限');
+
+        Hpack::clearHeaderCache();
+    }
 }
