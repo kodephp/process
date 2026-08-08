@@ -145,6 +145,21 @@ final class Http2Session
 
     private const int RESPONSE_BLOCK_CACHE_LIMIT = 256;
 
+    /**
+     * 「还有字节没发完」的流索引，供 {@see flushPending()} 定向遍历。
+     *
+     * WINDOW_UPDATE 在大响应场景下极其密集，每收到一个就把全部活跃流扫一遍的话，
+     * 代价随并发流数线性上涨（实测 128 流时每次 2.5µs，且绝大多数流无事可做）。
+     * 索引让空闲连接上的 flushPending 退化成一次空循环。
+     *
+     * 不变式：`$streamId ∈ pendingStreams` ⟺ 该流 `pending !== ''`
+     * 或仍欠一个 END_STREAM。写入点只有 {@see respond()} / {@see writeData()}，
+     * 摘除点只有 {@see flushPending()} 收尾与 {@see freeStream()}。
+     *
+     * @var array<int, true>
+     */
+    private array $pendingStreams = [];
+
     private int $lastStreamId = 0;
 
     private int $highestClientStream = 0;
@@ -933,6 +948,7 @@ final class Http2Session
         if ($body !== '') {
             $this->streams[$streamId]['pending']         = $body;
             $this->streams[$streamId]['endAfterPending'] = true;
+            $this->pendingStreams[$streamId]             = true;
             $this->flushPending();
         }
 
@@ -970,6 +986,7 @@ final class Http2Session
         if ($end) {
             $this->streams[$streamId]['endAfterPending'] = true;
         }
+        $this->pendingStreams[$streamId] = true;
         $this->flushPending();
 
         return true;
@@ -1080,34 +1097,50 @@ final class Http2Session
 
     /**
      * 在双层窗口允许的范围内把各流的待发数据切成 DATA 帧写出。
+     *
+     * 两处刻意的写法，都是为了让大响应不退化成平方复杂度 / 全表扫描：
+     *
+     * 1. **游标而非重切**。切帧时若每帧都 `$pending = substr($pending, $n)`，
+     *    每次都要复制一整份剩余响应体：1MB 响应按 16KB 切要复制 ≈32MB，
+     *    耗时随体积平方增长。这里改为在原串上推进整数 `$offset`，循环内只
+     *    复制真正要发出去的那一片，收尾时才按最终位置切一次。
+     * 2. **只扫有待发数据的流**。WINDOW_UPDATE 会频繁触发本方法，若每次都
+     *    遍历全部活跃流，代价随并发流数线性上涨；`$pendingStreams` 是这些
+     *    流的索引，空闲连接下这里就是一次空循环。
      */
     private function flushPending(): void
     {
-        foreach ($this->streams as $streamId => $stream) {
-            if ($stream['pending'] === '' && !$stream['endAfterPending']) {
+        // 迭代的是按值取到的快照，循环体内增删 $this->pendingStreams 不影响本次遍历
+        foreach ($this->pendingStreams as $streamId => $_) {
+            if (!isset($this->streams[$streamId])) {
+                unset($this->pendingStreams[$streamId]);
                 continue;
             }
 
+            $pending = $this->streams[$streamId]['pending'];
+            $total   = strlen($pending);
+            $offset  = 0;
+
             $endStreamSent = false;
 
-            while ($this->streams[$streamId]['pending'] !== '') {
+            while ($offset < $total) {
                 $allowed = min(
                     $this->sendWindow,
                     $this->streams[$streamId]['sendWindow'],
                     $this->peerMaxFrameSize,
-                    strlen($this->streams[$streamId]['pending'])
+                    $total - $offset
                 );
                 if ($allowed <= 0) {
                     break; // 窗口耗尽，等待对端 WINDOW_UPDATE
                 }
 
-                $piece                                   = substr($this->streams[$streamId]['pending'], 0, $allowed);
-                $this->streams[$streamId]['pending']     = substr($this->streams[$streamId]['pending'], $allowed);
+                $piece   = substr($pending, $offset, $allowed);
+                $offset += $allowed;
+
                 $this->sendWindow                       -= $allowed;
                 $this->streams[$streamId]['sendWindow'] -= $allowed;
 
-                $last = $this->streams[$streamId]['pending'] === ''
-                    && $this->streams[$streamId]['endAfterPending'];
+                $last = $offset >= $total && $this->streams[$streamId]['endAfterPending'];
 
                 $this->outBuffer .= Frame::encode(
                     Frame::TYPE_DATA,
@@ -1119,6 +1152,14 @@ final class Http2Session
                 $endStreamSent = $endStreamSent || $last;
             }
 
+            // 整轮只回写一次：全部发完置空，发了一部分才切出剩余尾巴
+            if ($offset > 0) {
+                $this->streams[$streamId]['pending'] = $offset >= $total
+                    ? ''
+                    : substr($pending, $offset);
+            }
+            unset($pending);
+
             if ($this->streams[$streamId]['pending'] === '' && $this->streams[$streamId]['endAfterPending']) {
                 // 待发数据已排空（或本就为空，例如 endChunk() 收尾时），此时若还没有
                 // 任何一帧携带过 END_STREAM，必须补一个空 DATA 帧把流关掉——
@@ -1126,7 +1167,12 @@ final class Http2Session
                 if (!$endStreamSent) {
                     $this->outBuffer .= Frame::encode(Frame::TYPE_DATA, Frame::FLAG_END_STREAM, $streamId, '');
                 }
-                $this->closeStream($streamId);
+                $this->closeStream($streamId); // 内部 freeStream() 会摘掉索引
+            }
+
+            // 排空且不需要收尾的流退出索引；窗口耗尽仍有余量的留在索引里等下一次
+            if (!isset($this->streams[$streamId]) || $this->streams[$streamId]['pending'] === '') {
+                unset($this->pendingStreams[$streamId]);
             }
         }
     }
@@ -1165,6 +1211,9 @@ final class Http2Session
      */
     private function freeStream(int $streamId): void
     {
+        // 流一旦消失就没有「待发」可言，索引在这里统一摘除（RST / GOAWAY 等路径同样收敛于此）
+        unset($this->pendingStreams[$streamId]);
+
         if (isset($this->streams[$streamId])) {
             if (count($this->streamPool) < self::STREAM_POOL_LIMIT) {
                 $this->streamPool[] = $this->streams[$streamId];
@@ -1228,6 +1277,8 @@ final class Http2Session
     {
         return [
             'streams'        => count($this->streams),
+            // 被发送窗口卡住、还有字节没发完的流数；持续不降说明对端不回补窗口
+            'pending_streams' => count($this->pendingStreams),
             'last_stream'    => $this->lastStreamId,
             'send_window'    => $this->sendWindow,
             'recv_window'    => $this->recvWindow,

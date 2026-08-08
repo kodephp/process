@@ -975,4 +975,189 @@ final class Http2SessionTest extends TestCase
         $settings = Frame::decodeSettings($frame['payload']);
         $this->assertSame(8192, $settings[Frame::SETTINGS_MAX_HEADER_LIST_SIZE] ?? null);
     }
+
+    // ------------------------------------------------- 待发流索引（flushPending）
+
+    /**
+     * 把 drain 出来的 DATA 负载按流拼回去，顺带断言 END_STREAM 只出现一次。
+     *
+     * @return array{body: string, ended: bool}
+     */
+    private static function collectData(string $out, int $streamId): array
+    {
+        $offset = 0;
+        $body   = '';
+        $ended  = 0;
+        while (($f = Frame::decode($out, $offset, Frame::MAX_MAX_FRAME_SIZE)) !== null) {
+            if ($f['type'] === Frame::TYPE_DATA && $f['stream'] === $streamId) {
+                $body .= $f['payload'];
+                if (($f['flags'] & Frame::FLAG_END_STREAM) !== 0) {
+                    $ended++;
+                }
+            }
+            $offset += $f['size'];
+        }
+
+        self::assertLessThanOrEqual(1, $ended, 'END_STREAM 不得重复发送');
+
+        return ['body' => $body, 'ended' => $ended === 1];
+    }
+
+    /** 打开一条流并清空自动帧 */
+    private function openStream(Http2Session $session, int $streamId): void
+    {
+        $this->handshake($session);
+        $session->feed($this->headersFrame(
+            $streamId,
+            self::getHeaders(),
+            Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM
+        ));
+        $session->drain();
+    }
+
+    /**
+     * 发送窗口卡住时，未发完的流必须留在待发索引里；窗口回补后续发完毕、
+     * 索引清空，且分批发出的字节拼回来与原始响应体逐字节一致。
+     */
+    public function testPendingStreamIsTrackedUntilWindowAllowsFullFlush(): void
+    {
+        $session = new Http2Session();
+        $this->openStream($session, 1);
+
+        // 对端默认发送窗口 65535，响应体远大于它 → 必然发不完
+        $body = str_repeat('z', 200000);
+        $session->respond(1, 200, ['content-type' => 'text/plain'], $body);
+
+        $seen = self::collectData($session->drain(), 1)['body'];
+        $this->assertSame(65535, strlen($seen), '首轮只能发满一个发送窗口');
+        $this->assertSame(1, $session->stats()['pending_streams'], '未发完的流必须留在待发索引');
+        $this->assertSame(0, $session->stats()['send_window']);
+
+        // 分多次回补窗口，逐段续发
+        $ended = false;
+        for ($i = 0; $i < 10; $i++) {
+            $session->feed(Frame::windowUpdate(0, 20000));
+            $session->feed(Frame::windowUpdate(1, 20000));
+            $chunk = self::collectData($session->drain(), 1);
+            $seen .= $chunk['body'];
+            $ended = $ended || $chunk['ended'];
+        }
+
+        $this->assertSame($body, $seen, '分批续发拼回来必须与原始响应体一致');
+        $this->assertTrue($ended, '发完后必须带上 END_STREAM');
+        $this->assertSame(0, $session->stats()['pending_streams'], '发完即退出待发索引');
+        $this->assertSame(0, $session->stats()['streams'], '流已关闭回收');
+    }
+
+    /** 发送途中被 RST_STREAM 打断：索引摘除，之后回补窗口不得再吐该流的数据 */
+    public function testResetDuringSendClearsPendingStreamIndex(): void
+    {
+        $session = new Http2Session();
+        $this->openStream($session, 1);
+
+        $session->respond(1, 200, [], str_repeat('q', 200000));
+        $session->drain();
+        $this->assertSame(1, $session->stats()['pending_streams']);
+
+        $session->feed(Frame::rstStream(1, Frame::ERROR_CANCEL));
+        $this->assertSame(0, $session->stats()['pending_streams'], 'RST 后待发索引必须摘除');
+        $this->assertSame(0, $session->stats()['streams']);
+
+        $session->drain();
+        $session->feed(Frame::windowUpdate(0, 500000));
+        $this->assertSame('', self::collectData($session->drain(), 1)['body'], '已重置的流不得再发数据');
+    }
+
+    /** 空闲连接（没有任何待发数据）收到 WINDOW_UPDATE 时不应产生任何输出 */
+    public function testWindowUpdateOnIdleSessionProducesNoOutput(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+        for ($id = 1; $id <= 9; $id += 2) {
+            $session->feed($this->headersFrame($id, self::getHeaders(), Frame::FLAG_END_HEADERS));
+        }
+        $session->drain();
+
+        $session->feed(Frame::windowUpdate(0, 1024));
+        $this->assertSame('', $session->drain(), '无待发数据时 WINDOW_UPDATE 不应触发任何帧');
+        $this->assertSame(0, $session->stats()['pending_streams']);
+    }
+
+    /** 多流并发发送：各流数据互不串扰，窗口回补后都能完整送达 */
+    public function testConcurrentStreamsFlushIndependently(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $bodies = [];
+        for ($id = 1; $id <= 5; $id += 2) {
+            $session->feed($this->headersFrame(
+                $id,
+                self::getHeaders('/s' . $id),
+                Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM
+            ));
+            $bodies[$id] = str_repeat((string) $id, 90000);
+        }
+        $session->drain();
+
+        foreach ($bodies as $id => $body) {
+            $session->respond($id, 200, [], $body);
+        }
+
+        $seen = [1 => '', 3 => '', 5 => ''];
+        $out  = $session->drain();
+        foreach ($seen as $id => $_) {
+            $seen[$id] = self::collectData($out, $id)['body'];
+        }
+
+        $this->assertSame(3, $session->stats()['pending_streams']);
+
+        for ($r = 0; $r < 12; $r++) {
+            $session->feed(Frame::windowUpdate(0, 40000));
+            foreach ($bodies as $id => $_) {
+                $session->feed(Frame::windowUpdate($id, 40000));
+            }
+            $out = $session->drain();
+            foreach ($bodies as $id => $_) {
+                $seen[$id] .= self::collectData($out, $id)['body'];
+            }
+        }
+
+        foreach ($bodies as $id => $body) {
+            $this->assertSame($body, $seen[$id], "流 {$id} 的响应体必须完整且不串流");
+        }
+        $this->assertSame(0, $session->stats()['pending_streams']);
+    }
+
+    /** writeData 流式分片同样走待发索引：中途空片、末片带 end 都要正确收口 */
+    public function testStreamingWriteDataTracksPendingIndex(): void
+    {
+        $session = new Http2Session();
+        $this->openStream($session, 1);
+
+        $session->respondHeaders(1, 200, ['x-stream' => 'on']);
+        $expected = '';
+        $seen     = '';
+
+        for ($i = 0; $i < 6; $i++) {
+            $chunk     = str_repeat(chr(97 + $i), 20000);
+            $expected .= $chunk;
+            $session->writeData(1, $chunk);
+            $seen .= self::collectData($session->drain(), 1)['body'];
+
+            $session->feed(Frame::windowUpdate(0, 20000));
+            $session->feed(Frame::windowUpdate(1, 20000));
+            $seen .= self::collectData($session->drain(), 1)['body'];
+        }
+
+        $session->writeData(1, '');                 // 空片不应改变任何东西
+        $session->writeData(1, 'tail', true);
+        $last  = self::collectData($session->drain(), 1);
+        $seen .= $last['body'];
+
+        $this->assertSame($expected . 'tail', $seen);
+        $this->assertTrue($last['ended'], '末片必须带 END_STREAM');
+        $this->assertSame(0, $session->stats()['pending_streams']);
+        $this->assertSame(0, $session->stats()['streams']);
+    }
 }

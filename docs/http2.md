@@ -283,7 +283,58 @@ HTTP/2 每请求都强制走 HPACK 编解码，编码 / 解码是请求热路径
 `Hpack::$headerCache` 的键为嵌套数组 `(name => value => bytes)`（非拼接字符串），
 **同名不同值的头不会串**；达到上限后停止写入（`storeHeader`），不增长内存。正确性由
 「RFC 7541 附录 C 全部向量 + 增量索引 + 4000 组随机头 fuzz + 同名异值不串」全量验证，
-全量 760 测试 / 9170 断言 / 1 skipped 全绿。
+全量 765 测试 / 9320 断言 / 1 skipped 全绿。
+
+## 大响应发送路径设计（线性切帧 + 待发流索引）
+
+头部编解码优化到 v5.2.7 已趋收敛，但真实服务的大头（几百 KB 的 JSON / 静态资源）在**响应体发送**侧。
+`Http2Session::flushPending()` 负责把响应体按对端 `SETTINGS_MAX_FRAME_SIZE` 切成 DATA 帧，
+并受连接级 + 流级双层发送窗口约束。这条路径上曾有两处复杂度陷阱，v5.2.8 一并消除：
+
+**1. 逐帧重切 → 平方复杂度。** 早期写法每发一帧就 `$pending = substr($pending, $n)`，
+等于**每帧都复制一整份剩余响应体**。1MB 响应按 16KB 切要发 64 帧，累计复制 ≈32MB，
+耗时随响应体积平方增长。现改为在原串上推进整数游标 `$offset`：
+
+```php
+$pending = $this->streams[$id]['pending'];
+$total   = strlen($pending);
+$offset  = 0;
+
+while ($offset < $total) {
+    $allowed = min($this->sendWindow, $stream['sendWindow'], $this->peerMaxFrameSize, $total - $offset);
+    if ($allowed <= 0) {
+        break;              // 窗口耗尽，留待 WINDOW_UPDATE 后续发
+    }
+    $piece   = substr($pending, $offset, $allowed);   // 只复制真正要发的那一片
+    $offset += $allowed;
+    // ... 编码 DATA 帧
+}
+
+// 整轮只回写一次
+if ($offset > 0) {
+    $this->streams[$id]['pending'] = $offset >= $total ? '' : substr($pending, $offset);
+}
+```
+
+**2. 全流扫描 → 随并发流数线性上涨。** `flushPending()` 由 `WINDOW_UPDATE` 高频触发，
+而它原先遍历全部活跃流。128 条流时每次 `WINDOW_UPDATE` 要花 2.5µs，且绝大多数流无事可做。
+现引入 `$pendingStreams`（`array<int, true>`）只索引「还有字节没发完」的流：
+
+- **不变式**：`$id ∈ pendingStreams` ⟺ 该流 `pending !== ''` 或仍欠一个 `END_STREAM`。
+- **写入点**只有 `respond()` / `writeData()`；**摘除点**只有 `flushPending()` 收尾与 `freeStream()`。
+  RST_STREAM、GOAWAY、正常关闭等所有销毁路径都收敛于 `freeStream()`，索引不会泄漏。
+- 空闲连接上 `flushPending()` 退化为一次空循环，耗时与活跃流数**无关**（恒 0.5µs）。
+
+`stats()` 新增 `pending_streams` 字段暴露被发送窗口卡住的流数——持续不降即说明对端不回补窗口。
+
+收益（详见 [压测数据](benchmark.md) §3.6 / §5.3）：微基准上 `respond(1MB)` **4.15×**、
+`WINDOW_UPDATE @128 流` **5.4×**；真实 h2c 压测下 1MB 响应端到端吞吐 **2.73×**、
+延迟中位数 **−67%**，256KB 响应 **1.33×**，两者内存峰值增长均为 0。
+
+正确性保证与 HPACK 缓存同源——**线格式逐字节不变**：`benchmarks/h2-flush-equiv.php`
+覆盖窗口耗尽续发、流式分片、多流交错、发送中途 RST、对端不同 `MAX_FRAME_SIZE` 等
+247 组场景，新旧实现 drain 出的字节 SHA-256 全部相同；另有 5 个单测锁死索引不变式，
+并经变异测试（人为破坏摘除 / 写入点）验证用例确实能捕获回归。
 
 ## 相关文档
 
