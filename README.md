@@ -31,6 +31,9 @@ Kode Process 是一个「进程编排内核 + 多运行时兼容层」：你只�
 | 🔁 **统一事件循环** | `Kode::loop()` 基于 `ext-event` / `ext-ev` 加速，`stream_select` 零扩展兜底 |
 | 🌐 **多协议** | HTTP、WebSocket、TCP、Text、Unix Socket、SSL（UDP 取决于宿主运行时） |
 | 🚀 **HTTP/2（h2c）** | Native 内置，默认开启、与 HTTP/1.1 同端口自动协商；多路复用 + HPACK + 流控，业务 handler 零改动 |
+| 🗜️ **HTTP gzip 压缩** | 依据 `Accept-Encoding` 透明压缩（阈值 1KB），业务零改动；也支持显式 `gzip()` API |
+| 🌊 **HTTP chunked 流式响应** | `Transfer-Encoding: chunked` 跨运行时统一 API；HTTP/2 下由 DATA 帧天然承载 |
+| 🛡️ **HTTP/2 安全防护** | CONTINUATION 洪泛防护 + MAX_HEADER_LIST_SIZE 解压后体积上限（RFC 7540 §6.5.2），流级拒绝不拖垮连接 |
 | 🗄️ **共享数据（零安装兜底）** | 同主机多进程共享表，apcu → sysvshm 自动择优；也可复用 Swoole/Workerman 表 |
 | 🕸️ **分布式集群** | 服务发现、分布式锁、Leader 选举、负载均衡（5 策略）、分布式 ID(Snowflake)、限流、集群 RPC；可零依赖（包内 GlobalData）或基于 Redis |
 | 🧵 **多线程并行** | 真正的 CPU 多线程（需 ZTS + ext-parallel），与协程桥接 |

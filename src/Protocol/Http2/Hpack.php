@@ -507,13 +507,14 @@ final class Hpack
     /**
      * Huffman 解码（RFC 7541 附录 B）。
      *
-     * 常见字符（码长 ≤ 8 位，覆盖小写字母 / 数字 / 常用符号）走 8 位窗口查表一次命中；
-     * 长码回退到按长度分组查找。末尾不足 8 位的填充必须全为 1，否则视为非法。
+     * 热路径（剩余位数 ≥ 8）走 8 位窗口查表一次命中；长码前缀（8 位窗口不在快表中）
+     * 交给 {@see decodeLong}；末尾不足 8 位的填充必须全为 1，否则视为非法。
+     * 高频字符（小写字母 / 数字 / 常用符号）码长 ≤ 8 位，全程命中快表。
      */
     public static function huffmanDecode(string $data): string
     {
         self::bootTables();
-
+        $fast    = self::$huffFast;
         $out     = '';
         $cur     = 0;
         $curBits = 0;
@@ -523,23 +524,15 @@ final class Hpack
             $cur      = ($cur << 8) | ord($data[$i]);
             $curBits += 8;
 
-            while ($curBits > 0) {
-                // 构造 8 位窗口：位数不足时右侧补 1（与 RFC 规定的尾部填充一致），
-                // 只有当命中码长 ≤ 剩余位数时才真正消费，填充位永远不会被误当作数据。
-                // EOS 码长 30，不可能落进本表，无需在此判 EOS。
-                $window = $curBits >= 8
-                    ? ($cur >> ($curBits - 8)) & 0xFF
-                    : (($cur << (8 - $curBits)) | ((1 << (8 - $curBits)) - 1)) & 0xFF;
-
-                $hit = self::$huffFast[$window];
+            // 热路径：curBits ≥ 8 时窗口必为 8 位，无需右侧补 1，命中码长必 ≤ curBits
+            while ($curBits >= 8) {
+                $window = ($cur >> ($curBits - 8)) & 0xFF;
+                $hit    = $fast[$window];
 
                 if ($hit !== null) {
-                    if ($hit[1] > $curBits) {
-                        break; // 剩余位不足以构成该符号 → 是尾部填充
-                    }
                     $out     .= chr($hit[0]);
                     $curBits -= $hit[1];
-                    $cur     &= (1 << $curBits) - 1; // 必须丢弃已消费的高位，否则下轮窗口错位
+                    $cur     &= (1 << $curBits) - 1;
                     continue;
                 }
 
@@ -549,7 +542,23 @@ final class Hpack
             }
         }
 
-        // 收尾：剩余不足 8 位只能是全 1 填充
+        // 收尾：剩余 < 8 位，构造补 1 的 8 位窗口（与 RFC 尾部填充一致）
+        while ($curBits > 0) {
+            $window = (($cur << (8 - $curBits)) | ((1 << (8 - $curBits)) - 1)) & 0xFF;
+            $hit    = $fast[$window];
+
+            if ($hit !== null && $hit[1] <= $curBits) {
+                $out     .= chr($hit[0]);
+                $curBits -= $hit[1];
+                $cur     &= (1 << $curBits) - 1;
+                continue;
+            }
+
+            if (!self::decodeLong($cur, $curBits, $out)) {
+                break;
+            }
+        }
+
         if ($curBits > 0) {
             if ($curBits > 7) {
                 throw Http2Exception::compression('Huffman 码字截断');
