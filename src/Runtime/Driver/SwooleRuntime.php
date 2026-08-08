@@ -155,8 +155,12 @@ final class SwooleRuntime extends AbstractRuntime
 
         if ($scheme === 'http') {
             $server->on('request', function (object $req, object $resp) use ($server): void {
-                $fd = (int)($req->fd ?? 0);
-                $this->fire('message', new SwooleConnection($server, $fd, $resp), $req);
+                $fd   = (int)($req->fd ?? 0);
+                $conn = new SwooleConnection($server, $fd, $resp);
+                $this->fire('message', $conn, $req);
+                if ($conn->isChunkStarted()) {
+                    $conn->endChunk();
+                }
             });
             return;
         }

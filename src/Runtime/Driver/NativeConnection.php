@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Kode\Process\Runtime\Driver;
 
+use Kode\Process\Protocol\HttpProtocol;
 use Kode\Process\Reactor\LoopInterface;
 use Kode\Process\Runtime\ConnectionInterface;
 
@@ -48,6 +49,11 @@ final class NativeConnection implements ConnectionInterface
     private bool $writeWatched = false;
 
     private bool $bufferOverflow = false;
+
+    // HTTP chunked 流式状态（仅 http 连接使用）
+    private bool $httpChunkStarted = false;
+
+    private bool $httpChunkEnded = false;
 
     // WebSocket 分片重组缓冲（RFC 6455 §5.4），仅 websocket 连接使用
     private string $wsFragmentBuffer = '';
@@ -105,6 +111,64 @@ final class NativeConnection implements ConnectionInterface
     public function sendRaw(string $data): bool
     {
         return $this->closed ? false : $this->write($data);
+    }
+
+    // ------------------------------------------------------- HTTP 分块流式
+
+    public function isChunkStarted(): bool
+    {
+        return $this->httpChunkStarted;
+    }
+
+    public function beginChunked(int $status = 200, array $headers = []): bool
+    {
+        if ($this->closed || $this->httpChunkStarted) {
+            return false;
+        }
+        if (!$this->write(HttpProtocol::beginChunked($status, $headers))) {
+            return false;
+        }
+        $this->httpChunkStarted = true;
+        return true;
+    }
+
+    public function chunk(string $data): bool
+    {
+        if ($this->closed) {
+            return false;
+        }
+
+        // 非 HTTP 连接：降级为普通发送，保持跨运行时语义一致
+        if ($this->protocolClass !== HttpProtocol::class) {
+            return $this->send($data);
+        }
+
+        if (!$this->httpChunkStarted) {
+            if (!$this->write(HttpProtocol::beginChunked())) {
+                return false;
+            }
+            $this->httpChunkStarted = true;
+        }
+
+        $frame = HttpProtocol::chunkFrame($data);
+        if ($frame === '') {
+            return true; // 空块不发送，但流式已开启
+        }
+
+        return $this->write($frame);
+    }
+
+    public function endChunk(): bool
+    {
+        if (!$this->httpChunkStarted || $this->httpChunkEnded) {
+            return !$this->closed;
+        }
+        if (!$this->write(HttpProtocol::chunkEnd())) {
+            return false;
+        }
+        $this->httpChunkEnded   = true;
+        $this->httpChunkStarted = false;
+        return true;
     }
 
     /**
@@ -232,6 +296,8 @@ final class NativeConnection implements ConnectionInterface
         }
         $this->closed = true;
         $this->unwatchWritable();
+        $this->httpChunkStarted = false;
+        $this->httpChunkEnded   = false;
 
         // UDP 复用服务端套接字，不能在单个报文结束时关闭
         if ($this->udpPeer === null && is_resource($this->socket)) {

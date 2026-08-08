@@ -556,6 +556,108 @@ PHP;
         return $file;
     }
 
+    /**
+     * HTTP chunked 流式：真实起 Native HTTP 服务，handler 分 3 块写响应，
+     * 验证客户端收到的为完整 Transfer-Encoding: chunked 报文且重组后 body 完整。
+     */
+    public function testNativeHttpChunkedStreaming(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port   = $this->findFreePort();
+        $script = $this->writeChunkedServerScript($port);
+        $proc   = proc_open([PHP_BINARY, $script, (string)$port], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native 服务器子进程');
+
+        $this->waitForPort($port, 4.0);
+
+        try {
+            $fp = @fsockopen('127.0.0.1', $port, $errno, $errstr, 2.0);
+            $this->assertNotFalse($fp, "连接失败: {$errstr} ({$errno})");
+
+            fwrite($fp, "GET /stream HTTP/1.1\r\nHost: localhost\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n");
+
+            // 读到 chunked 终止块为止
+            $buf = '';
+            while (!str_contains($buf, "0\r\n\r\n")) {
+                $c = @fread($fp, 8192);
+                if ($c === '' || $c === false) {
+                    break;
+                }
+                $buf .= $c;
+            }
+
+            $this->assertStringContainsString("Transfer-Encoding: chunked", $buf);
+            $this->assertStringContainsString("Content-Type: text/plain", $buf);
+
+            $body = $this->decodeChunkedBody($buf);
+            $this->assertSame('part1-part2-part3', $body);
+
+            fclose($fp);
+        } finally {
+            $status = proc_get_status($proc);
+            $pid = $status['pid'] ?? null;
+            if ($pid !== null && $pid > 0) {
+                @posix_kill($pid, SIGTERM);
+                usleep(300_000);
+                $still = proc_get_status($proc);
+                if ($still['running']) {
+                    @posix_kill($pid, SIGKILL);
+                }
+            }
+            proc_close($proc);
+            @unlink($script);
+        }
+    }
+
+    private function writeChunkedServerScript(int $port): string
+    {
+        $autoload = realpath(__DIR__ . '/../vendor/autoload.php');
+        $code = <<<PHP
+<?php
+require '{$autoload}';
+use Kode\\Process\\Kode;
+
+Kode::serve('http://127.0.0.1:{$port}', ['workers' => 1], 'native')
+    ->on('message', function (\$conn, \$req): void {
+        \$conn->beginChunked(200, ['Content-Type' => 'text/plain']);
+        \$conn->chunk('part1-');
+        \$conn->chunk('part2-');
+        \$conn->chunk('part3');
+    })
+    ->start();
+PHP;
+        $file = tempnam(sys_get_temp_dir(), 'kode_chunk_');
+        file_put_contents($file, $code);
+        return $file;
+    }
+
+    private function decodeChunkedBody(string $buf): string
+    {
+        $pos     = strpos($buf, "\r\n\r\n");
+        $chunked = substr($buf, $pos + 4);
+
+        $body = '';
+        $i    = 0;
+        $len  = strlen($chunked);
+        while ($i < $len) {
+            $lineEnd = strpos($chunked, "\r\n", $i);
+            if ($lineEnd === false) {
+                break;
+            }
+            $size = hexdec(substr($chunked, $i, $lineEnd - $i));
+            if ($size === 0) {
+                break;
+            }
+            $start = $lineEnd + 2;
+            $body .= substr($chunked, $start, $size);
+            $i     = $start + $size + 2;
+        }
+        return $body;
+    }
+
     private function invokeProtected(string $class, string $method, array $args): mixed
     {
         return $this->invokeMethod($class, $method, $args, false);

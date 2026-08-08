@@ -73,4 +73,52 @@ final class NativeConnectionTest extends TestCase
         $this->assertSame('', $msg['data']);
         $this->assertFalse($conn->isFragmenting());
     }
+
+    // ----------------------------------------------------- HTTP 分块流式
+
+    private function makeHttpConn(): NativeConnection
+    {
+        $sock = fopen('php://memory', 'r+');
+        return new NativeConnection($sock, '127.0.0.1:1', \Kode\Process\Protocol\HttpProtocol::class);
+    }
+
+    public function testChunkLifecycleOnHttpConn(): void
+    {
+        $conn = $this->makeHttpConn();
+        $this->assertFalse($conn->isChunkStarted());
+
+        $this->assertTrue($conn->beginChunked(200, ['Content-Type' => 'text/plain']));
+        $this->assertTrue($conn->isChunkStarted());
+
+        $this->assertTrue($conn->chunk('foo'));
+        $this->assertTrue($conn->chunk('bar'));
+
+        $this->assertTrue($conn->endChunk());
+        $this->assertFalse($conn->isChunkStarted(), 'endChunk 后应复位');
+    }
+
+    public function testChunkAutoStartsWithDefaultHeader(): void
+    {
+        $conn = $this->makeHttpConn();
+        $this->assertTrue($conn->chunk('hello'));
+        $this->assertTrue($conn->isChunkStarted());
+        $this->assertTrue($conn->endChunk());
+    }
+
+    public function testChunkOnNonHttpConnFallsBackToSend(): void
+    {
+        // protocolClass 为 null（裸 TCP）：chunk 应降级为普通 send，不进入 chunked 模式
+        $conn = $this->makeConn();
+        $this->assertTrue($conn->chunk('raw-data'));
+        $this->assertFalse($conn->isChunkStarted());
+    }
+
+    public function testCloseResetsChunkState(): void
+    {
+        $conn = $this->makeHttpConn();
+        $conn->chunk('x');
+        $this->assertTrue($conn->isChunkStarted());
+        $conn->close();
+        $this->assertFalse($conn->isChunkStarted());
+    }
 }

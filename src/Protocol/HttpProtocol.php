@@ -260,4 +260,42 @@ final class HttpProtocol implements ProtocolInterface
     {
         return self::STATUS_TEXTS[$status] ?? 'Unknown';
     }
+
+    /**
+     * 生成 chunked 响应的头部块（状态行 + Transfer-Encoding: chunked + 自定义头）。
+     *
+     * @param array<string, string> $headers 自定义响应头；未给 Content-Type 时补默认 text/html
+     */
+    public static function beginChunked(int $status = 200, array $headers = []): string
+    {
+        $headers['Transfer-Encoding'] = 'chunked';
+        if (!isset($headers['Content-Type'])) {
+            $headers['Content-Type'] = 'text/html; charset=utf-8';
+        }
+
+        $resp = 'HTTP/1.1 ' . $status . ' ' . self::getStatusText($status) . self::HEADER_EOF;
+        foreach ($headers as $name => $value) {
+            $resp .= $name . ': ' . $value . self::HEADER_EOF;
+        }
+
+        return $resp . self::HEADER_EOF;
+    }
+
+    /**
+     * 生成单个 chunk 帧（不含终止块）。空数据返回空串，交由调用方决定是否发送。
+     */
+    public static function chunkFrame(string $data): string
+    {
+        if ($data === '') {
+            return '';
+        }
+
+        return dechex(strlen($data)) . self::HEADER_EOF . $data . self::HEADER_EOF;
+    }
+
+    /** chunked 终止块（0\r\n\r\n） */
+    public static function chunkEnd(): string
+    {
+        return '0' . self::HEADER_EOF . self::HEADER_EOF;
+    }
 }

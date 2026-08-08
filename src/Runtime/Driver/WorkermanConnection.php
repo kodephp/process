@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Kode\Process\Runtime\Driver;
 
+use Kode\Process\Protocol\HttpProtocol;
 use Kode\Process\Runtime\ConnectionInterface;
 
 /**
@@ -15,6 +16,8 @@ final class WorkermanConnection implements ConnectionInterface
 {
     /** @var array<string, mixed> */
     private array $context = [];
+
+    private bool $chunkStarted = false;
 
     /**
      * @param object $conn Workerman\Connection\TcpConnection
@@ -31,6 +34,50 @@ final class WorkermanConnection implements ConnectionInterface
     public function send(string $data, bool $raw = false): bool
     {
         return (bool)$this->conn->send($data, $raw);
+    }
+
+    public function isChunkStarted(): bool
+    {
+        return $this->chunkStarted;
+    }
+
+    public function beginChunked(int $status = 200, array $headers = []): bool
+    {
+        if ($this->chunkStarted) {
+            return false;
+        }
+        if (!$this->conn->send(HttpProtocol::beginChunked($status, $headers), true)) {
+            return false;
+        }
+        $this->chunkStarted = true;
+        return true;
+    }
+
+    public function chunk(string $data): bool
+    {
+        if (!$this->chunkStarted) {
+            if (!$this->conn->send(HttpProtocol::beginChunked(), true)) {
+                return false;
+            }
+            $this->chunkStarted = true;
+        }
+        $frame = HttpProtocol::chunkFrame($data);
+        if ($frame === '') {
+            return true;
+        }
+        return (bool)$this->conn->send($frame, true);
+    }
+
+    public function endChunk(): bool
+    {
+        if (!$this->chunkStarted) {
+            return false;
+        }
+        if (!$this->conn->send(HttpProtocol::chunkEnd(), true)) {
+            return false;
+        }
+        $this->chunkStarted = false;
+        return true;
     }
 
     public function close(?string $data = null): void

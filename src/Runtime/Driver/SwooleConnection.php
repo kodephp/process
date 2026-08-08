@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Kode\Process\Runtime\Driver;
 
+use Kode\Process\Protocol\HttpProtocol;
 use Kode\Process\Runtime\ConnectionInterface;
 
 /**
@@ -22,6 +23,8 @@ final class SwooleConnection implements ConnectionInterface
     private array $context = [];
 
     private bool $responded = false;
+
+    private bool $chunkStarted = false;
 
     /**
      * @param object $server   Swoole\Server 实例
@@ -57,6 +60,80 @@ final class SwooleConnection implements ConnectionInterface
         }
 
         return (bool)$this->server->send($this->fd, $data);
+    }
+
+    public function isChunkStarted(): bool
+    {
+        return $this->chunkStarted;
+    }
+
+    public function beginChunked(int $status = 200, array $headers = []): bool
+    {
+        if ($this->response !== null) {
+            $this->response->status($status);
+            foreach ($headers as $name => $value) {
+                $this->response->header($name, $value);
+            }
+            $this->chunkStarted = true;
+            return true;
+        }
+
+        // 非 HTTP 模式（裸 TCP / WebSocket）：降级为裸 chunked 字节
+        if ($this->chunkStarted) {
+            return false;
+        }
+        if (!$this->send(HttpProtocol::beginChunked($status, $headers), true)) {
+            return false;
+        }
+        $this->chunkStarted = true;
+        return true;
+    }
+
+    public function chunk(string $data): bool
+    {
+        if ($this->response !== null) {
+            // Swoole HTTP 模式：response->write() 自动启用 chunked
+            if (!$this->chunkStarted) {
+                $this->chunkStarted = true;
+            }
+            $this->response->write($data);
+            return true;
+        }
+
+        // 非 HTTP 模式：裸 chunked 字节
+        if (!$this->chunkStarted) {
+            if (!$this->send(HttpProtocol::beginChunked(), true)) {
+                return false;
+            }
+            $this->chunkStarted = true;
+        }
+        $frame = HttpProtocol::chunkFrame($data);
+        if ($frame === '') {
+            return true;
+        }
+        return $this->send($frame, true);
+    }
+
+    public function endChunk(): bool
+    {
+        if ($this->response !== null) {
+            if (!$this->chunkStarted) {
+                return false;
+            }
+            $this->response->end();
+            $this->responded   = true;
+            $this->chunkStarted = false;
+            return true;
+        }
+
+        if (!$this->chunkStarted) {
+            return false;
+        }
+        if (!$this->send(HttpProtocol::chunkEnd(), true)) {
+            return false;
+        }
+        $this->chunkStarted = false;
+        return true;
     }
 
     public function close(?string $data = null): void

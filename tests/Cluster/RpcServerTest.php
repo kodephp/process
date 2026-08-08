@@ -140,4 +140,26 @@ final class RecordingConnection implements ConnectionInterface
     {
         return $default;
     }
+
+    public function chunk(string $data): bool
+    {
+        $this->sent[] = $data;
+
+        return true;
+    }
+
+    public function beginChunked(int $status = 200, array $headers = []): bool
+    {
+        return true;
+    }
+
+    public function endChunk(): bool
+    {
+        return true;
+    }
+
+    public function isChunkStarted(): bool
+    {
+        return false;
+    }
 }

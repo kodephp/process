@@ -183,7 +183,11 @@ final class WorkermanRuntime extends AbstractRuntime
 
         if ($this->hasHandler('message')) {
             $worker->onMessage = function (object $conn, mixed $data): void {
-                $this->fire('message', new WorkermanConnection($conn), $data);
+                $wrap = new WorkermanConnection($conn);
+                $this->fire('message', $wrap, $data);
+                if ($wrap->isChunkStarted()) {
+                    $wrap->endChunk();
+                }
             };
         }
 

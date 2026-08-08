@@ -33,6 +33,32 @@ interface ConnectionInterface
      */
     public function close(?string $data = null): void;
 
+    /**
+     * 流式发送一个数据块（HTTP 下为 Transfer-Encoding: chunked 分块）。
+     *
+     * 首个分块会自动发送响应头（默认 200 + text/html），后续分块直接追加。
+     * 非 HTTP 连接（tcp / websocket / text 等）等价 {@see send()}，业务代码无需感知差异。
+     * 运行时会在请求处理结束后自动补发终止块，无需手动 endChunk()。
+     */
+    public function chunk(string $data): bool;
+
+    /**
+     * 显式开始 chunked 响应，可自定义状态码与响应头（覆盖默认 200 / text/html）。
+     *
+     * 不调用本方法而直接 chunk() 时，使用默认头。已开始后重复调用无效。
+     */
+    public function beginChunked(int $status = 200, array $headers = []): bool;
+
+    /**
+     * 发送 chunked 终止块（0\r\n\r\n）并结束响应。
+     *
+     * 通常由运行时在 handler 返回后自动调用；亦可显式调用以提前结束（如 SSE 长流由业务控制）。
+     */
+    public function endChunk(): bool;
+
+    /** 是否已处于 chunked 流式模式（首个分块已发出） */
+    public function isChunkStarted(): bool;
+
     /** 对端地址，格式 ip:port */
     public function remoteAddress(): string;
 

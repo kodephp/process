@@ -201,7 +201,38 @@ $conn->isAlive(): bool
 $conn->native(): mixed                               // 取底层原生对象，用运行时特有能力
 $conn->setContext(string $k, mixed $v): void
 $conn->getContext(string $k, mixed $default = null): mixed
+
+// HTTP 流式响应（chunked）：大响应无需全量缓冲进内存
+$conn->beginChunked(int $status = 200, array $headers = []): bool
+$conn->chunk(string $data): bool
+$conn->endChunk(): bool
+$conn->isChunkStarted(): bool
 ```
+
+### HTTP 流式响应（Transfer-Encoding: chunked）
+
+服务端向客户端**边生成边发**大响应，无需把整段 body 先缓冲进内存，首字节更早到达。
+三运行时 API 完全一致，业务代码零改动：
+
+```php
+Kode::serve('http://0.0.0.0:8080', ['workers' => 4])
+    ->on('message', function ($conn, $req): void {
+        // 自定义状态码与响应头（可选）；不调用 beginChunked 则使用默认 200 + text/html
+        $conn->beginChunked(200, ['Content-Type' => 'text/plain']);
+        $conn->chunk('part1-');
+        $conn->chunk('part2-');
+        $conn->chunk('part3');
+        // 终止块（0\r\n\r\n）由运行时在 handler 返回后自动补发，无需手动 endChunk()
+    })
+    ->start();
+```
+
+要点：
+
+- **非 HTTP 连接**（`tcp` / `websocket` / `text` 等）调用 `chunk()` 等价 `send()`，语义自动降级，跨协议代码无需 `if` 判断。
+- **默认头**：未 `beginChunked` 直接 `chunk()` 时，使用 `200 OK` + `Content-Type: text/html; charset=utf-8`；`Transfer-Encoding: chunked` 始终由运行时注入。
+- **自动收尾**：handler 返回后，运行时自动补发终止块。如需长流（如 SSE），可显式调用 `endChunk()` 结束。
+- Swoole HTTP 模式底层走 `Swoole\Http\Response::write()`（自动 chunked）；Native / Workerman 走裸 chunked 字节——统一抽象掩盖了差异。
 
 ## 异步任务（Task）
 

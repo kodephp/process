@@ -729,6 +729,11 @@ final class NativeRuntime extends AbstractRuntime
                 return;
             }
 
+            // HTTP：流式响应（chunked）在 handler 返回后自动补发终止块
+            if ($scheme === 'http' && $conn->isChunkStarted()) {
+                $conn->endChunk();
+            }
+
             // HTTP：按 keep-alive 决定复用还是收尾
             if ($scheme === 'http' && !$this->shouldKeepAlive($message)) {
                 $conn->closeAfterFlush();
