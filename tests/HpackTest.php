@@ -166,6 +166,47 @@ final class HpackTest extends TestCase
         $hpack->decode(self::hex('3fe13f'));
     }
 
+    /**
+     * 内联 readStringInline 后，字面量头名（nameIndex=0）读取的「整段缺失」分支
+     * 必须仍抛字符串截断错误——锁定主循环内联实现与原方法行为一致。
+     */
+    public function testInlineStringReadRejectsTruncatedLiteralName(): void
+    {
+        $this->expectException(Http2Exception::class);
+        // 0x40 增量索引 + nameIndex=0（字面量头名），但头名字符串字节完全缺失
+        (new Hpack())->decode(self::hex('40'));
+    }
+
+    /**
+     * 内联 readStringInline 后，字面量头名（nameIndex=0）读取的「声明长度越界」分支
+     * 必须仍抛字符串长度越界错误。
+     */
+    public function testInlineStringReadRejectsLiteralNameLengthOverflow(): void
+    {
+        $this->expectException(Http2Exception::class);
+        // 0x40 增量索引 + nameIndex=0，头名声明长度 3 但后续无字节
+        (new Hpack())->decode(self::hex('4003'));
+    }
+
+    /**
+     * 内联 readStringInline 后，字面量头名(nameIndex=0)与头值同时走内联读取，
+     * 且覆盖 Huffman 与非 Huffman 两种字符串编码，确保四条内联路径行为不变。
+     */
+    public function testInlineStringReadRoundTripsLiteralNameAndValue(): void
+    {
+        $hpack  = new Hpack();
+        $block  = $hpack->encode([['x-custom-name', 'x-custom-value']]);
+        $this->assertSame([['x-custom-name', 'x-custom-value']], $hpack->decode($block));
+
+        $plain  = new Hpack();
+        $block2 = $plain->encode([['x-plain', 'short']]);
+        $this->assertSame([['x-plain', 'short']], $plain->decode($block2));
+
+        $never  = new Hpack();
+        $block3 = $never->encode([['x-token', 'abc123']]);
+        $this->assertSame([['x-token', 'abc123']], $never->decode($block3));
+    }
+
     // ---------------------------------------------------------- 编码
 
     public function testEncodeUsesStaticTablePairIndex(): void

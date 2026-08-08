@@ -379,7 +379,7 @@ final class Hpack
                 continue;
             }
 
-            // 6.2.1 增量索引字面量：01xxxxxxx（内联 readInteger(6) + readString）
+            // 6.2.1 增量索引字面量：01xxxxxxx（内联 readInteger(6) + readStringInline）
             if (($byte & 0xC0) === 0x40) {
                 $mask  = 0x3f;
                 $value = $byte & $mask;
@@ -395,19 +395,61 @@ final class Hpack
                 }
                 $nameIndex = $value;
                 if ($nameIndex === 0) {
-                    $name = $this->readStringInline($block, $i);
+                    // 内联 readStringInline：读头名字面量（保留边界校验 + Huffman 缓存调用）
+                    if ($i >= $len) {
+                        throw Http2Exception::compression('HPACK 字符串截断');
+                    }
+                    $huffman = (ord($block[$i]) & 0x80) !== 0;
+                    $strlen  = ord($block[$i]) & 0x7f;
+                    $i++;
+                    if ($strlen === 0x7f) {
+                        $shift = 0;
+                        do {
+                            $b = ord($block[$i]);
+                            $i++;
+                            $strlen += ($b & 0x7f) << $shift;
+                            $shift += 7;
+                        } while (($b & 0x80) !== 0);
+                    }
+                    if ($i + $strlen > $len) {
+                        throw Http2Exception::compression('HPACK 字符串长度越界');
+                    }
+                    $raw  = substr($block, $i, $strlen);
+                    $i   += $strlen;
+                    $name = $huffman ? self::huffmanDecode($raw) : $raw;
                 } else {
                     $name = $nameIndex <= 61
                         ? self::STATIC_TABLE[$nameIndex][0]
                         : ($this->dynamic[$nameIndex - 62][0] ?? throw Http2Exception::compression('HPACK 索引越界：' . $nameIndex));
                 }
-                $valueStr = $this->readStringInline($block, $i);
+                // 内联 readStringInline：读头值字面量
+                if ($i >= $len) {
+                    throw Http2Exception::compression('HPACK 字符串截断');
+                }
+                $huffman = (ord($block[$i]) & 0x80) !== 0;
+                $strlen  = ord($block[$i]) & 0x7f;
+                $i++;
+                if ($strlen === 0x7f) {
+                    $shift = 0;
+                    do {
+                        $b = ord($block[$i]);
+                        $i++;
+                        $strlen += ($b & 0x7f) << $shift;
+                        $shift += 7;
+                    } while (($b & 0x80) !== 0);
+                }
+                if ($i + $strlen > $len) {
+                    throw Http2Exception::compression('HPACK 字符串长度越界');
+                }
+                $raw      = substr($block, $i, $strlen);
+                $i       += $strlen;
+                $valueStr = $huffman ? self::huffmanDecode($raw) : $raw;
                 $this->push($name, $valueStr);
                 $out[] = [$name, $valueStr];
                 continue;
             }
 
-            // 6.2.2 不索引 0000xxxx / 6.2.3 从不索引 0001xxxx（内联 readInteger(4) + readString）
+            // 6.2.2 不索引 0000xxxx / 6.2.3 从不索引 0001xxxx（内联 readInteger(4) + readStringInline）
             $mask  = 0x0f;
             $value = $byte & $mask;
             $i++;
@@ -422,49 +464,59 @@ final class Hpack
             }
             $nameIndex = $value;
             if ($nameIndex === 0) {
-                $name = $this->readStringInline($block, $i);
+                // 内联 readStringInline：读头名字面量
+                if ($i >= $len) {
+                    throw Http2Exception::compression('HPACK 字符串截断');
+                }
+                $huffman = (ord($block[$i]) & 0x80) !== 0;
+                $strlen  = ord($block[$i]) & 0x7f;
+                $i++;
+                if ($strlen === 0x7f) {
+                    $shift = 0;
+                    do {
+                        $b = ord($block[$i]);
+                        $i++;
+                        $strlen += ($b & 0x7f) << $shift;
+                        $shift += 7;
+                    } while (($b & 0x80) !== 0);
+                }
+                if ($i + $strlen > $len) {
+                    throw Http2Exception::compression('HPACK 字符串长度越界');
+                }
+                $raw  = substr($block, $i, $strlen);
+                $i   += $strlen;
+                $name = $huffman ? self::huffmanDecode($raw) : $raw;
             } else {
                 $name = $nameIndex <= 61
                     ? self::STATIC_TABLE[$nameIndex][0]
                     : ($this->dynamic[$nameIndex - 62][0] ?? throw Http2Exception::compression('HPACK 索引越界：' . $nameIndex));
             }
-            $out[] = [$name, $this->readStringInline($block, $i)];
+            // 内联 readStringInline：读头值字面量
+            if ($i >= $len) {
+                throw Http2Exception::compression('HPACK 字符串截断');
+            }
+            $huffman = (ord($block[$i]) & 0x80) !== 0;
+            $strlen  = ord($block[$i]) & 0x7f;
+            $i++;
+            if ($strlen === 0x7f) {
+                $shift = 0;
+                do {
+                    $b = ord($block[$i]);
+                    $i++;
+                    $strlen += ($b & 0x7f) << $shift;
+                    $shift += 7;
+                } while (($b & 0x80) !== 0);
+            }
+            if ($i + $strlen > $len) {
+                throw Http2Exception::compression('HPACK 字符串长度越界');
+            }
+            $raw = substr($block, $i, $strlen);
+            $i  += $strlen;
+            $out[] = [$name, $huffman ? self::huffmanDecode($raw) : $raw];
         }
 
         return $out;
     }
-
-
-    /**
-     * 字符串字面量解码（内联实现：保留边界校验与 Huffman 缓存调用；decode 主循环已内联
-     * 所有 readInteger，故此处只负责字符串本身，不再经 readInteger 方法分发）。
-     */
-    private function readStringInline(string $buf, int &$i): string
-    {
-        if ($i >= strlen($buf)) {
-            throw Http2Exception::compression('HPACK 字符串截断');
-        }
-        $huffman = (ord($buf[$i]) & 0x80) !== 0;
-        $mask    = 0x7f;
-        $length  = ord($buf[$i]) & $mask;
-        $i++;
-        if ($length === $mask) {
-            $shift = 0;
-            do {
-                $b = ord($buf[$i]);
-                $i++;
-                $length += ($b & 0x7f) << $shift;
-                $shift += 7;
-            } while (($b & 0x80) !== 0);
-        }
-        if ($i + $length > strlen($buf)) {
-            throw Http2Exception::compression('HPACK 字符串长度越界');
-        }
-        $raw = substr($buf, $i, $length);
-        $i  += $length;
-        return $huffman ? self::huffmanDecode($raw) : $raw;
-    }
-
 
     // ------------------------------------------------------------- 编码
 
