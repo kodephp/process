@@ -302,133 +302,144 @@ final class Hpack
         while ($i < $len) {
             $byte = ord($block[$i]);
 
-            // 6.1 索引头字段：1xxxxxxx（请求中最常见，内联取表避免 lookup() 方法分发
-            // 与其每次返回的 2 元素数组分配）
+            // 6.1 索引头字段：1xxxxxxx（内联 readInteger(7) 与取表，消除方法分发开销）
             if (($byte & 0x80) !== 0) {
-                $index = $this->readInteger($block, $i, 7);
-                if ($index === 0) {
+                $mask  = 0x7f;
+                $value = $byte & $mask;
+                $i++;
+                if ($value === $mask) {
+                    $shift = 0;
+                    do {
+                        $b = ord($block[$i]);
+                        $i++;
+                        $value += ($b & 0x7f) << $shift;
+                        $shift += 7;
+                    } while (($b & 0x80) !== 0);
+                }
+                if ($value === 0) {
                     throw Http2Exception::compression('HPACK 索引 0 非法');
                 }
-                if ($index <= 61) {
-                    $entry  = self::STATIC_TABLE[$index];
-                    $out[]  = [$entry[0], $entry[1]];
+                if ($value <= 61) {
+                    $entry = self::STATIC_TABLE[$value];
+                    $out[] = [$entry[0], $entry[1]];
                 } else {
-                    $entry = $this->dynamic[$index - 62] ?? null;
+                    $entry = $this->dynamic[$value - 62] ?? null;
                     if ($entry === null) {
-                        throw Http2Exception::compression('HPACK 索引越界：' . $index);
+                        throw Http2Exception::compression('HPACK 索引越界：' . $value);
                     }
                     $out[] = [$entry[0], $entry[1]];
                 }
                 continue;
             }
 
-            // 6.3 动态表大小更新：001xxxxx
+            // 6.3 动态表大小更新：001xxxxx（内联 readInteger(5)）
             if (($byte & 0xE0) === 0x20) {
-                $size = $this->readInteger($block, $i, 5);
-                if ($size > $this->capacityLimit) {
+                $mask  = 0x1f;
+                $value = $byte & $mask;
+                $i++;
+                if ($value === $mask) {
+                    $shift = 0;
+                    do {
+                        $b = ord($block[$i]);
+                        $i++;
+                        $value += ($b & 0x7f) << $shift;
+                        $shift += 7;
+                    } while (($b & 0x80) !== 0);
+                }
+                if ($value > $this->capacityLimit) {
                     throw Http2Exception::compression('HPACK 动态表大小更新超过上限');
                 }
-                $this->maxDynamicSize = $size;
+                $this->maxDynamicSize = $value;
                 $this->evict();
                 continue;
             }
 
-            // 6.2.1 增量索引字面量：01xxxxxx
+            // 6.2.1 增量索引字面量：01xxxxxxx（内联 readInteger(6) + readString）
             if (($byte & 0xC0) === 0x40) {
-                $nameIndex = $this->readInteger($block, $i, 6);
-                $name      = $nameIndex === 0 ? $this->readString($block, $i) : $this->nameOf($nameIndex);
-                $value     = $this->readString($block, $i);
-                $this->push($name, $value);
-                $out[] = [$name, $value];
+                $mask  = 0x3f;
+                $value = $byte & $mask;
+                $i++;
+                if ($value === $mask) {
+                    $shift = 0;
+                    do {
+                        $b = ord($block[$i]);
+                        $i++;
+                        $value += ($b & 0x7f) << $shift;
+                        $shift += 7;
+                    } while (($b & 0x80) !== 0);
+                }
+                $nameIndex = $value;
+                if ($nameIndex === 0) {
+                    $name = $this->readStringInline($block, $i);
+                } else {
+                    $name = $nameIndex <= 61
+                        ? self::STATIC_TABLE[$nameIndex][0]
+                        : ($this->dynamic[$nameIndex - 62][0] ?? throw Http2Exception::compression('HPACK 索引越界：' . $nameIndex));
+                }
+                $valueStr = $this->readStringInline($block, $i);
+                $this->push($name, $valueStr);
+                $out[] = [$name, $valueStr];
                 continue;
             }
 
-            // 6.2.2 不索引 0000xxxx / 6.2.3 从不索引 0001xxxx
-            $nameIndex = $this->readInteger($block, $i, 4);
-            $name      = $nameIndex === 0 ? $this->readString($block, $i) : $this->nameOf($nameIndex);
-            $out[]     = [$name, $this->readString($block, $i)];
+            // 6.2.2 不索引 0000xxxx / 6.2.3 从不索引 0001xxxx（内联 readInteger(4) + readString）
+            $mask  = 0x0f;
+            $value = $byte & $mask;
+            $i++;
+            if ($value === $mask) {
+                $shift = 0;
+                do {
+                    $b = ord($block[$i]);
+                    $i++;
+                    $value += ($b & 0x7f) << $shift;
+                    $shift += 7;
+                } while (($b & 0x80) !== 0);
+            }
+            $nameIndex = $value;
+            if ($nameIndex === 0) {
+                $name = $this->readStringInline($block, $i);
+            } else {
+                $name = $nameIndex <= 61
+                    ? self::STATIC_TABLE[$nameIndex][0]
+                    : ($this->dynamic[$nameIndex - 62][0] ?? throw Http2Exception::compression('HPACK 索引越界：' . $nameIndex));
+            }
+            $out[] = [$name, $this->readStringInline($block, $i)];
         }
 
         return $out;
     }
 
-    /**
-     * 按 HPACK 索引取回头名（静态表 1..61，其后为动态表）。
-     *
-     * 只取名字、不取整条 [name, value]，避免为「仅需要名字」的字面量表示分配
-     * 一个用不上的 2 元素数组（解码热路径每请求多次触发）。
-     */
-    private function nameOf(int $index): string
-    {
-        if ($index <= 61) {
-            return self::STATIC_TABLE[$index][0];
-        }
-
-        $entry = $this->dynamic[$index - 62] ?? null;
-        if ($entry === null) {
-            throw Http2Exception::compression('HPACK 索引越界：' . $index);
-        }
-
-        return $entry[0];
-    }
 
     /**
-     * 变长整数解码（RFC 7541 §5.1）。$i 传引用，读完后指向下一字节。
+     * 字符串字面量解码（内联实现：保留边界校验与 Huffman 缓存调用；decode 主循环已内联
+     * 所有 readInteger，故此处只负责字符串本身，不再经 readInteger 方法分发）。
      */
-    private function readInteger(string $buf, int &$i, int $prefixBits): int
-    {
-        $len = strlen($buf);
-        if ($i >= $len) {
-            throw Http2Exception::compression('HPACK 整数截断');
-        }
-
-        $mask  = (1 << $prefixBits) - 1;
-        $value = ord($buf[$i]) & $mask;
-        $i++;
-
-        if ($value < $mask) {
-            return $value;
-        }
-
-        $shift = 0;
-        while (true) {
-            if ($i >= $len) {
-                throw Http2Exception::compression('HPACK 整数截断');
-            }
-            $byte = ord($buf[$i]);
-            $i++;
-            $value += ($byte & 0x7F) << $shift;
-            if ($value > 0x7FFFFFFF) {
-                throw Http2Exception::compression('HPACK 整数溢出');
-            }
-            if (($byte & 0x80) === 0) {
-                return $value;
-            }
-            $shift += 7;
-        }
-    }
-
-    /**
-     * 字符串字面量解码（RFC 7541 §5.2）。
-     */
-    private function readString(string $buf, int &$i): string
+    private function readStringInline(string $buf, int &$i): string
     {
         if ($i >= strlen($buf)) {
             throw Http2Exception::compression('HPACK 字符串截断');
         }
-
         $huffman = (ord($buf[$i]) & 0x80) !== 0;
-        $length  = $this->readInteger($buf, $i, 7);
-
+        $mask    = 0x7f;
+        $length  = ord($buf[$i]) & $mask;
+        $i++;
+        if ($length === $mask) {
+            $shift = 0;
+            do {
+                $b = ord($buf[$i]);
+                $i++;
+                $length += ($b & 0x7f) << $shift;
+                $shift += 7;
+            } while (($b & 0x80) !== 0);
+        }
         if ($i + $length > strlen($buf)) {
             throw Http2Exception::compression('HPACK 字符串长度越界');
         }
-
         $raw = substr($buf, $i, $length);
         $i  += $length;
-
         return $huffman ? self::huffmanDecode($raw) : $raw;
     }
+
 
     // ------------------------------------------------------------- 编码
 
