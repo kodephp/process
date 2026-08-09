@@ -64,47 +64,43 @@ final class WebSocketProtocolTest extends TestCase
     }
 
     /**
-     * 回归：服务端帧（FIN=1 + MASK=0）
-     * 旧实现读第一字节最高位得 1，误判为已掩码，多算 4 字节。
+     * 服务端帧（MASK=0）作为入向帧非法：RFC 6455 §5.1 要求服务端断开未掩码的客户端帧。
+     *
+     * 兼带守住历史缺陷——旧实现读第一字节最高位（FIN）当掩码位，
+     * 这条 FIN=1 / MASK=0 的帧在旧实现里会被误判为「已掩码」而放行。
      */
-    public function testInputHandlesUnmaskedServerFrame(): void
+    public function testInputRejectsUnmaskedFrame(): void
     {
         $frame = WebSocketProtocol::encode('hello');
 
-        // 2 字节头 + 5 字节载荷 = 7
+        // 2 字节头 + 5 字节载荷 = 7，帧本身完整，但服务端仍必须拒绝
         $this->assertSame(7, strlen($frame));
-        $this->assertSame(7, WebSocketProtocol::input($frame));
+        $this->assertSame(-1, WebSocketProtocol::input($frame));
     }
 
-    public function testInputMatchesFrameLengthForBothDirections(): void
+    public function testInputMatchesFrameLengthForClientFrames(): void
     {
         foreach (['', 'a', 'hello world', str_repeat('x', 125)] as $payload) {
-            $server = WebSocketProtocol::encode($payload);
             $client = self::clientFrame(WebSocketProtocol::OPCODE_TEXT, $payload);
 
-            $this->assertSame(strlen($server), WebSocketProtocol::input($server));
             $this->assertSame(strlen($client), WebSocketProtocol::input($client));
         }
     }
 
     public function testInputHandles16BitExtendedLength(): void
     {
-        $payload = str_repeat('a', 1000);
+        $client = self::clientFrame(WebSocketProtocol::OPCODE_TEXT, str_repeat('a', 1000));
 
-        $server = WebSocketProtocol::encode($payload);
-        $client = self::clientFrame(WebSocketProtocol::OPCODE_TEXT, $payload);
-
-        $this->assertSame(1004, WebSocketProtocol::input($server));
+        // 2 字节头 + 2 字节扩展长度 + 4 字节掩码 + 1000 字节载荷
         $this->assertSame(1008, WebSocketProtocol::input($client));
     }
 
     public function testInputHandles64BitExtendedLength(): void
     {
-        $payload = str_repeat('a', 70000);
+        $client = self::clientFrame(WebSocketProtocol::OPCODE_TEXT, str_repeat('a', 70000));
 
-        $server = WebSocketProtocol::encode($payload);
-
-        $this->assertSame(70010, WebSocketProtocol::input($server));
+        // 2 字节头 + 8 字节扩展长度 + 4 字节掩码 + 70000 字节载荷
+        $this->assertSame(70014, WebSocketProtocol::input($client));
     }
 
     public function testInputWaitsForExtendedLengthBytes(): void
@@ -127,6 +123,158 @@ final class WebSocketProtocolTest extends TestCase
     {
         // 64 位最高位置 1，unpack('J') 在 PHP 中得到负数
         $this->assertSame(-1, WebSocketProtocol::input("\x81\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"));
+    }
+
+    // --- 分包到达（RFC 6455 §5.2 分阶段校验） ------------------------------
+
+    /**
+     * 模拟 NativeRuntime 的收包循环：input() 报 0 就继续等更多数据，
+     * 报正数就按该长度切片交给 decode()，剩余字节留在缓冲区。
+     *
+     * @param list<string> $reads 依次到达的 TCP 分片
+     * @return list<mixed> 派发出去的消息
+     */
+    private static function dispatch(array $reads): array
+    {
+        $buffer = '';
+        $out = [];
+
+        foreach ($reads as $chunk) {
+            $buffer .= $chunk;
+
+            while ($buffer !== '') {
+                $len = WebSocketProtocol::input($buffer);
+
+                if ($len === 0) {
+                    break;
+                }
+
+                self::assertGreaterThan(0, $len, 'input() 误报协议错误');
+                self::assertLessThanOrEqual(
+                    strlen($buffer),
+                    $len,
+                    'input() 返回的长度超过当前缓冲区，调用方按此切片会把尚未到达的字节当成已消费'
+                );
+
+                $out[] = WebSocketProtocol::decode(substr($buffer, 0, $len));
+                $buffer = substr($buffer, $len);
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * 回归：>64KB 的帧必定走 127 扩展长度且必定跨多次 TCP 读到达。
+     *
+     * 旧实现在帧未收全时照样返回完整帧长，调用方 substr 后缓冲区被清空，
+     * 整帧连同后续分片一起丢失。
+     */
+    public function testLargeFrameSplitAcrossReadsIsFullyReassembled(): void
+    {
+        $payload = random_bytes(100000);
+        $frame = self::clientFrame(WebSocketProtocol::OPCODE_BINARY, $payload);
+
+        $reads = str_split($frame, 8192);
+        $this->assertGreaterThan(1, count($reads), '用例前提：该帧必须被拆成多次读');
+
+        $messages = self::dispatch($reads);
+
+        $this->assertCount(1, $messages);
+        $this->assertSame($payload, $messages[0]['data']);
+    }
+
+    /**
+     * 分片切点精确落在基础头 / 扩展长度 / 掩码键三处边界上。
+     */
+    public function testLargeFrameSplitAtHeaderBoundariesIsFullyReassembled(): void
+    {
+        $payload = str_repeat('K', 70000);
+        $frame = self::clientFrame(WebSocketProtocol::OPCODE_TEXT, $payload);
+
+        $reads = [
+            substr($frame, 0, 2),   // 仅基础头
+            substr($frame, 2, 5),   // 8 字节扩展长度只到一半
+            substr($frame, 7, 5),   // 扩展长度收齐，4 字节掩码键只到一半
+            substr($frame, 12),     // 掩码键 + 全部负载
+        ];
+
+        $messages = self::dispatch($reads);
+
+        $this->assertCount(1, $messages);
+        $this->assertSame($payload, $messages[0]['data']);
+    }
+
+    /**
+     * 大帧后面紧跟一个小帧，且两者在同一次读里到达：不能粘包也不能丢帧。
+     */
+    public function testLargeFrameFollowedBySmallFrameInSameRead(): void
+    {
+        $big = str_repeat('B', 70000);
+        $wire = self::clientFrame(WebSocketProtocol::OPCODE_TEXT, $big)
+            . self::clientFrame(WebSocketProtocol::OPCODE_TEXT, 'tail');
+
+        $messages = self::dispatch(str_split($wire, 16384));
+
+        $this->assertCount(2, $messages);
+        $this->assertSame($big, $messages[0]['data']);
+        $this->assertSame('tail', $messages[1]['data']);
+    }
+
+    public function testInputWaitsForMaskKeyAndPayload(): void
+    {
+        $frame = self::clientFrame(WebSocketProtocol::OPCODE_TEXT, str_repeat('a', 70000));
+
+        $this->assertSame(0, WebSocketProtocol::input(substr($frame, 0, 13)), '掩码键差 1 字节');
+        $this->assertSame(0, WebSocketProtocol::input(substr($frame, 0, 14)), '负载一个字节都没到');
+        $this->assertSame(0, WebSocketProtocol::input(substr($frame, 0, -1)), '负载差 1 字节');
+        $this->assertSame(strlen($frame), WebSocketProtocol::input($frame));
+    }
+
+    public function testInputWaitsForPayloadWith16BitLength(): void
+    {
+        $frame = self::clientFrame(WebSocketProtocol::OPCODE_TEXT, str_repeat('a', 1000));
+
+        $this->assertSame(0, WebSocketProtocol::input(substr($frame, 0, 7)), '掩码键差 1 字节');
+        $this->assertSame(0, WebSocketProtocol::input(substr($frame, 0, -1)), '负载差 1 字节');
+        $this->assertSame(strlen($frame), WebSocketProtocol::input($frame));
+    }
+
+    // --- 帧合法性校验（RFC 6455 §5.1 / §5.2 / §5.5） -----------------------
+
+    public function testInputRejectsReservedBits(): void
+    {
+        foreach (['RSV1' => 0x40, 'RSV2' => 0x20, 'RSV3' => 0x10] as $name => $bit) {
+            $frame = self::clientFrame(WebSocketProtocol::OPCODE_TEXT, 'hi');
+            $frame[0] = chr(ord($frame[0]) | $bit);
+
+            $this->assertSame(-1, WebSocketProtocol::input($frame), "{$name} 置位未被拒绝");
+        }
+    }
+
+    public function testInputRejectsOversizedControlFrame(): void
+    {
+        foreach ([0x8, 0x9, 0xA] as $opcode) {
+            $frame = self::clientFrame($opcode, str_repeat('x', 126));
+
+            $this->assertSame(-1, WebSocketProtocol::input($frame), "opcode {$opcode} 超长控制帧未被拒绝");
+        }
+    }
+
+    public function testInputAcceptsControlFrameAtSizeLimit(): void
+    {
+        $frame = self::clientFrame(WebSocketProtocol::OPCODE_PING, str_repeat('x', 125));
+
+        $this->assertSame(strlen($frame), WebSocketProtocol::input($frame));
+    }
+
+    public function testInputRejectsFragmentedControlFrame(): void
+    {
+        foreach ([0x8, 0x9, 0xA] as $opcode) {
+            $frame = self::clientFrame($opcode, 'x', fin: 0);
+
+            $this->assertSame(-1, WebSocketProtocol::input($frame), "opcode {$opcode} 分片控制帧未被拒绝");
+        }
     }
 
     // --- encode / decode --------------------------------------------------
@@ -256,5 +404,20 @@ final class WebSocketProtocolTest extends TestCase
     public function testHandshakeReturnsNullWithoutKey(): void
     {
         $this->assertNull(WebSocketProtocol::handshake("GET / HTTP/1.1\r\nHost: a\r\n\r\n"));
+    }
+
+    /**
+     * 握手响应同样是 HTTP 报文：业务传入的附加头不得凭 CRLF 注入额外响应头。
+     */
+    public function testHandshakeStripsCrlfFromExtraHeaders(): void
+    {
+        $request = "GET / HTTP/1.1\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
+
+        $response = WebSocketProtocol::handshake($request, [
+            'Sec-WebSocket-Protocol' => "chat\r\nX-Injected: evil",
+        ]);
+
+        $this->assertStringNotContainsString("\r\nX-Injected:", $response);
+        $this->assertStringContainsString("Sec-WebSocket-Protocol: chatX-Injected: evil\r\n", $response);
     }
 }

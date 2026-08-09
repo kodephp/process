@@ -36,25 +36,53 @@ final class WebSocketProtocol implements ProtocolInterface
     /**
      * 计算完整帧长度
      *
-     * @return int 0=数据不完整需继续收；-1=非法帧应断开；>0=完整帧字节数
+     * 严格按 RFC 6455 §5.2 分阶段推进：2 字节基础头 → 扩展长度 → 掩码键 → 负载。
+     * 任何一个阶段的字节数不足都返回 0（需要更多数据），**绝不**返回一个大于当前
+     * 缓冲区长度的值——调用方会据此切片，多算的部分会把尚未到达的帧头当成已消费，
+     * 使跨多次 TCP 读到达的大帧（>64KB 必然分包）被丢弃。
+     *
+     * 同时承担服务端入向帧的合法性校验（RFC 6455 §5.1 / §5.5）。
+     *
+     * @return int 0=数据不完整需继续收；-1=非法帧应断开（1002 协议错误）；>0=完整帧字节数
      */
     #[\Override]
     public static function input(string $buffer, mixed $connection = null): int
     {
         $bufferLen = strlen($buffer);
 
+        // 阶段 1：基础头
         if ($bufferLen < 2) {
             return 0;
         }
 
+        $firstByte = ord($buffer[0]);
         $secondByte = ord($buffer[1]);
+
+        // RSV1/2/3 未协商扩展时必须为 0（§5.2）
+        if (($firstByte & 0x70) !== 0) {
+            return -1;
+        }
+
+        $fin = ($firstByte & 0x80) !== 0;
+        $opcode = $firstByte & 0x0F;
 
         // 掩码标志位位于第二字节最高位，而非第一字节（第一字节最高位是 FIN）
         $masked = ($secondByte & 0x80) !== 0;
         $payloadLen = $secondByte & 0x7F;
 
+        // 控制帧（0x8~0xF）不得分片，负载不得超过 125 字节（§5.5）
+        if ($opcode >= 0x8 && (!$fin || $payloadLen > 125)) {
+            return -1;
+        }
+
+        // 服务端必须拒绝未掩码的客户端帧（§5.1）
+        if (!$masked) {
+            return -1;
+        }
+
         $offset = 2;
 
+        // 阶段 2：扩展长度
         if ($payloadLen === 126) {
             if ($bufferLen < 4) {
                 return 0;
@@ -68,7 +96,7 @@ final class WebSocketProtocol implements ProtocolInterface
             $payloadLen = unpack('J', substr($buffer, 2, 8))[1];
             $offset = 10;
 
-            // 64 位长度字段最高位必须为 0，且不得超出上限
+            // 64 位长度字段最高位必须为 0（unpack('J') 在 PHP 中表现为负数）
             if ($payloadLen < 0) {
                 return -1;
             }
@@ -78,11 +106,17 @@ final class WebSocketProtocol implements ProtocolInterface
             return -1;
         }
 
-        if ($masked) {
-            $offset += 4;
+        // 阶段 3：掩码键
+        $offset += 4;
+
+        if ($bufferLen < $offset) {
+            return 0;
         }
 
-        return $offset + $payloadLen;
+        // 阶段 4：负载
+        $total = $offset + $payloadLen;
+
+        return $bufferLen < $total ? 0 : $total;
     }
 
     #[\Override]
@@ -164,8 +198,10 @@ final class WebSocketProtocol implements ProtocolInterface
 
         $response = "HTTP/1.1 101 Switching Protocols\r\n";
 
+        // 握手响应是一份 HTTP/1.1 报文，$extraHeaders 可能来自业务（如子协议协商），
+        // 必须与普通响应走同一套 CRLF 过滤，否则可注入额外响应头
         foreach ($headers as $name => $value) {
-            $response .= "{$name}: {$value}\r\n";
+            $response .= HttpProtocol::headerLine((string) $name, (string) $value);
         }
 
         return $response . "\r\n";

@@ -83,6 +83,14 @@ final class Http2Session
     private int $continuationFrames = 0;
 
     /**
+     * 拼接中的这个头块所属的流是否已被拒绝（并发上限）。
+     *
+     * 被拒的流也必须把头块**解完**才能维持 HPACK 上下文，因此拒绝决定要一路带到
+     * 头块收齐之时才执行 RST_STREAM。同一时刻只可能有一个头块在拼接，故单个标志足够。
+     */
+    private bool $continuationRefused = false;
+
+    /**
      * 单条头块序列允许的最大压缩字节数（CONTINUATION 洪泛防护，CVE-2024-27316 同类）。
      * 超过即视为攻击：RST_STREAM(PROTOCOL_ERROR) 并丢弃，避免 continuationBuffer 无限增长。
      */
@@ -440,15 +448,20 @@ final class Http2Session
         if ($streamId <= $this->highestClientStream) {
             throw Http2Exception::protocol('流 ID 必须单调递增');
         }
-        if (count($this->streams) >= $this->maxConcurrentStreams) {
-            $this->outBuffer .= Frame::rstStream($streamId, Frame::ERROR_REFUSED_STREAM);
-            return null;
-        }
+        // 并发流上限：拒绝该流，但**绝不能在此直接 return**。
+        // HPACK 是连接级有状态编码：跳过这一个头块的解码，本端解码器动态表就会与对端
+        // 的编码器表永久失步，之后每一个头块都会解错（表现为随机的头名/头值错乱，
+        // 甚至把 :path 解成别的值）。正确做法是照常解完以维持上下文，解完后再丢弃这批
+        // 头并回 RST_STREAM(REFUSED_STREAM)——见 completeHeaders() 的 $refused 分支。
+        $refused = count($this->streams) >= $this->maxConcurrentStreams;
 
         $this->highestClientStream = $streamId;
         $this->lastStreamId        = $streamId;
 
-        $this->streams[$streamId] = $this->acquireStream();
+        // 被拒的流不建流对象，才不会占用并发槽位
+        if (!$refused) {
+            $this->streams[$streamId] = $this->acquireStream();
+        }
 
         $endStream = ($frame['flags'] & Frame::FLAG_END_STREAM) !== 0;
 
@@ -462,10 +475,11 @@ final class Http2Session
             $this->continuationBuffer    = $payload;
             $this->continuationEndStream = $endStream;
             $this->continuationFrames    = 1;
+            $this->continuationRefused   = $refused;
             return null;
         }
 
-        return $this->completeHeaders($streamId, $payload, $endStream);
+        return $this->completeHeaders($streamId, $payload, $endStream, $refused);
     }
 
     /**
@@ -495,13 +509,15 @@ final class Http2Session
         $streamId  = $this->continuationStream;
         $block     = $this->continuationBuffer;
         $endStream = $this->continuationEndStream;
+        $refused   = $this->continuationRefused;
 
         $this->continuationStream    = 0;
         $this->continuationBuffer    = '';
         $this->continuationEndStream = false;
         $this->continuationFrames    = 0;
+        $this->continuationRefused   = false;
 
-        return $this->completeHeaders($streamId, $block, $endStream);
+        return $this->completeHeaders($streamId, $block, $endStream, $refused);
     }
 
     /**
@@ -515,22 +531,42 @@ final class Http2Session
         $this->continuationBuffer   = '';
         $this->continuationEndStream = false;
         $this->continuationFrames   = 0;
+        $this->continuationRefused  = false;
         $this->freeStream($streamId);
     }
 
     /**
      * 头块收齐：HPACK 解码 → 校验伪头 → 若同时 END_STREAM 则请求已完整。
      *
+     * @param bool $refused 该流已被并发上限拒绝；仍需解码以维持 HPACK 上下文，解完即 RST
      * @return array{stream: int, request: array<string, mixed>}|null
      */
-    private function completeHeaders(int $streamId, string $block, bool $endStream): ?array
+    private function completeHeaders(int $streamId, string $block, bool $endStream, bool $refused = false): ?array
     {
         $pseudoDone = false;
         $pseudo     = [];
         $headers    = [];
         $listSize   = 0;
 
-        foreach ($this->decoder->decode($block) as [$name, $value]) {
+        // 解压炸弹防护：上限在 HPACK 解码循环内逐条累计，超限即停止累积输出，
+        // 内存不会随「索引引用展开」爆炸（见 Hpack::decode）。头块仍会解完以维持
+        // 连接级 HPACK 上下文，因此这里只需按流级拒绝，连接可继续服务其它流。
+        $exceeded = false;
+        $decoded  = $this->decoder->decode($block, $this->maxHeaderListSize, $exceeded);
+
+        // 已被拒绝的流：上一行的解码已经把连接级 HPACK 上下文推进到位，现在才可以
+        // 安全地丢弃这批头。此处不能用 resetStream()——被拒的流从未建过流对象。
+        if ($refused) {
+            $this->outBuffer .= Frame::rstStream($streamId, Frame::ERROR_REFUSED_STREAM);
+            return null;
+        }
+
+        if ($exceeded) {
+            $this->resetStream($streamId, Frame::ERROR_PROTOCOL);
+            return null;
+        }
+
+        foreach ($decoded as [$name, $value]) {
             if ($name === '') {
                 throw Http2Exception::protocol('头名不能为空', $streamId);
             }
@@ -620,6 +656,14 @@ final class Http2Session
         if (!isset($this->streams[$streamId])) {
             // 已被 RST 或从未存在：窗口照常归还，避免连接级窗口泄漏
             throw Http2Exception::streamClosed('对已关闭的流发送 DATA', $streamId);
+        }
+
+        // 流状态机校验（RFC 7540 §5.1）：half-closed(remote) 意味着对端已经发过
+        // END_STREAM，此后该方向不得再有 DATA。不校验的话，对已 END_STREAM 的流继续发
+        // DATA 会把负载继续追加进 body，且第二个 END_STREAM 会让**同一条请求被二次派发**
+        // 给业务 handler（重复下单 / 重复扣款）。h2c 升级出来的流 1 一开始就是该状态。
+        if ($this->streams[$streamId]['state'] !== self::STATE_OPEN) {
+            throw Http2Exception::streamClosed('对半关闭的流发送 DATA', $streamId);
         }
 
         $payload = $frame['payload'];

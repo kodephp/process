@@ -231,7 +231,8 @@ class SocketIPC implements IPCInterface
     private function unserialize(string $data): mixed
     {
         try {
-            return unserialize($data);
+            // allowed_classes => false：IPC 报文只承载数据，禁止实例化任意类
+            return @unserialize($data, ['allowed_classes' => false]);
         } catch (\Throwable $e) {
             throw IPCException::serializationFailed($data, $e->getMessage());
         }

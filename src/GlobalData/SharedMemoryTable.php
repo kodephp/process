@@ -24,6 +24,15 @@ use Kode\Process\Exceptions\GlobalDataException;
 final class SharedMemoryTable implements TableInterface
 {
     private const int DIR_VAR = 1;
+
+    /**
+     * 全局失效计数器所在的变量槽。
+     *
+     * 值槽 id 自 RESERVED_LOW 起单调递增、恒为正数，因此负数槽位永远不会与之冲突，
+     * 也不需要为它保留 RESERVED_LOW 之上的空间（保持与既有共享内存段布局兼容）。
+     */
+    private const int EPOCH_VAR = -1;
+
     private const int RESERVED_LOW = 2;
 
     private \SysvSharedMemory $shm;
@@ -32,8 +41,11 @@ final class SharedMemoryTable implements TableInterface
     private int $size;
     private bool $closed = false;
 
-    /** @var array<string, array{v: int, exp: int}> 进程内缓存：键→[varId, 过期时间] */
+    /** @var array<string, array{v: int, exp: int, g: int}> 进程内缓存：键→[varId, 过期时间, 代次] */
     private array $cache = [];
+
+    /** 本进程缓存所对应的全局失效计数；与共享内存中的值不一致时整体作废 */
+    private int $cacheEpoch = -1;
 
     public function __construct(int $key, int $size = 4 * 1024 * 1024)
     {
@@ -60,7 +72,7 @@ final class SharedMemoryTable implements TableInterface
 
         $shm = false;
         foreach ($attempts as $trySize) {
-            $shm = @shm_attach($key, $trySize, 0644);
+            $shm = @shm_attach($key, $trySize, 0600);
             if ($shm !== false) {
                 $this->size = $trySize;
                 break;
@@ -72,7 +84,7 @@ final class SharedMemoryTable implements TableInterface
         $this->shm = $shm;
 
         $semKey = ($key & 0x7FFFFFFF) ^ 0x5BD1E995;
-        $sem = @sem_get($semKey, 1, 0644, true);
+        $sem = @sem_get($semKey, 1, 0600, true);
         if ($sem === false) {
             throw GlobalDataException::semaphoreFailed($semKey);
         }
@@ -151,6 +163,9 @@ final class SharedMemoryTable implements TableInterface
 
     /**
      * 读取键值；键不存在或已过期返回 null。
+     *
+     * 注意：null 只表示「键不存在 / 已过期」。若存进去的值本身就是 false，这里会如实返回 false，
+     * 需要区分「不存在」与「值为假」时请配合 {@see exists()}。
      */
     public function get(string $key): mixed
     {
@@ -161,6 +176,12 @@ final class SharedMemoryTable implements TableInterface
         }
         if ($meta['exp'] > 0 && time() >= $meta['exp']) {
             $this->delete($key);
+            return null;
+        }
+        // 值槽可能已被其他进程移除：先探测再取值，
+        // 避免 shm_get_var 失败时抛告警并返回 false，与「存的就是 false」混为一谈。
+        if (!shm_has_var($this->shm, $meta['v'])) {
+            unset($this->cache[$key]);
             return null;
         }
         return shm_get_var($this->shm, $meta['v']);
@@ -191,6 +212,10 @@ final class SharedMemoryTable implements TableInterface
             $this->delete($key);
             return false;
         }
+        if (!shm_has_var($this->shm, $meta['v'])) {
+            unset($this->cache[$key]);
+            return false;
+        }
         return true;
     }
 
@@ -201,13 +226,16 @@ final class SharedMemoryTable implements TableInterface
         try {
             $dir = $this->readDirLocked();
             if (!isset($dir['keys'][$key])) {
+                unset($this->cache[$key]);
                 return false;
             }
-            $varId = $dir['keys'][$key]['v'];
+            $varId = (int) $dir['keys'][$key]['v'];
             @shm_remove_var($this->shm, $varId);
             unset($dir['keys'][$key]);
             $this->writeDirLocked($dir);
             unset($this->cache[$key]);
+            // 其他进程的进程内缓存可能仍指向该槽位，递增失效计数令其整体作废
+            $this->cacheEpoch = $this->bumpEpochLocked();
         } finally {
             $this->unlock();
         }
@@ -222,6 +250,7 @@ final class SharedMemoryTable implements TableInterface
         $this->assertOpen();
         $this->lock();
         try {
+            $this->syncCache();
             if (isset($this->cache[$key])) {
                 $varId = $this->cache[$key]['v'];
                 $exp = $this->cache[$key]['exp'];
@@ -241,7 +270,8 @@ final class SharedMemoryTable implements TableInterface
                 $current = 0;
                 $exp = 0;
             } else {
-                $current = shm_get_var($this->shm, $varId);
+                // 槽位可能已被其他进程移除，探测后再取值，避免读未写入槽位产生告警
+                $current = shm_has_var($this->shm, $varId) ? shm_get_var($this->shm, $varId) : 0;
                 if (!is_numeric($current)) {
                     $current = 0;
                 }
@@ -275,9 +305,12 @@ final class SharedMemoryTable implements TableInterface
             if (!isset($dir['keys'][$key])) {
                 return false;
             }
-            $varId = $dir['keys'][$key]['v'];
-            $exp = $dir['keys'][$key]['exp'];
-            if ($exp > 0 && time() >= $exp) {
+            $entry = $this->normalizeEntry($dir['keys'][$key]);
+            $varId = $entry['v'];
+            if ($entry['exp'] > 0 && time() >= $entry['exp']) {
+                return false;
+            }
+            if (!shm_has_var($this->shm, $varId)) {
                 return false;
             }
             $current = shm_get_var($this->shm, $varId);
@@ -285,7 +318,7 @@ final class SharedMemoryTable implements TableInterface
                 return false;
             }
             shm_put_var($this->shm, $varId, $newValue);
-            $this->cache[$key] = ['v' => $varId, 'exp' => $exp];
+            $this->cache[$key] = $entry;
         } finally {
             $this->unlock();
         }
@@ -326,10 +359,14 @@ final class SharedMemoryTable implements TableInterface
         try {
             $dir = $this->readDirLocked();
             foreach ($dir['keys'] as $entry) {
-                @shm_remove_var($this->shm, $entry['v']);
+                @shm_remove_var($this->shm, (int) $entry['v']);
             }
-            $this->writeDirLocked(['_next' => self::RESERVED_LOW, 'keys' => []]);
+            // 关键：绝不回退分配游标 _next。一旦回退，新键会复用刚被释放的槽位，
+            // 而其他进程缓存中的旧键仍指向同一槽位，读出来就是别人的值。
+            $dir['keys'] = [];
+            $this->writeDirLocked($dir);
             $this->cache = [];
+            $this->cacheEpoch = $this->bumpEpochLocked();
         } finally {
             $this->unlock();
         }
@@ -394,12 +431,59 @@ final class SharedMemoryTable implements TableInterface
     }
 
     /**
-     * 返回 [varId, exp] 或 null（键不存在）。
-     * 命中进程内缓存时跳过共享目录读取（热路径）。
-     * @return array{v: int, exp: int}|null
+     * 读取共享的全局失效计数。
+     */
+    private function readEpoch(): int
+    {
+        $epoch = @shm_get_var($this->shm, self::EPOCH_VAR);
+        return is_int($epoch) ? $epoch : 0;
+    }
+
+    /**
+     * 调用方须已持有锁：递增失效计数，宣告所有进程的进程内缓存作废。返回新值。
+     */
+    private function bumpEpochLocked(): int
+    {
+        $next = $this->readEpoch() + 1;
+        @shm_put_var($this->shm, self::EPOCH_VAR, $next);
+        return $next;
+    }
+
+    /**
+     * 与共享的失效计数对齐：其他进程做过 delete() / clear() 时丢弃本进程缓存。
+     *
+     * 只读一个整数槽，比反序列化整份目录便宜得多，热路径开销可忽略。
+     */
+    private function syncCache(): void
+    {
+        $epoch = $this->readEpoch();
+        if ($epoch !== $this->cacheEpoch) {
+            $this->cache = [];
+            $this->cacheEpoch = $epoch;
+        }
+    }
+
+    /**
+     * 归一化目录条目，兼容旧版本写入的、不带代次字段的条目。
+     * @return array{v: int, exp: int, g: int}
+     */
+    private function normalizeEntry(array $entry): array
+    {
+        return [
+            'v' => (int) $entry['v'],
+            'exp' => (int) ($entry['exp'] ?? 0),
+            'g' => (int) ($entry['g'] ?? 0),
+        ];
+    }
+
+    /**
+     * 返回 [varId, exp, g] 或 null（键不存在）。
+     * 缓存与共享失效计数一致时跳过共享目录读取（热路径）。
+     * @return array{v: int, exp: int, g: int}|null
      */
     private function readMeta(string $key): ?array
     {
+        $this->syncCache();
         if (isset($this->cache[$key])) {
             return $this->cache[$key];
         }
@@ -409,7 +493,7 @@ final class SharedMemoryTable implements TableInterface
             if (!isset($dir['keys'][$key])) {
                 return null;
             }
-            $meta = $dir['keys'][$key];
+            $meta = $this->normalizeEntry($dir['keys'][$key]);
         } finally {
             $this->unlock();
         }
@@ -419,6 +503,7 @@ final class SharedMemoryTable implements TableInterface
 
     private function allocateVarId(string $key): int
     {
+        $this->syncCache();
         if (isset($this->cache[$key])) {
             return $this->cache[$key]['v'];
         }
@@ -438,13 +523,17 @@ final class SharedMemoryTable implements TableInterface
     {
         $dir = $this->readDirLocked();
         if (!isset($dir['keys'][$key])) {
-            $varId = $dir['_next']++;
-            $dir['keys'][$key] = ['v' => $varId, 'exp' => 0];
+            $varId = (int) $dir['_next']++;
+            // 单调递增的代次：键每次被重建都会换一个代次，缓存据此识别自己是否已过时
+            $gen = (int) ($dir['_gen'] ?? 0) + 1;
+            $dir['_gen'] = $gen;
+            $dir['keys'][$key] = ['v' => $varId, 'exp' => 0, 'g' => $gen];
             $this->writeDirLocked($dir);
-            $this->cache[$key] = ['v' => $varId, 'exp' => 0];
+            $this->cache[$key] = ['v' => $varId, 'exp' => 0, 'g' => $gen];
         } else {
-            $varId = $dir['keys'][$key]['v'];
-            $this->cache[$key] = ['v' => $varId, 'exp' => $dir['keys'][$key]['exp']];
+            $entry = $this->normalizeEntry($dir['keys'][$key]);
+            $varId = $entry['v'];
+            $this->cache[$key] = $entry;
         }
         return $varId;
     }
@@ -471,11 +560,15 @@ final class SharedMemoryTable implements TableInterface
     private function updateExpLocked(string $key, int $varId, int $newExp): void
     {
         $dir = $this->readDirLocked();
-        if (isset($dir['keys'][$key])) {
-            $dir['keys'][$key] = ['v' => $varId, 'exp' => $newExp];
-            $this->writeDirLocked($dir);
+        if (!isset($dir['keys'][$key])) {
+            // 键已被其他进程删除：不要把过期缓存写回去
+            unset($this->cache[$key]);
+            return;
         }
-        $this->cache[$key] = ['v' => $varId, 'exp' => $newExp];
+        $gen = (int) ($dir['keys'][$key]['g'] ?? 0);
+        $dir['keys'][$key] = ['v' => $varId, 'exp' => $newExp, 'g' => $gen];
+        $this->writeDirLocked($dir);
+        $this->cache[$key] = ['v' => $varId, 'exp' => $newExp, 'g' => $gen];
     }
 
     /**
@@ -485,7 +578,7 @@ final class SharedMemoryTable implements TableInterface
     {
         $dir = @shm_get_var($this->shm, self::DIR_VAR);
         if (!is_array($dir) || !isset($dir['_next']) || !isset($dir['keys'])) {
-            return ['_next' => self::RESERVED_LOW, 'keys' => []];
+            return ['_next' => self::RESERVED_LOW, '_gen' => 0, 'keys' => []];
         }
         return $dir;
     }

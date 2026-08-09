@@ -9,9 +9,10 @@ namespace Kode\Process\Protocol;
  *
  * 首部 4 字节网络字节序标记包长度（含首部本身），适用于二进制数据传输。
  *
- * 安全提示：encode() 会对非数组、非字符串的值调用 serialize()，因此 decode()
- * 保留了对象还原能力。若该协议直接面向不受信任的网络输入，请改用 TcpProtocol，
- * 或通过 setAllowedClasses() 限制可还原的类。
+ * 安全提示：encode() 会对非数组、非字符串的值调用 serialize()，但 decode() 默认
+ * **不还原任何类**（`allowed_classes => false`）。本协议承载 `frame://` 监听，
+ * 报文完全由对端控制，默认放开类还原等同于把对象注入面直接暴露给网络。
+ * 确需还原对象时，由业务显式调用 {@see setAllowedClasses()} 声明白名单。
  */
 final class LengthPrefix implements ProtocolInterface
 {
@@ -20,7 +21,7 @@ final class LengthPrefix implements ProtocolInterface
     public const int MAX_SIZE = 10485760;
 
     /** @var bool|list<class-string> */
-    private static bool|array $allowedClasses = true;
+    private static bool|array $allowedClasses = false;
 
     /**
      * 限制反序列化时允许还原的类

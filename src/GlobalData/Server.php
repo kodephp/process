@@ -14,22 +14,38 @@ use Kode\Process\Exceptions\GlobalDataException;
  * 服务主循环使用 socket_select 替代固定 usleep 轮询，数据到达即时唤醒，降低延迟。
  *
  * 注：同主机高吞吐共享数据请优先使用 SharedMemoryTable（无网络往返、无 JSON 开销）。
+ *
+ * 安全提示：本服务持有集群锁 / 选举状态，端口不应暴露到公网。请绑内网地址，
+ * 或用构造参数 `$token` 开启简单校验（未设置时不做校验，保持向后兼容）。
  */
 final class Server
 {
+    /**
+     * 单帧包体长度上限（8 MiB）。
+     *
+     * 长度前缀是攻击者可控的 32 位无符号数，不设上限时一个 0xFFFFFFFF
+     * 就能让服务端一直累积缓冲区直到 OOM。
+     */
+    public const int MAX_FRAME_SIZE = 8 * 1024 * 1024;
+
     private string $host;
     private int $port;
+    private ?string $token;
     private array $data = [];
     private $socket = null;
     private bool $running = false;
-    /** @var array<int, array{socket: mixed, buffer: string}> */
+    /** @var array<int, array{socket: mixed, buffer: string, out: string}> */
     private array $clients = [];
     private int $clientSeq = 0;
 
-    public function __construct(string $host = '127.0.0.1', int $port = 2207)
+    /**
+     * @param string|null $token 非空时，请求需带上 `_token` 字段且匹配；为 null 时不鉴权
+     */
+    public function __construct(string $host = '127.0.0.1', int $port = 2207, ?string $token = null)
     {
         $this->host = $host;
         $this->port = $port;
+        $this->token = $token;
     }
 
     public function start(): void
@@ -57,7 +73,15 @@ final class Server
 
         while ($this->running) {
             $read = array_merge([$this->socket], array_column($this->clients, 'socket'));
-            $write = $except = [];
+            $write = [];
+            $except = [];
+
+            // 有未写完的响应就关注可写事件，等内核腾出发送缓冲区再续写
+            foreach ($this->clients as $client) {
+                if ($client['out'] !== '') {
+                    $write[] = $client['socket'];
+                }
+            }
 
             $n = @socket_select($read, $write, $except, 1);
 
@@ -75,6 +99,12 @@ final class Server
             }
 
             foreach ($this->clients as $id => $client) {
+                if (in_array($client['socket'], $write, true)) {
+                    $this->flushClient($id);
+                }
+            }
+
+            foreach ($this->clients as $id => $client) {
                 if (in_array($client['socket'], $read, true)) {
                     $this->readClient($id);
                 }
@@ -89,7 +119,7 @@ final class Server
         if ($client !== false) {
             socket_set_nonblock($client);
             $id = ++$this->clientSeq;
-            $this->clients[$id] = ['socket' => $client, 'buffer' => ''];
+            $this->clients[$id] = ['socket' => $client, 'buffer' => '', 'out' => ''];
         }
     }
 
@@ -110,11 +140,17 @@ final class Server
 
     private function drainFrames(int $id): void
     {
-        $client = $this->clients[$id]['socket'];
         $buffer = &$this->clients[$id]['buffer'];
 
         while (strlen($buffer) >= 4) {
             $len = unpack('N', substr($buffer, 0, 4))[1];
+
+            // 长度前缀完全由对端控制：超过上限说明对端要么在攻击、要么协议已错位，
+            // 继续等待只会让 buffer 无限增长，直接断连。
+            if ($len > self::MAX_FRAME_SIZE) {
+                $this->closeClient($id);
+                return;
+            }
 
             if (strlen($buffer) - 4 < $len) {
                 break; // 帧未收齐，等待下一次可读
@@ -129,15 +165,65 @@ final class Server
                 continue;
             }
 
-            $response = $this->handleRequest($request);
-            $payload = json_encode($response);
-            $frame = pack('N', strlen($payload)) . $payload;
-            @socket_send($client, $frame, strlen($frame), MSG_DONTWAIT);
+            $this->enqueue($id, $this->handleRequest($request));
+        }
+    }
+
+    /**
+     * 把响应编帧后放入发送队列，并尽可能立即写出。
+     */
+    private function enqueue(int $id, array $response): void
+    {
+        $payload = json_encode($response);
+        $this->clients[$id]['out'] .= pack('N', strlen($payload)) . $payload;
+        $this->flushClient($id);
+    }
+
+    /**
+     * 尽可能写出待发数据；写不完的留在队列里，等下一次可写事件继续。
+     *
+     * 旧实现用单次 `socket_send(..., MSG_DONTWAIT)` 并忽略返回值，
+     * 内核发送缓冲区满时只写出半个帧，客户端按长度前缀读取就会永久错位。
+     */
+    private function flushClient(int $id): void
+    {
+        if (!isset($this->clients[$id])) {
+            return;
+        }
+
+        $socket = $this->clients[$id]['socket'];
+
+        while ($this->clients[$id]['out'] !== '') {
+            $pending = $this->clients[$id]['out'];
+            $sent = @socket_send($socket, $pending, strlen($pending), MSG_DONTWAIT);
+
+            if ($sent === false) {
+                $error = socket_last_error($socket);
+                socket_clear_error($socket);
+                // 发送缓冲区暂时写满：保留剩余数据，等可写事件再续写
+                if ($error === SOCKET_EAGAIN || $error === SOCKET_EWOULDBLOCK || $error === SOCKET_EINTR) {
+                    return;
+                }
+                $this->closeClient($id);
+                return;
+            }
+
+            if ($sent === 0) {
+                return;
+            }
+
+            $this->clients[$id]['out'] = substr($pending, $sent);
         }
     }
 
     private function handleRequest(array $request): array
     {
+        if ($this->token !== null
+            && !hash_equals($this->token, (string) ($request['_token'] ?? ''))
+        ) {
+            return ['success' => false, 'error' => 'Unauthorized'];
+        }
+
         return match ($request['action'] ?? '') {
             'get' => $this->handleGet($request),
             'set' => $this->handleSet($request),

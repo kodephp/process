@@ -240,6 +240,9 @@ final class NativeConnection implements ConnectionInterface
         }
 
         if (!$this->httpChunkStarted) {
+            // keep-alive 复用：上一次响应的终止块状态必须在新响应开始时复位，
+            // 否则 endChunk() 会误判「已结束」而跳过发送 0\r\n\r\n，导致客户端挂起。
+            $this->httpChunkEnded   = false;
             if (!$this->write(HttpProtocol::beginChunked())) {
                 return false;
             }

@@ -245,13 +245,15 @@ final class ClusterFacadeTest extends TestCase
 
     public function testRenewSnowflakeReallocatesAfterLeaseLoss(): void
     {
-        $sf = Cluster::snowflake();
+        $sf  = Cluster::snowflake();
+        $old = $sf->workerId();
 
         // 租约被别人抢走
-        Cluster::store()->set('snowflake/default/' . $sf->workerId(), 'someone-else');
+        Cluster::store()->set('snowflake/default/' . $old, 'someone-else');
 
         $this->assertFalse(Cluster::renewSnowflake(), '丢租约时返回 false');
-        $this->assertNotSame($sf, Cluster::snowflake(), '应自动换一个新的机器 ID');
+        $this->assertSame($sf, Cluster::snowflake(), '实例要复用，否则业务侧持有的旧引用会继续用废掉的机器 ID');
+        $this->assertNotSame($old, $sf->workerId(), '应自动换一个新的机器 ID');
     }
 
     public function testLimiterIsCached(): void

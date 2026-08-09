@@ -175,6 +175,11 @@ Kode::every(60.0, fn () => Cluster::renewSnowflake());
 // renewSnowflake() 返回 false 表示租约丢失并会自动重新分配
 ```
 
+> **v5.2.12**：租约丢失后重新分配的新 `workerId` 会**就地换绑到同一个 `Snowflake` 实例**上。
+> 此前是新建实例，任何提前持有 `$sf = Cluster::snowflake()` 的调用方仍在用旧 `workerId`
+> 生成 ID——而那个 ID 已被集群分配给别的节点，直接产出重复 ID。
+> 所以现在缓存实例是安全的，无需每次都走 `Cluster::snowflake()`。
+
 ## 分布式限流
 
 计数落在共享存储上，限的是**整个集群的总量**，而不是每台各限一份（否则放行量会放大成「配置值 × 机器数」）。
@@ -201,6 +206,26 @@ $limiter->throttle('api:ip:' . $ip, 100, 60.0,
 );
 ```
 
+### 存储故障时 fail-closed
+
+> **⚠️ 行为变更（v5.2.12）**：存储后端不可用时，限流器**拒绝**请求，而不是放行。
+
+原先 `GlobalDataStore` / `RedisStore` 会把 `increment()` 的失败强转成 `0`，
+而 `0 <= limit` 恒真——**Redis 一挂，全集群限流器直接失效、无限放行**，
+恰恰是在后端最脆弱的时刻放开闸门。现在失败如实返回 `false`，限流器据此拒绝。
+
+自定义存储需同步这个契约：
+
+```php
+// StoreInterface
+public function increment(string $key, int $step = 1, int $ttlMs = 0): int|false;
+//                                                                    ^^^^^^^^^
+// 返回 false = 后端不可用/操作失败；限流器靠它区分「还没用过配额」与「后端挂了」
+```
+
+若你实现了 `StoreInterface`，把返回类型从 `int` 改成 `int|false`，
+并确保失败路径返回 `false` 而非 `0`。
+
 ## 集群 RPC
 
 节点间互相调方法、全集群广播。基于紧凑帧（`4 字节大端总长 + JSON`）在 TCP 上传输。
@@ -222,6 +247,14 @@ $results = $client->broadcast(Cluster::peers('api'), 'reloadConfig');
 // 便捷封装
 $results = Cluster::broadcast('reloadConfig');   // 自动取 peers 广播
 ```
+
+### 鉴权与错误边界
+
+- `token` 用 `hash_equals()` 定时比较，避免逐字节短路带来的时序侧信道。
+- 校验通过后 `_token` 会从 `$params` 中剔除，**不会**透传给你的方法处理器。
+- 方法处理器抛异常时，客户端只收到通用错误文案，具体异常信息记在服务端日志里，
+  不随响应帧外泄内部实现细节。
+- 未配置 `token` 时不启用鉴权——集群 RPC 端口请勿直接暴露到公网。
 
 ## 自检
 

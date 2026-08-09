@@ -14,16 +14,21 @@ final class Client
 {
     private string $host;
     private int $port;
+    private ?string $token;
     private $socket = null;
     private int $timeout = 5;
     private int $retryCount = 3;
     private int $retryDelay = 100000;
 
-    public function __construct(string $address = '127.0.0.1:2207')
+    /**
+     * @param string|null $token 与服务端 `token` 对应的鉴权串；服务端未开启鉴权时留空
+     */
+    public function __construct(string $address = '127.0.0.1:2207', ?string $token = null)
     {
         $parts = explode(':', $address);
         $this->host = $parts[0] ?? '127.0.0.1';
         $this->port = (int) ($parts[1] ?? 2207);
+        $this->token = $token;
     }
 
     public function __get(string $name): mixed
@@ -207,6 +212,10 @@ final class Client
         $retry = 0;
         $lastError = null;
 
+        if ($this->token !== null) {
+            $request['_token'] = $this->token;
+        }
+
         while ($retry < $this->retryCount) {
             try {
                 if ($this->socket === null) {
@@ -232,6 +241,13 @@ final class Client
                     continue;
                 }
                 $len = unpack('N', $header)[1];
+                // 与服务端一致的帧长上限，避免异常 / 恶意长度前缀撑爆客户端内存
+                if ($len > Server::MAX_FRAME_SIZE) {
+                    $this->disconnect();
+                    $retry++;
+                    usleep($this->retryDelay);
+                    continue;
+                }
                 $body = $this->readExact($len);
                 if ($body === null) {
                     $this->disconnect();

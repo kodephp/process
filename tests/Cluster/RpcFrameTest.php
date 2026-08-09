@@ -37,21 +37,23 @@ final class RpcFrameTest extends TestCase
         $this->assertSame('', $buffer, '完整取出后缓冲区应清空');
     }
 
-    public function testShiftReturnsNullOnIncompleteHeader(): void
+    public function testShiftReturnsFalseOnIncompleteHeader(): void
     {
         $buffer = "\x00\x00";
 
-        $this->assertNull(RpcFrame::shift($buffer));
+        // false=数据不足，与 null（坏帧已丢弃）必须区分开，否则调用方无从判断
+        // 该「继续读」还是「跳过这帧」
+        $this->assertFalse(RpcFrame::shift($buffer));
         $this->assertSame("\x00\x00", $buffer, '不完整时不能吃掉缓冲区');
     }
 
-    public function testShiftReturnsNullOnIncompleteBody(): void
+    public function testShiftReturnsFalseOnIncompleteBody(): void
     {
         $full    = RpcFrame::encode(['hello' => 'world']);
         $partial = substr($full, 0, -3);
         $buffer  = $partial;
 
-        $this->assertNull(RpcFrame::shift($buffer));
+        $this->assertFalse(RpcFrame::shift($buffer));
         $this->assertSame($partial, $buffer);
     }
 
@@ -64,7 +66,7 @@ final class RpcFrameTest extends TestCase
 
         $this->assertSame(['n' => 1], RpcFrame::shift($buffer));
         $this->assertSame(['n' => 2], RpcFrame::shift($buffer));
-        $this->assertNull(RpcFrame::shift($buffer), '第三帧不完整，应留在缓冲区里等后续字节');
+        $this->assertFalse(RpcFrame::shift($buffer), '第三帧不完整，应留在缓冲区里等后续字节');
         $this->assertNotSame('', $buffer);
     }
 
@@ -72,8 +74,17 @@ final class RpcFrameTest extends TestCase
     {
         $buffer = pack('N', RpcFrame::MAX_SIZE + 1) . 'x';
 
-        $this->assertNull(RpcFrame::shift($buffer));
+        $this->assertNull(RpcFrame::shift($buffer), '坏帧返回 null，与半包的 false 区分开');
         $this->assertSame('', $buffer, '超长报文应丢弃缓冲区，避免被恶意长度撑爆内存');
+    }
+
+    public function testShiftReturnsNullForValidJsonThatIsNotAnObject(): void
+    {
+        $body   = '"scalar"';
+        $buffer = pack('N', RpcFrame::HEAD_LEN + strlen($body)) . $body . RpcFrame::encode(['n' => 2]);
+
+        $this->assertNull(RpcFrame::shift($buffer), '标量帧不是合法报文，按坏帧丢弃');
+        $this->assertSame(['n' => 2], RpcFrame::shift($buffer), '坏帧之后的正常帧必须还能取出来');
     }
 
     public function testMalformedJsonThrowsAndConsumesTheFrame(): void

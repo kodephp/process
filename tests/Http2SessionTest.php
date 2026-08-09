@@ -1160,4 +1160,194 @@ final class Http2SessionTest extends TestCase
         $this->assertSame(0, $session->stats()['pending_streams']);
         $this->assertSame(0, $session->stats()['streams']);
     }
+
+    // ------------------------------------------- 安全：DATA 帧流状态机
+
+    /**
+     * 对已经 END_STREAM 的流继续发 DATA，绝不能让同一条请求被二次派发。
+     *
+     * 修复前 onData() 只判 `isset($this->streams[$id])` 而不看 state：请求派发后流仍在
+     * 表里（要等业务响应才回收），于是第二个带 END_STREAM 的 DATA 会把负载追加进
+     * body 并**再次**返回一条请求——业务 handler 收到两遍，等于重复下单 / 重复扣款。
+     * 正确行为是流级 RST_STREAM(STREAM_CLOSED)，连接继续服务其它流。
+     */
+    public function testDataOnHalfClosedStreamIsRejectedInsteadOfRedispatching(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        // 开流但不结束，随后用带 END_STREAM 的 DATA 完成请求
+        $session->feed($this->headersFrame(1, self::getHeaders('/pay'), Frame::FLAG_END_HEADERS));
+        $first = $session->feed(Frame::encode(Frame::TYPE_DATA, Frame::FLAG_END_STREAM, 1, 'amount=100'));
+
+        $this->assertCount(1, $first, '第一次必须正常派发');
+        $this->assertSame('amount=100', $first[0]['request']['body']);
+        $session->drain();
+
+        // 业务尚未响应，流还在表里且已是 half-closed(remote)——重复派发的窗口就在这里
+        $again = $session->feed(Frame::encode(Frame::TYPE_DATA, Frame::FLAG_END_STREAM, 1, 'amount=100'));
+
+        $this->assertSame([], $again, '半关闭的流上再收 DATA 不得二次派发请求');
+        $this->assertFalse($session->isClosed(), '这是流级错误，连接必须存活');
+
+        $rst = Frame::decode($session->drain());
+        $this->assertNotNull($rst);
+        $this->assertSame(Frame::TYPE_RST_STREAM, $rst['type']);
+        $this->assertSame(1, $rst['stream']);
+        $this->assertSame(Frame::ERROR_STREAM_CLOSED, unpack('N', $rst['payload'])[1]);
+    }
+
+    /** h2c 升级出来的流 1 一开始就是 half-closed(remote)，同样不接受 DATA */
+    public function testDataOnUpgradedStreamIsRejected(): void
+    {
+        $session = new Http2Session();
+        $session->markPrefaceReceived();
+        $session->adoptUpgradedRequest(['method' => 'GET', 'uri' => '/', 'headers' => ['host' => 'example.com']]);
+        $session->drain();
+
+        $requests = $session->feed(Frame::encode(Frame::TYPE_DATA, Frame::FLAG_END_STREAM, 1, 'x'));
+
+        $this->assertSame([], $requests);
+        $this->assertFalse($session->isClosed());
+    }
+
+    /** 正常的多片 DATA（只有最后一片带 END_STREAM）不得被状态校验误伤 */
+    public function testMultiFrameDataStillWorks(): void
+    {
+        $session = new Http2Session();
+        $this->handshake($session);
+
+        $session->feed($this->headersFrame(1, self::getHeaders('/upload'), Frame::FLAG_END_HEADERS));
+        $this->assertSame([], $session->feed(Frame::encode(Frame::TYPE_DATA, 0, 1, 'part1-')));
+        $this->assertSame([], $session->feed(Frame::encode(Frame::TYPE_DATA, 0, 1, 'part2-')));
+
+        $done = $session->feed(Frame::encode(Frame::TYPE_DATA, Frame::FLAG_END_STREAM, 1, 'part3'));
+
+        $this->assertCount(1, $done);
+        $this->assertSame('part1-part2-part3', $done[0]['request']['body']);
+    }
+
+    // --------------------------------- 安全：被拒绝的流仍须维持 HPACK 上下文
+
+    /**
+     * 被并发上限拒绝的流，其 HEADERS 的 HPACK 块**仍然必须解码**。
+     *
+     * HPACK 是连接级有状态编码：跳过一个头块的解码，本端解码器动态表就与对端编码器
+     * 永久失步，之后每个头块都会解错。修复前代码在拒绝时直接 return，跳过了解码——
+     * 这里让被拒的流 3 携带一条增量索引指令，再让后续的流 5 用索引 62 引用它：
+     * 若流 3 未被解码，动态表为空，流 5 会解出「索引越界」而把整条连接打掉。
+     */
+    public function testRefusedStreamStillDecodesHpackSoLaterStreamsStayCorrect(): void
+    {
+        $session = new Http2Session(maxConcurrentStreams: 1);
+        $this->handshake($session);
+
+        // 流 1 占满唯一的槽位（不带 END_STREAM，保持活动）
+        $session->feed($this->headersFrame(1, self::getHeaders('/first'), Frame::FLAG_END_HEADERS));
+        $this->assertSame(1, $session->activeStreams());
+
+        // 流 3 必被拒绝。它的头块尾部带一条增量索引：x-trace: abc → 动态表索引 62
+        $block3 = $this->client->encode(self::getHeaders('/refused'))
+            . "\x40" . "\x07x-trace" . "\x03abc";
+        $refused = $session->feed(Frame::encode(Frame::TYPE_HEADERS, Frame::FLAG_END_HEADERS, 3, $block3));
+
+        $this->assertSame([], $refused, '超并发的流不得派发请求');
+        $this->assertSame(1, $session->activeStreams(), '被拒的流不得占用槽位');
+        $rst = Frame::decode($session->drain());
+        $this->assertNotNull($rst);
+        $this->assertSame(Frame::TYPE_RST_STREAM, $rst['type']);
+        $this->assertSame(3, $rst['stream']);
+        $this->assertSame(Frame::ERROR_REFUSED_STREAM, unpack('N', $rst['payload'])[1]);
+
+        // 腾出槽位后，流 5 用索引 62 引用流 3 建立的那条动态表项
+        $session->resetStream(1);
+        $session->drain();
+
+        $block5    = $this->client->encode(self::getHeaders('/second')) . "\xbe";
+        $delivered = $session->feed(
+            Frame::encode(Frame::TYPE_HEADERS, Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM, 5, $block5)
+        );
+
+        $this->assertFalse($session->isClosed(), 'HPACK 上下文若失步，这里会是 COMPRESSION_ERROR 断连');
+        $this->assertCount(1, $delivered, '流 5 必须被正常派发');
+        $this->assertSame('/second', $delivered[0]['request']['path']);
+        $this->assertSame(
+            'abc',
+            $delivered[0]['request']['headers']['x-trace'] ?? null,
+            '索引 62 必须解出被拒流写入动态表的那条头——否则说明上下文已失步'
+        );
+    }
+
+    /**
+     * 被拒的流即使把头块拆成 HEADERS + CONTINUATION，也要等收齐后整块解码。
+     */
+    public function testRefusedStreamWithContinuationStillDecodesHpack(): void
+    {
+        $session = new Http2Session(maxConcurrentStreams: 1);
+        $this->handshake($session);
+
+        $session->feed($this->headersFrame(1, self::getHeaders('/first'), Frame::FLAG_END_HEADERS));
+
+        // 流 3 被拒，头块拆成两帧：前半是伪头，后半是增量索引指令
+        $head = $this->client->encode(self::getHeaders('/refused'));
+        $tail = "\x40" . "\x07x-trace" . "\x03xyz";
+        $session->feed(Frame::encode(Frame::TYPE_HEADERS, 0, 3, $head));
+        $session->feed(Frame::encode(Frame::TYPE_CONTINUATION, Frame::FLAG_END_HEADERS, 3, $tail));
+
+        $this->assertSame(1, $session->activeStreams());
+        $session->drain();
+
+        $session->resetStream(1);
+        $session->drain();
+
+        $block5    = $this->client->encode(self::getHeaders('/second')) . "\xbe";
+        $delivered = $session->feed(
+            Frame::encode(Frame::TYPE_HEADERS, Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM, 5, $block5)
+        );
+
+        $this->assertFalse($session->isClosed());
+        $this->assertCount(1, $delivered);
+        $this->assertSame('xyz', $delivered[0]['request']['headers']['x-trace'] ?? null);
+    }
+
+    /**
+     * 解压炸弹在会话层的表现：超限只 RST 该流，连接存活，且 HPACK 上下文完好，
+     * 后续正常请求仍能解对（体现「解完再拒」而非「中途放弃解码」）。
+     */
+    public function testOversizedHeaderListRejectsStreamButKeepsContextUsable(): void
+    {
+        $session = new Http2Session(maxHeaderListSize: 300);
+        $this->handshake($session);
+
+        // 流 1：4 个伪头约 180 字节，再加一条 100 字节的大头（5+100+32=137）即超过 300 上限；
+        // 尾部再带一条增量索引，用来验证超限后头块仍被解完
+        $bomb = $this->client->encode(self::getHeaders('/bomb'))
+            . "\x00" . "\x05x-big" . "\x64" . str_repeat('A', 100)
+            . "\x40" . "\x07x-trace" . "\x03ctx";
+
+        $rejected = $session->feed(Frame::encode(
+            Frame::TYPE_HEADERS,
+            Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM,
+            1,
+            $bomb
+        ));
+
+        $this->assertSame([], $rejected, '超限的头列表不得派发请求');
+        $this->assertFalse($session->isClosed(), '这是流级问题，连接必须存活');
+        $this->assertSame(0, $session->activeStreams());
+
+        $rst = Frame::decode($session->drain());
+        $this->assertNotNull($rst);
+        $this->assertSame(Frame::TYPE_RST_STREAM, $rst['type']);
+        $this->assertSame(1, $rst['stream']);
+
+        // 上下文仍然可用：流 3 引用炸弹头块尾部写入动态表的那条
+        $block3    = $this->client->encode(self::getHeaders('/after')) . "\xbe";
+        $delivered = $session->feed(
+            Frame::encode(Frame::TYPE_HEADERS, Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM, 3, $block3)
+        );
+
+        $this->assertCount(1, $delivered, '超限流之后的正常请求必须照常服务');
+        $this->assertSame('ctx', $delivered[0]['request']['headers']['x-trace'] ?? null);
+    }
 }

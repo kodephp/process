@@ -20,9 +20,6 @@ final class HttpProtocol implements ProtocolInterface
     /** 自动 gzip 压缩的最小响应体字节数（过小压缩收益不抵开销） */
     public const int GZIP_MIN_SIZE = 1024;
 
-    /** 请求体超过这个字节数时，头部定向扫描才值得先切出头块再搜 */
-    private const int SCAN_BODY_LIMIT = 2048;
-
     /** @var array<int, string> */
     private const array STATUS_TEXTS = [
         100 => 'Continue',
@@ -85,7 +82,12 @@ final class HttpProtocol implements ProtocolInterface
         $headerLength = $pos + 4;
         $contentLength = self::scanContentLength($buffer, $pos);
 
-        if ($contentLength <= 0) {
+        // 坏请求（请求走私向量）：交由调用方按协议错误断开
+        if ($contentLength === -1) {
+            return -1;
+        }
+
+        if ($contentLength === 0) {
             return $headerLength;
         }
 
@@ -99,40 +101,57 @@ final class HttpProtocol implements ProtocolInterface
     }
 
     /**
-     * 只扫描 Content-Length 字段，避免为了拿一个数字而解析整个头部。
+     * 扫描 Content-Length 并做请求走私防护（RFC 9112 §6.1 / §6.3）。
      *
-     * 该方法在每个请求的每次收包上都会被调用，是最热的路径之一，因此只做**一次**搜索：
-     *  1. 这里曾经「先 strpos 命中标准写法，未命中再 stripos 回退」，前提是「大小写折叠很贵」。
-     *     实测推翻了它：PHP 8 的 stripos 与 strpos 成本几乎相同（40B 报文 25.7 vs 25.6ns）。
-     *     于是前置的 strpos 在 GET 这类无体请求上纯属多扫一遍报文，而无体请求正是常态。
-     *  2. 扫描范围仍限制在头部——否则上传大文件时，每收一个包都要在整个 body 上搜一遍。
+     * 扫描范围限制在头块内——否则上传大文件时，每收一个包都要在整个 body 上搜一遍。
+     * 大小写不敏感只做一次搜索：PHP 8 的 stripos 与 strpos 成本几乎相同
+     * （40B 报文 25.7 vs 25.6ns），前置 strpos 在无体请求（常态）上纯属多扫一遍。
+     *
+     * 三类报文一律判为坏请求，因为前后端对它们的解读会产生分歧，这正是走私的成因：
+     *  1. Content-Length 值不是纯十进制数字（负数、`+5`、`0x10`、`5 6`、空值）。
+     *     旧实现用 `(int)` 强转，`abc` → 0、`-5` → -5，body 被留在缓冲区里
+     *     当成下一个请求的报文头。
+     *  2. 出现多个取值不一致的 Content-Length。旧实现只取首个。
+     *  3. 出现 Transfer-Encoding。本库不解析 chunked 请求体，一旦放行，
+     *     chunked body 同样会被当成后续请求（CL.TE / TE.CL 走私）。
+     *
+     * @return int >=0 请求体字节数；-1 坏请求
      */
     private static function scanContentLength(string $buffer, int $headerEnd): int
     {
-        if (strlen($buffer) - $headerEnd > self::SCAN_BODY_LIMIT) {
-            // 上传：body 远大于头部，先切出头块再搜才划算
-            $pos = stripos(substr($buffer, 0, $headerEnd), "\r\ncontent-length:");
-        } else {
-            // 体量不大：直接整串搜，用偏移判断命中是否落在头块内，
-            // 省掉一次为限定范围而做的 substr 拷贝
-            $pos = stripos($buffer, "\r\ncontent-length:");
-            if ($pos !== false && $pos >= $headerEnd) {
-                $pos = false;
+        $head = substr($buffer, 0, $headerEnd);
+
+        if (stripos($head, "\r\ntransfer-encoding:") !== false) {
+            return -1;
+        }
+
+        $length = null;
+        $offset = 0;
+
+        while (($pos = stripos($head, "\r\ncontent-length:", $offset)) !== false) {
+            $valueStart = $pos + 17;
+            $lineEnd = strpos($head, self::HEADER_EOF, $valueStart);
+            $value = trim(
+                $lineEnd === false
+                    ? substr($head, $valueStart)
+                    : substr($head, $valueStart, $lineEnd - $valueStart)
+            );
+
+            if ($value === '' || strspn($value, '0123456789') !== strlen($value)) {
+                return -1;
             }
+
+            $parsed = (int) $value;
+
+            if ($length !== null && $length !== $parsed) {
+                return -1;
+            }
+
+            $length = $parsed;
+            $offset = $valueStart;
         }
 
-        if ($pos === false) {
-            return 0;
-        }
-
-        $valueStart = $pos + 17;
-        $lineEnd = strpos($buffer, self::HEADER_EOF, $valueStart);
-
-        if ($lineEnd === false || $lineEnd > $headerEnd) {
-            return 0;
-        }
-
-        return (int) trim(substr($buffer, $valueStart, $lineEnd - $valueStart));
+        return $length ?? 0;
     }
 
     /** 纯字符串响应体走的固定头前缀，避免每请求重建数组再遍历拼接 */
@@ -167,7 +186,7 @@ final class HttpProtocol implements ProtocolInterface
         $response = 'HTTP/1.1 ' . $status . ' ' . self::getStatusText($status) . self::HEADER_EOF;
 
         foreach ($headers as $name => $value) {
-            $response .= $name . ': ' . $value . self::HEADER_EOF;
+            $response .= self::headerLine((string) $name, (string) $value);
         }
 
         return $response . self::HEADER_EOF . $body;
@@ -206,6 +225,27 @@ final class HttpProtocol implements ProtocolInterface
     public static function getStatusText(int $status): string
     {
         return self::STATUS_TEXTS[$status] ?? 'Unknown';
+    }
+
+    /**
+     * 生成一行响应头，并剔除头名与头值中的 CR / LF / NUL。
+     *
+     * 响应头的值经常直接来自用户可控数据（重定向 Location、Set-Cookie、回显的
+     * 自定义头）。不过滤的话，一个 `\r\n` 就能凭空插入额外响应头，两个就能伪造
+     * 整份响应体——即 HTTP 响应拆分。这里选择剥离而非抛异常：响应拼装位于每请求
+     * 的必经路径，抛异常会把一次数据问题升级成连接级故障。
+     */
+    public static function headerLine(string $name, string $value): string
+    {
+        return self::sanitizeHeaderPart($name) . ': ' . self::sanitizeHeaderPart($value) . self::HEADER_EOF;
+    }
+
+    private static function sanitizeHeaderPart(string $part): string
+    {
+        // 绝大多数头部本就干净，strpbrk 命中失败时直接原样返回，不产生任何拷贝
+        return strpbrk($part, "\r\n\0") === false
+            ? $part
+            : strtr($part, ["\r" => '', "\n" => '', "\0" => '']);
     }
 
     /**
@@ -269,7 +309,7 @@ final class HttpProtocol implements ProtocolInterface
 
         $resp = 'HTTP/1.1 ' . $status . ' ' . self::getStatusText($status) . self::HEADER_EOF;
         foreach ($headers as $name => $value) {
-            $resp .= $name . ': ' . $value . self::HEADER_EOF;
+            $resp .= self::headerLine((string) $name, (string) $value);
         }
 
         return $resp . self::HEADER_EOF;
@@ -352,7 +392,7 @@ final class HttpProtocol implements ProtocolInterface
 
         $resp = 'HTTP/1.1 ' . $status . ' ' . self::getStatusText($status) . self::HEADER_EOF;
         foreach ($headers as $name => $value) {
-            $resp .= $name . ': ' . $value . self::HEADER_EOF;
+            $resp .= self::headerLine((string) $name, (string) $value);
         }
 
         return $resp . self::HEADER_EOF . $encoded;

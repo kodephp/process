@@ -16,6 +16,13 @@ use Psr\Log\NullLogger;
  */
 class MessageQueue implements IPCInterface
 {
+    /**
+     * msg_receive 因接收缓冲区小于报文而失败时的 errno。
+     *
+     * PHP 未导出 MSG_E2BIG 常量，退回到 POSIX 的 E2BIG = 7。
+     */
+    private const int ERR_TOO_BIG = 7;
+
     private ?\SysvMessageQueue $queueId = null;
 
     private int $key;
@@ -45,14 +52,19 @@ class MessageQueue implements IPCInterface
 
     private function initialize(): void
     {
-        $this->queueId = msg_get_queue($this->key, 0644);
+        // 0600：只允许队列属主读写，避免同主机上任意本地用户读取 / 抽干 IPC 消息。
+        // 失败时 msg_get_queue 返回 false，不能直接赋给 ?\SysvMessageQueue 属性（会抛 TypeError），
+        // 因此先接到局部变量再判断。
+        $queue = @msg_get_queue($this->key, 0600);
 
-        if ($this->queueId === false) {
+        if ($queue === false) {
             throw IPCException::connectionFailed(
                 IPCInterface::TYPE_MESSAGE_QUEUE,
                 '无法创建消息队列'
             );
         }
+
+        $this->queueId = $queue;
 
         $this->logger->debug('消息队列 IPC 已初始化', ['key' => $this->key]);
     }
@@ -70,15 +82,11 @@ class MessageQueue implements IPCInterface
             );
         }
 
-        $serialized = $this->serialize($message);
-        $length = strlen($serialized);
-
-        if ($length > $this->bufferSize) {
-            throw IPCException::bufferOverflow($length, $this->bufferSize);
-        }
-
         $messageType = $targetPid > 0 ? $targetPid : $this->defaultType;
 
+        // 先包信封再校验长度：接收端用 bufferSize 作为 msg_receive 的 maxsize，
+        // 真正要放进队列的是信封而不是裸消息。若只校验裸消息，信封超限时会被投递进队列，
+        // 接收端每次都以 E2BIG 失败且不出队，形成永远取不走的「毒丸」。
         $envelope = [
             'pid' => posix_getpid(),
             'data' => $message,
@@ -86,6 +94,11 @@ class MessageQueue implements IPCInterface
         ];
 
         $serialized = $this->serialize($envelope);
+        $length = strlen($serialized);
+
+        if ($length > $this->bufferSize) {
+            throw IPCException::bufferOverflow($length, $this->bufferSize);
+        }
 
         $result = msg_send($this->queueId, $messageType, $serialized, false, false, $errorCode);
 
@@ -143,20 +156,58 @@ class MessageQueue implements IPCInterface
 
                 $this->logger->debug('消息队列消息已接收', [
                     'type' => $receivedType,
-                    'source_pid' => $envelope['pid'] ?? 0
+                    'source_pid' => is_array($envelope) ? ($envelope['pid'] ?? 0) : 0,
                 ]);
 
-                return $envelope['data'] ?? $envelope;
+                return is_array($envelope) && array_key_exists('data', $envelope)
+                    ? $envelope['data']
+                    : $envelope;
+            }
+
+            if ($errorCode === self::ERR_TOO_BIG) {
+                // 报文大于接收缓冲区：本次接收不会出队，若直接重试会原地空转把 CPU 打满。
+                // 用 MSG_NOERROR 再收一次（截断并出队）把这条毒丸丢掉，队列得以继续推进。
+                $this->discardOversizedMessage();
+                continue;
             }
 
             if ($timeout !== null && (microtime(true) - $startTime) >= $timeout) {
                 throw IPCException::timeout($timeout);
             }
 
-            if ($flags & MSG_IPC_NOWAIT) {
-                usleep(1000);
-            }
+            // 队列为空（阻塞模式下 msg_receive 已在内核挂起，这里主要覆盖被信号打断等情形），
+            // 让出 CPU 而不是紧凑重试。
+            usleep(1000);
         }
+    }
+
+    /**
+     * 丢弃队首那条超出接收缓冲区的报文。
+     *
+     * MSG_NOERROR 会把报文截断后出队，从而打破「收不到又删不掉」的死循环。
+     */
+    private function discardOversizedMessage(): void
+    {
+        $discardType = 0;
+        $discarded = '';
+        $errorCode = 0;
+
+        $removed = @msg_receive(
+            $this->queueId,
+            0,
+            $discardType,
+            $this->bufferSize,
+            $discarded,
+            false,
+            MSG_NOERROR | MSG_IPC_NOWAIT,
+            $errorCode
+        );
+
+        $this->logger->warning('消息队列丢弃超长报文', [
+            'type' => $discardType,
+            'buffer_size' => $this->bufferSize,
+            'removed' => $removed,
+        ]);
     }
 
     public function broadcast(mixed $message): bool
@@ -193,14 +244,15 @@ class MessageQueue implements IPCInterface
     {
         if ($this->queueId !== null) {
             while (true) {
-                $result = msg_receive(
+                // MSG_NOERROR：超长报文截断后照样出队，否则毒丸会把 flush() 卡在原地
+                $result = @msg_receive(
                     $this->queueId,
                     0,
                     $type,
                     $this->bufferSize,
                     $message,
                     false,
-                    MSG_IPC_NOWAIT,
+                    MSG_NOERROR | MSG_IPC_NOWAIT,
                     $errorCode
                 );
 
@@ -211,19 +263,35 @@ class MessageQueue implements IPCInterface
         }
     }
 
+    /**
+     * 关闭本进程的队列句柄。
+     *
+     * 只脱离句柄，不删除队列——System V 消息队列是全主机共享的内核对象，
+     * 由 __destruct 触发的 msg_remove_queue 会把队列连同其他进程的在途消息一起销毁。
+     * 需要真正回收内核对象时请显式调用 {@see destroy()}。
+     */
     public function close(): void
     {
         if ($this->closed) {
             return;
         }
 
-        if ($this->queueId !== null) {
-            msg_remove_queue($this->queueId);
-            $this->queueId = null;
-        }
-
+        $this->queueId = null;
         $this->closed = true;
         $this->logger->debug('消息队列 IPC 已关闭');
+    }
+
+    /**
+     * 销毁底层消息队列（对所有进程生效），并关闭本句柄。
+     */
+    public function destroy(): void
+    {
+        if ($this->queueId !== null) {
+            @msg_remove_queue($this->queueId);
+        }
+
+        $this->close();
+        $this->logger->debug('消息队列已销毁', ['key' => $this->key]);
     }
 
     public function isClosed(): bool
@@ -273,7 +341,9 @@ class MessageQueue implements IPCInterface
     private function unserialize(string $data): mixed
     {
         try {
-            return unserialize($data);
+            // allowed_classes => false：IPC 报文只承载数据，禁止实例化任意类，
+            // 避免本地攻击者向队列注入报文触发反序列化利用链。
+            return @unserialize($data, ['allowed_classes' => false]);
         } catch (\Throwable $e) {
             throw IPCException::serializationFailed($data, $e->getMessage());
         }

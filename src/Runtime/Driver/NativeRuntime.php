@@ -148,7 +148,26 @@ final class NativeRuntime extends AbstractRuntime
     /** @var array<int, string> 任务管道读缓冲（key = (int) socket） */
     private array $pipeBuffers = [];
 
+    /** @var array<int, string> 任务管道写缓冲：非阻塞 socketpair 单次 fwrite 可能只写出部分字节，剩余在此续写 */
+    private array $taskWriteBuffers = [];
+
     private int $taskRoundRobin = 0;
+
+    /**
+     * worker / task 进程崩溃记录：index => ['at' => 最近退出时刻, 'count' => 秒级内连续退出次数]。
+     * 用于崩溃退避，避免启动期异常触发 100% CPU 的 fork 风暴。
+     *
+     * @var array<int, array{at: float, count: int}>
+     */
+    private array $crashStats = [];
+
+    /**
+     * 在 worker 启动（事件循环就绪）之前通过 {@see addTimer()} 注册的定时器。
+     * 这些定时器拿不到底层 loop id，先暂存于此，待 {@see runWorker()} 重放。
+     *
+     * @var array<int, array{interval: float, callback: callable, periodic: bool}>
+     */
+    private array $pendingTimers = [];
 
     public static function isAvailable(): bool
     {
@@ -256,6 +275,9 @@ final class NativeRuntime extends AbstractRuntime
         $this->http2InitialWindow        = max(Frame::DEFAULT_WINDOW_SIZE, (int)($opts['http2InitialWindow'] ?? 1048576));
         $this->http2MaxHeaderListSize    = max(0, (int)($opts['http2MaxHeaderListSize'] ?? Http2Session::DEFAULT_MAX_HEADER_LIST_SIZE));
         $this->gracefulShutdownTimeout   = max(0, (int)($opts['gracefulShutdownTimeout'] ?? 3));
+        // master 的停机总超时必须覆盖 worker 的优雅宽限期，否则会在宽限期内 SIGKILL
+        // 在途请求（gracefulShutdownTimeout=30 而 stopTimeout=5 时必现）。取两者较大值。
+        $this->stopTimeout                = max($this->stopTimeout, $this->gracefulShutdownTimeout + 1);
 
         $this->maxSendBuffer   = max(65536, (int)($opts['maxSendBuffer'] ?? NativeConnection::DEFAULT_MAX_SEND_BUFFER));
         $this->serverName      = (string)($opts['name'] ?? 'kode-process');
@@ -282,8 +304,11 @@ final class NativeRuntime extends AbstractRuntime
             $this->daemonize((string)($opts['logFile'] ?? '/dev/null'));
         }
 
-        if (!$this->reusePort) {
-            foreach ($this->listeners as $i => $l) {
+        // unix 域套接字不支持 SO_REUSEPORT：每个 worker 各自 bind 会互删 socket 文件，
+        // 只剩最后一个 worker 能收连接，其余持有已被 unlink 的孤儿 socket。
+        // 故 unix 统一走 master 预开、子进程继承的共享 socket（与 !reusePort 同路径）。
+        foreach ($this->listeners as $i => $l) {
+            if (!$this->reusePort || $l['scheme'] === 'unix') {
                 $this->sharedSockets[$i] = $this->openServerSocket($l, false);
             }
         }
@@ -306,31 +331,60 @@ final class NativeRuntime extends AbstractRuntime
     /** 标准两次 fork + setsid 脱离终端 */
     private function daemonize(string $logFile): void
     {
-        if (pcntl_fork() > 0) {
+        $pid = pcntl_fork();
+        if ($pid > 0) {
             exit(0);
+        }
+        if ($pid < 0) {
+            throw new \RuntimeException('daemonize 失败：pcntl_fork() 返回 -1');
         }
         if (posix_setsid() === -1) {
             throw new \RuntimeException('daemonize 失败：posix_setsid() 返回 -1');
         }
-        if (pcntl_fork() > 0) {
+        $pid = pcntl_fork();
+        if ($pid > 0) {
             exit(0);
         }
+        if ($pid < 0) {
+            throw new \RuntimeException('daemonize 失败：二次 pcntl_fork() 返回 -1');
+        }
+
+        // 脱离终端后固定工作目录（否则守护进程会钉住启动时的 cwd，阻止卸载文件系统），
+        // 并把 stdin 重定向到 /dev/null，避免误读已关闭的终端。
+        chdir('/');
         umask(0);
 
         $target = $logFile !== '' ? $logFile : '/dev/null';
-        global $STDOUT, $STDERR;
+        global $STDIN, $STDOUT, $STDERR;
+        @fclose(STDIN);
         @fclose(STDOUT);
         @fclose(STDERR);
+        $STDIN  = fopen('/dev/null', 'r');
         $STDOUT = fopen($target, 'a');
         $STDERR = fopen($target, 'a');
     }
 
     private function writePidFile(): void
     {
-        if ($this->pidFile === null || $this->pidFile === '') {
+        $file = $this->resolvePidFile();
+        if ($file === null) {
             return;
         }
-        @file_put_contents($this->pidFile, (string)posix_getpid());
+        @file_put_contents($file, (string)posix_getpid());
+    }
+
+    /** PID 文件路径：显式配置优先，否则回退到 `bin/kode` 通过环境变量透传的标准路径 */
+    private function resolvePidFile(): ?string
+    {
+        $file = $this->pidFile;
+        if ($file === null || $file === '') {
+            $env = getenv('KODE_PID_FILE');
+            if ($env === false || $env === '') {
+                return null;
+            }
+            $file = $env;
+        }
+        return $file;
     }
 
     private function setProcessTitle(string $role): void
@@ -341,7 +395,7 @@ final class NativeRuntime extends AbstractRuntime
         @cli_set_process_title(sprintf('%s: %s', $this->serverName, $role));
     }
 
-    /** 按需降权（以 root 启动、以普通用户运行） */
+    /** 按需降权（以 root 启动、以普通用户运行）。任一环节失败立即抛错，绝不以 root 静默继续。 */
     private function dropPrivileges(): void
     {
         $opts = $this->primaryOptions();
@@ -349,16 +403,32 @@ final class NativeRuntime extends AbstractRuntime
         if ($user === null || posix_getuid() !== 0) {
             return;
         }
+
+        $ui = posix_getpwnam((string)$user);
+        if ($ui === false) {
+            throw new \RuntimeException(sprintf('降权失败：未知用户 "%s"', $user));
+        }
+        $uid = (int)$ui['uid'];
+        $gid = (int)($ui['gid'] ?? 0);
+
         $group = $opts['group'] ?? null;
         if (is_string($group) && $group !== '') {
             $gi = posix_getgrnam($group);
-            if ($gi !== false) {
-                posix_setgid((int)$gi['gid']);
+            if ($gi === false) {
+                throw new \RuntimeException(sprintf('降权失败：未知用户组 "%s"', $group));
             }
+            $gid = (int)$gi['gid'];
         }
-        $ui = posix_getpwnam((string)$user);
-        if ($ui !== false) {
-            posix_setuid((int)$ui['uid']);
+
+        // 顺序：initgroups → setgid → setuid。先清掉 root 的附加组，再设组、设用户。
+        if (!posix_initgroups((string)$user, $gid)) {
+            throw new \RuntimeException('降权失败：posix_initgroups() 返回 false');
+        }
+        if (!posix_setgid($gid)) {
+            throw new \RuntimeException(sprintf('降权失败：posix_setgid(%d) 返回 false', $gid));
+        }
+        if (!posix_setuid($uid)) {
+            throw new \RuntimeException(sprintf('降权失败：posix_setuid(%d) 返回 false', $uid));
         }
     }
 
@@ -400,7 +470,75 @@ final class NativeRuntime extends AbstractRuntime
             return parent::task($data);
         }
 
-        return @fwrite($pipe, self::packMessage($data)) !== false;
+        // 非阻塞 socketpair 单次 fwrite 可能只写出部分字节（载荷 > 内核缓冲即被截断），
+        // 直接按返回值判成功会漏发，导致对端按定长帧解析时后续所有报文错位。
+        // 改为写入缓冲 + 可写事件续写，保证整帧送达。
+        $this->bufferPipeWrite($pipe, self::packMessage($data));
+
+        return true;
+    }
+
+    /**
+     * 把数据写入任务管道：先尝试直接写，未写完的字节进 {@see taskWriteBuffers}，
+     * 注册 onWritable 在可写时续写，直到整帧发完。
+     *
+     * @param resource $pipe
+     */
+    private function bufferPipeWrite($pipe, string $data): void
+    {
+        $key      = (int)$pipe;
+        $wasEmpty = !isset($this->taskWriteBuffers[$key]);
+        $pending  = ($this->taskWriteBuffers[$key] ?? '') . $data;
+
+        $written = @fwrite($pipe, $pending);
+        if ($written === false || $written === 0) {
+            $this->taskWriteBuffers[$key] = $pending;
+            if ($wasEmpty) {
+                $this->loop?->onWritable($pipe, fn($p) => $this->flushPipeWrite($p, $key));
+            }
+            return;
+        }
+
+        $rest = substr($pending, $written);
+        if ($rest === '') {
+            unset($this->taskWriteBuffers[$key]);
+            if (!$wasEmpty) {
+                $this->loop?->offWritable($pipe);
+            }
+            return;
+        }
+
+        $this->taskWriteBuffers[$key] = $rest;
+        if ($wasEmpty) {
+            $this->loop?->onWritable($pipe, fn($p) => $this->flushPipeWrite($p, $key));
+        }
+    }
+
+    /**
+     * onWritable 回调：把缓冲里剩余字节续写出去，写净后注销可写监听。
+     *
+     * @param resource $pipe
+     */
+    private function flushPipeWrite($pipe, int $key): void
+    {
+        $pending = $this->taskWriteBuffers[$key] ?? '';
+        if ($pending === '') {
+            $this->loop?->offWritable($pipe);
+            return;
+        }
+
+        $written = @fwrite($pipe, $pending);
+        if ($written === false || $written === 0) {
+            return; // 暂时仍不可写，等下一次可写事件
+        }
+
+        $rest = substr($pending, $written);
+        if ($rest === '') {
+            unset($this->taskWriteBuffers[$key]);
+            $this->loop?->offWritable($pipe);
+        } else {
+            $this->taskWriteBuffers[$key] = $rest;
+        }
     }
 
     private static function packMessage(mixed $payload): string
@@ -450,9 +588,16 @@ final class NativeRuntime extends AbstractRuntime
             return;
         }
         if ($pid === 0) {
+            // 重置从 master 继承的信号处理器与异步信号开关，避免 fork 到 runWorker
+            // 注册自身处理器之前这扇窗口内，子进程以 master 语义向兄弟进程广播信号。
+            pcntl_async_signals(false);
+            foreach ([SIGTERM, SIGINT, SIGUSR1, SIGCHLD] as $s) {
+                pcntl_signal($s, SIG_DFL);
+            }
             $entries = [];
             foreach ($this->listeners as $i => $l) {
-                $socket    = $this->reusePort ? $this->openServerSocket($l, true) : $this->sharedSockets[$i];
+                $shared  = !$this->reusePort || $l['scheme'] === 'unix';
+                $socket  = $shared ? $this->sharedSockets[$i] : $this->openServerSocket($l, true);
                 $entries[] = ['socket' => $socket, 'listener' => $l];
             }
             $this->closeForeignTaskEnds($index, true);
@@ -541,9 +686,11 @@ final class NativeRuntime extends AbstractRuntime
             });
         }
 
-        foreach ($this->timers as $t) {
-            $loop->addTimer($t['interval'], $t['callback'], $t['periodic']);
+        // 重放 start() 之前预注册的定时器（此时 loop 已就绪）
+        foreach ($this->pendingTimers as $id => $t) {
+            $this->timers[$id] = $loop->addTimer($t['interval'], $t['callback'], $t['periodic']);
         }
+        $this->pendingTimers = [];
         // 共享粗时钟：每秒推进一次，供连接在收发时记录活跃时刻。
         // 秒级精度对空闲回收（周期以十秒计）绰绰有余，却让热路径彻底摆脱 microtime()。
         NativeConnection::tickClock(microtime(true));
@@ -627,7 +774,7 @@ final class NativeRuntime extends AbstractRuntime
                 foreach ($this->drainMessages($p) as $payload) {
                     $result = $this->fire('task', $payload, $taskId);
                     if ($result !== null) {
-                        @fwrite($p, self::packMessage($result));
+                        $this->bufferPipeWrite($p, self::packMessage($result));
                     }
                 }
             });
@@ -792,6 +939,12 @@ final class NativeRuntime extends AbstractRuntime
 
         // WebSocket：首包为 HTTP 握手，完成后转入帧处理
         if ($scheme === 'websocket' && !$conn->isHandshakeDone()) {
+            // 握手前的字节不走 HttpProtocol::input() 的长度上限，客户端持续发送
+            // 不含 \r\n\r\n 的数据即可无限增长 recvBuffer → 单连接打爆 worker。
+            if (strlen($conn->getBuffer()) > 16384) {
+                $this->closeConnection($conn);
+                return;
+            }
             if (!$conn->hasFullHttpRequest()) {
                 return;
             }
@@ -1009,9 +1162,16 @@ final class NativeRuntime extends AbstractRuntime
 
         try {
             $requests = $session->feed($data);
-        } catch (Http2Exception $e) {
-            // 连接级错误：GOAWAY 带上最后处理的流 ID，写净后断开
-            $session->goaway($e->errorCode(), $e->getMessage());
+        } catch (\Throwable $e) {
+            // 任意解码异常（含 HPACK/Huffman 抛出的 ArithmeticError 等）都必须被兜住，
+            // 否则会穿透事件循环、静默打死整个 worker 进程，且无任何日志。
+            // 连接级错误：GOAWAY 带上最后处理的流 ID，写净后断开。
+            if ($e instanceof Http2Exception) {
+                $session->goaway($e->errorCode(), $e->getMessage());
+            } else {
+                $session->goaway(Frame::ERROR_INTERNAL, 'internal error');
+                @error_log(sprintf('[kode] HTTP/2 decode error on conn #%d: %s', $conn->id(), $e->getMessage()));
+            }
             $conn->flushHttp2();
             $conn->closeAfterFlush();
             if (!$conn->isAlive()) {
@@ -1219,6 +1379,11 @@ final class NativeRuntime extends AbstractRuntime
         pcntl_signal(SIGUSR1, function (): void {
             $this->reloadMaster();
         });
+        // `bin/kode reload` 发送 SIGHUP（文档约定「kill -HUP = 平滑重载」）。
+        // 若不注册，SIGHUP 默认动作为 Term，会把 master 直接打死、worker 变孤儿。
+        pcntl_signal(SIGHUP, function (): void {
+            $this->reloadMaster();
+        });
         pcntl_signal(SIGCHLD, static function (): void {
             // 子进程状态变更统一由主循环 pcntl_wait 收割
         });
@@ -1241,7 +1406,7 @@ final class NativeRuntime extends AbstractRuntime
             $index = $this->workerPids[$pid];
             unset($this->workerPids[$pid]);
             if ($this->running) {
-                $this->spawnWorker($index);
+                $this->respawnWithBackoff($index, 'worker');
             }
             return;
         }
@@ -1249,8 +1414,48 @@ final class NativeRuntime extends AbstractRuntime
             $index = $this->taskPids[$pid];
             unset($this->taskPids[$pid]);
             if ($this->running) {
-                $this->spawnTaskWorker($index);
+                $this->respawnWithBackoff($index, 'task');
             }
+        }
+    }
+
+    /**
+     * 带退避的进程重生：秒级内连续崩溃时指数退避，连续超过上限判定启动失败并停止 master，
+     * 避免「启动即崩 → 满速 refork → CPU 100%」的死循环。
+     */
+    private function respawnWithBackoff(int $index, string $kind): void
+    {
+        $now   = microtime(true);
+        $crash = $this->crashStats[$index] ?? ['at' => 0.0, 'count' => 0];
+
+        if ($now - $crash['at'] < 1.0) {
+            $crash['count']++;
+        } else {
+            $crash['count'] = 1;
+        }
+        $crash['at'] = $now;
+        $this->crashStats[$index] = $crash;
+
+        if ($crash['count'] > 10) {
+            @error_log(sprintf(
+                '[kode] %s #%d 秒级内连续崩溃 %d 次，判定启动失败，停止 master',
+                $kind,
+                $index,
+                $crash['count']
+            ));
+            $this->running = false;
+
+            return;
+        }
+
+        if ($crash['count'] > 1) {
+            usleep((int)min(1_000_000, 100_000 * (2 ** ($crash['count'] - 1))));
+        }
+
+        if ($kind === 'worker') {
+            $this->spawnWorker($index);
+        } else {
+            $this->spawnTaskWorker($index);
         }
     }
 
@@ -1285,8 +1490,9 @@ final class NativeRuntime extends AbstractRuntime
         foreach (array_keys($this->workerPids + $this->taskPids) as $pid) {
             @posix_kill($pid, SIGKILL);
         }
-        if ($this->pidFile !== null && $this->pidFile !== '' && is_file($this->pidFile)) {
-            @unlink($this->pidFile);
+        $pidFile = $this->resolvePidFile();
+        if ($pidFile !== null && is_file($pidFile)) {
+            @unlink($pidFile);
         }
     }
 
@@ -1395,9 +1601,20 @@ final class NativeRuntime extends AbstractRuntime
     public function addTimer(float $interval, callable $callback, bool $periodic = true): int
     {
         $id = ++$this->timerSeq;
-        // 运行中的 worker 直接落到事件循环，未启动时留待 workerStart 统一注册
-        $loopId = $this->loop?->addTimer($interval, $callback, $periodic);
-        // 存「本包 ID → 底层 loop timer ID」映射（未启动时为 null），供 delTimer 真正注销
+        // 运行中的 worker 直接落到事件循环；start() 之前调用则暂存，待 runWorker() 重放。
+        // 否则 $this->loop 为 null，$this->timers[$id] 会被写成 null，
+        // runWorker() 遍历时把 null 当成底层 timer id 解包 → TypeError → worker 启动即崩、master 满速 refork。
+        if ($this->loop === null) {
+            $this->pendingTimers[$id] = [
+                'interval' => $interval,
+                'callback' => $callback,
+                'periodic' => $periodic,
+            ];
+            $this->timers[$id] = null;
+
+            return $id;
+        }
+        $loopId                  = $this->loop->addTimer($interval, $callback, $periodic);
         $this->timers[$id] = $loopId;
 
         return $id;
@@ -1405,8 +1622,16 @@ final class NativeRuntime extends AbstractRuntime
 
     public function delTimer(int $timerId): bool
     {
-        if (!isset($this->timers[$timerId])) {
+        // 注意：尚未启动的定时器在 $timers 里存的是 null（待重放），
+        // 因此必须用 array_key_exists 而非 isset（isset(null) === false）。
+        if (!array_key_exists($timerId, $this->timers) && !isset($this->pendingTimers[$timerId])) {
             return false;
+        }
+        // 尚未启动：从待重放队列移除即可
+        if (isset($this->pendingTimers[$timerId])) {
+            unset($this->pendingTimers[$timerId], $this->timers[$timerId]);
+
+            return true;
         }
         $loopId = $this->timers[$timerId];
         unset($this->timers[$timerId]);

@@ -68,8 +68,13 @@ interface StoreInterface
     /** 键是否存在（且未过期）。 */
     public function exists(string $key): bool;
 
-    /** 原子自增，返回新值。$ttlMs 仅在键首次创建时生效。 */
-    public function increment(string $key, int $step = 1, int $ttlMs = 0): int;
+    /**
+     * 原子自增，返回新值；后端不可用或操作失败返回 false。$ttlMs 仅在键首次创建时生效。
+     *
+     * 失败必须如实返回 false，不能强转成 0——限流器靠它区分「还没用过配额」
+     * 与「后端挂了」，把后者当成前者会让限流在存储故障时完全失效。
+     */
+    public function increment(string $key, int $step = 1, int $ttlMs = 0): int|false;
 
     /** 重设存活时间（键不存在返回 false）。 */
     public function expire(string $key, int $ttlMs): bool;

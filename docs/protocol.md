@@ -101,6 +101,59 @@ Kode::serve('ssl://0.0.0.0:443', [
 ->start();
 ```
 
+## 协议层安全约束
+
+协议解析直接面对不受信任的网络输入，因此内置协议在 v5.2.12 起统一按规范做了严格校验，
+`input()` 返回 `-1`（协议错误）即由运行时断开连接。
+
+### HTTP 请求
+
+| 校验 | 行为 |
+|------|------|
+| 同时出现 `Content-Length` 与 `Transfer-Encoding` | 拒绝（RFC 9112 §6.1，防请求走私） |
+| 单独出现 `Transfer-Encoding` | 拒绝（本包不支持 chunked **请求体**；chunked **响应**照常支持） |
+| `Content-Length` 非纯数字（负号、`+`、空格、字母） | 拒绝 |
+| 多个 `Content-Length` 且取值不一致 | 拒绝（取值完全相同则接受） |
+
+响应侧：所有响应头在写出前会剔除名与值中的 `\r`、`\n`、`\0`，
+杜绝用户可控数据（`Location`、`Set-Cookie` 等）导致的 CRLF 注入 / 响应拆分。
+
+### WebSocket 帧
+
+按 RFC 6455 拒绝以下客户端帧（关闭连接）：
+
+- 未设置 `MASK` 位的帧（客户端必须掩码）
+- 控制帧（close / ping / pong）负载 > 125 字节，或被分片（`FIN = 0`）
+- 未协商扩展却置位 `RSV1/2/3`
+- 64 位扩展长度最高位为 1（负长度），或超过 `MAX_PAYLOAD_LENGTH`
+
+大帧跨多次 TCP 读到达时按「基础头 → 扩展长度 → 掩码键 → 负载」分阶段判定，
+任一阶段字节不足只等待，不丢帧（此前 > 64KB 的分包帧会被丢弃）。
+
+### `frame://` 长度前缀协议
+
+> **⚠️ 行为变更（v5.2.12）**：`LengthPrefix::decode()` 默认不再还原任何类
+> （等价 `unserialize($raw, ['allowed_classes' => false])`）。
+> 该协议的报文完全由对端控制，默认放开类还原等同于把对象注入面暴露给网络。
+
+确需跨端传对象时显式声明白名单：
+
+```php
+use Kode\Process\Protocol\LengthPrefix;
+
+LengthPrefix::setAllowedClasses([\App\Dto\Order::class]);   // 仅还原白名单内的类
+LengthPrefix::setAllowedClasses(false);                     // 恢复默认：不还原任何类
+```
+
+未声明白名单时，对端发来的对象会解成 `__PHP_Incomplete_Class`，数组 / 标量不受影响。
+
+### HTTP/2
+
+见 [HTTP/2 · 解析层健壮性](http2.md)。HPACK 侧新增：变长整数位移上限与截断检测
+（此前超长 varint 会整数溢出成负索引，静默产出 `[NULL, NULL]` 头部）、
+Huffman 截断码字抛 `Http2Exception` 而非 `ArithmeticError`（此前 2 字节即可打死 worker）、
+解压后头列表体积在**解码过程中**逐步累计校验（此前 62KB 输入可展开成数百 MB）。
+
 ## 自定义协议
 
 所有协议必须实现 `ProtocolInterface`：

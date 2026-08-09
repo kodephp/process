@@ -99,6 +99,16 @@ $table->set('ticket', 'abc', ttl: 60);
 
 > **惰性过期**：过期键在下次读取时被惰性清理；`get()` 对已过期键返回 `null`，`exists()` 返回 `false`。
 
+> **`null` 只表示「不存在」（v5.2.12）**：`get()` 未命中统一返回 `null`；
+> 若存进去的值本身就是 `false`，读出来如实是 `false`。要区分「不存在」与「存了 null」请用 `exists()`。
+> 共享内存后端此前在读失败时也返回 `false`，与「存的就是 false」混为一谈。
+
+> **跨进程缓存一致性（v5.2.12）**：`SharedMemoryTable` 的进程内 `key → varId` 缓存
+> 现在带代际（epoch）校验。此前别的进程 `delete()` / `clear()` 后本进程缓存不失效，
+> 而 `clear()` 会把分配游标倒回低位、让 varId 被回收复用——
+> 结果 `get('alpha')` 可能读出 `beta` 的值。现在 `clear()` 不再倒回游标，
+> 缓存条目在读取时按代际校验，不匹配即重新查目录。
+
 ## 1.3 典型场景：跨进程计数器 / 限流
 
 ```php
@@ -151,7 +161,19 @@ use Kode\Process\GlobalData\Server;
 
 $server = new Server('0.0.0.0', 2207);
 $server->start();
+
+// 建议：显式配置共享令牌（第三参），仅通过校验的客户端可读写
+$server = new Server('0.0.0.0', 2207, token: getenv('KODE_GD_TOKEN'));
+$server->start();
 ```
+
+> **⚠️ 安全**：不传 `token` 时**不启用鉴权**（保持向后兼容），任何能连上该端口的人
+> 都能读写全部共享状态——而集群的分布式锁、Leader 选举状态就落在这里。
+> 网络版 GlobalData 请只监听内网地址并配置 `token`，切勿暴露公网。
+>
+> 服务端对单帧长度设了 `Server::MAX_FRAME_SIZE`（8 MiB）上限，超出即断开该连接；
+> 此前 4 字节长度前缀不设上限，对端发一个 `0xFFFFFFFF` 就能让服务端持续扩缓冲直到 OOM。
+> 响应写出改为循环写完整帧，此前 `MSG_DONTWAIT` 的部分写会被静默丢弃，导致客户端解帧错位。
 
 ## 2.2 客户端
 
@@ -159,6 +181,8 @@ $server->start();
 use Kode\Process\GlobalData\Client;
 
 $client = new Client('127.0.0.1:2207');
+// 服务端配置了 token 时，客户端需带上同一个令牌
+$client = new Client('127.0.0.1:2207', token: getenv('KODE_GD_TOKEN'));
 
 $client->counter = 0;
 $client->name = 'KodePHP';
@@ -288,6 +312,37 @@ $client->add('key', 'value');
 $client->setMulti(['k1' => 'v1', 'k2' => 'v2']);
 $data = $client->getMulti(['k1', 'k2']);
 ```
+
+---
+
+# 二、五 进程间通信（IPC）
+
+`Kode\Process\IPC` 下的 `MessageQueue`（System V 消息队列）、`SharedMemoryIPC`
+（共享内存环形队列）、`SocketIPC` 用于同机进程间传消息，语义与共享表不同：
+共享表是「共享状态」，IPC 是「一次性投递」。
+
+> **⚠️ 行为变更（v5.2.12）：`close()` 不再销毁队列。**
+>
+> ```php
+> $q = new MessageQueue($key);
+> $q->close();     // 只关闭本进程句柄，队列与在途消息保留给其他进程
+> $q->destroy();   // 真正删除底层队列（对所有进程生效）
+> ```
+>
+> 此前 `close()`（以及 `__destruct` 触发的隐式关闭）调的是 `msg_remove_queue()`——
+> **任何一个进程退出都会把全局队列连同在途消息一起删掉**，其他进程的收发直接失效。
+> 若你依赖旧行为在退出时清理队列，请显式改调 `destroy()`。
+
+其他加固：
+
+- **权限收紧到 `0600`**：消息队列与共享内存段此前是 `0644`，同机任意用户可读取
+  甚至排空业务消息。
+- **不再还原对象**：IPC 负载的 `unserialize()` 统一带 `['allowed_classes' => false]`。
+- **超长消息不再变毒丸**：此前先校验原始消息大小、再套一层更大的信封且不复检，
+  接收端 `msg_receive` 因 `E2BIG` 既不出队也不报错，阻塞模式下无 sleep 空转把 CPU 打满。
+  现在按信封实际大小校验，接收端遇到超限消息会丢弃并继续，无消息时改为 `usleep` 退避。
+- **共享内存写满不再静默丢数据**：`shm_put_var` 失败时不再照常推进计数，
+  避免消费端读出 `false`。
 
 ---
 

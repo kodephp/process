@@ -462,9 +462,11 @@ final class Cluster
             return true;
         }
 
+        // 租约丢了：给现有实例就地换绑新机器 ID。
+        // 不能换个新实例——业务侧多半早把 Cluster::snowflake() 的返回值存下来了，
+        // 换新的等于让它们继续用别人已经占走的 workerId 发号，直接撞号。
         self::$snowflakeNamespace = $namespace;
-        self::$snowflake = null;
-        self::snowflake(null, $namespace);
+        $snowflake->rebind(Snowflake::allocateWorkerId(self::store(), $namespace));
 
         return false;
     }

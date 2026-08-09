@@ -151,8 +151,8 @@ $rt->listen('http://0.0.0.0:8080', [
     'heartbeat'     => 60,      // 空闲连接回收秒数（默认 0 = 关闭！见下方安全提示）
     'keepAlive'     => true,    // HTTP keep-alive，默认开
     'maxSendBuffer' => 8388608, // 单连接发送缓冲上限，超出即断开（背压）
-    'stopTimeout'   => 10,      // 优雅停机最长等待秒数
-    'gracefulShutdownTimeout' => 3, // 收到停机信号后，等待在途连接优雅收尾的秒数（默认 3）
+    'stopTimeout'   => 10,      // master 等待 worker 退出的最长秒数（超时 SIGKILL）
+    'gracefulShutdownTimeout' => 3, // worker 内等待在途连接优雅收尾的秒数（默认 3）
 
     // ---- HTTP/2（Native 专有，默认开启）----
     'http2'                       => true,    // 是否在 TLS 监听上协商 HTTP/2
@@ -172,6 +172,13 @@ $rt->listen('http://0.0.0.0:8080', [
 > 不配置时，空闲连接会一直挂着，恶意客户端可借此发起 **慢速攻击（Slowloris）**——开大量半开/空闲连接耗尽 worker 与文件描述符。
 > 生产环境建议显式配置，例如 `'heartbeat' => 60`（60 秒无活动即回收）。
 > 同理，TLS 监听下 `http2MaxConcurrentStreams` / `http2MaxHeaderListSize` 已设上限以抵御单连接占满与超大头攻击，按需收紧即可。
+
+> **两个停机超时的关系**：`gracefulShutdownTimeout` 是 **worker 内**给在途连接收尾的宽限期，
+> `stopTimeout` 是 **master** 等 worker 退出、超时就 `SIGKILL` 的硬上限。
+> 若 `stopTimeout <= gracefulShutdownTimeout`，master 会在宽限期还没走完时就把 worker 打死，
+> 在途请求被硬截断——优雅停机形同虚设。因此运行时会自动把
+> `stopTimeout` 抬到至少 `gracefulShutdownTimeout + 1`，你无需手工保证这个约束，
+> 但配置时按「`stopTimeout` 明显大于 `gracefulShutdownTimeout`」来写更清晰。
 
 > **事件循环**：Native 通过 `LoopFactory` 自动择优 `ext-event` → `ext-ev` → `stream_select`。
 > 装了 `ext-event` 就自动走 C 层多路复用，高连接数下是数量级差异。
@@ -334,12 +341,27 @@ if ($rt->supports(Capability::Coroutine)) {
 - **异步发送缓冲 + 背压**：`send()` 未写完的字节进缓冲区，注册 `onWritable` 续写；
   堆积超过 `maxSendBuffer` 即断开该连接，防止慢客户端拖垮内存。
 - **信号语义**：`SIGTERM`/`SIGINT` 优雅停机（受 `stopTimeout` 约束），
-  `SIGUSR1` 平滑重载（逐个回收并 refork worker，连接不中断）。
+  `SIGUSR1` **与 `SIGHUP`** 均为平滑重载（逐个回收并 refork worker，连接不中断）。
+  `bin/kode reload` 发的是 `HUP`——此前 master 未注册该信号，默认动作是终止进程，
+  「重载」实际把服务直接杀掉了。
 - **HTTP keep-alive**：遵循请求的 `Connection` 头，`Connection: close` 时
   发送完成后再关闭（`closeAfterFlush()`），不会截断响应。
 - **运维能力**：`daemonize` 守护化、`pidFile`、进程改名、`user`/`group` 降权、
   `maxRequest` 请求数回收、`heartbeat` 空闲连接回收。
 - **协议复用**：HTTP / WebSocket / Text / LengthPrefix / TCP 全部走本包 `Protocol` 协议栈。
+
+### 进程健壮性（v5.2.12）
+
+| 项 | 说明 |
+|----|------|
+| **崩溃退避** | worker 启动即崩时不再无限速 refork。连续异常退出会按次数退避重启，避免 fork 风暴打满 CPU 与 PID |
+| **降权失败即报错** | `user`/`group` 降权时逐步校验 `posix_setgid` / `initgroups` / `posix_setuid`，任一步失败直接抛异常退出；此前失败被静默吞掉，**服务继续以 root 运行** |
+| **守护化加固** | `daemonize` 现在处理 fork 失败、`chdir('/')`（避免占住挂载点）、并重定向 `STDIN` |
+| **重生 worker 重置信号** | 新 fork 的子进程先把继承自 master 的信号处理器与 `pcntl_async_signals` 复位，再注册自己的；此前这段窗口内子进程会以 master 语义向兄弟进程广播信号 |
+| **`unix://` + `reusePort`** | Unix socket 监听一律由 master 打开并共享。此前每个 worker 各自 `bind` 同一路径，后启动的会删掉先启动的 socket 文件 |
+| **task 管道完整写** | 投递任务时 `fwrite` 的部分写会进缓冲、注册 `onWritable` 续写；此前截断的半帧会让该管道后续所有消息错位 |
+| **定时器可在 `start()` 前注册** | `addTimer()` 在服务启动前调用会进待重放队列，`start()` 后统一注册；`delTimer()` 同样能取消尚未生效的定时器 |
+| **PID 文件由 master 写** | 见下方 CLI 小节 |
 
 ## 环境自检
 
@@ -399,6 +421,21 @@ php bin/kode check
 > `restart` 内部先向旧 master 发 `SIGTERM` 并等待其退出，再用 `nohup ... &` 以脱离当前进程组的方式
 > 启动新进程，因此可在 CI / 部署脚本中安全调用，不会因调用方退出而连累新服务。
 
+### PID 文件语义（v5.2.12 修正）
+
+PID 文件现在由 **master 进程自己写入**，`bin/kode` 只负责把路径通过环境变量传下去。
+
+此前是 `bin/kode` 在 `include` 业务文件**之前**写自己的 `getmypid()`——一旦服务
+`daemonize`，那个 PID 属于已经 `exit` 掉的引导进程，`stop` / `reload` 会向一个不存在
+（或已被系统复用给无关进程）的 PID 发信号。
+
+配套加固：
+
+- `stop` / `reload` / `status` 在发信号前校验该 PID 仍存活**且确实是本服务的 master**，
+  避免 PID 复用后误伤同机其他进程；发现陈旧 PID 文件即清理。
+- `restart` 等待旧 master 退出，超时后升级为 `SIGKILL`，**确认死亡后**才清理 PID 文件
+  并拉起新进程，不再出现「旧进程仍占端口、新进程 bind 失败」的孤儿态。
+- master 正常退出时清理自己写的 PID 文件。
 
 
 ## 接入自定义运行时

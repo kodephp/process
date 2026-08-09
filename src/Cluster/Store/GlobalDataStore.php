@@ -152,11 +152,12 @@ final class GlobalDataStore implements StoreInterface
         return $this->client->exists($this->k($key));
     }
 
-    public function increment(string $key, int $step = 1, int $ttlMs = 0): int
+    public function increment(string $key, int $step = 1, int $ttlMs = 0): int|false
     {
         $value = $this->client->increment($this->k($key), $step, $this->ttlToSeconds($ttlMs));
 
-        return $value === false ? 0 : (int) $value;
+        // 失败如实上报：强转成 0 会让上层把「后端挂了」误判成「计数还没起步」
+        return $value === false ? false : (int) $value;
     }
 
     public function expire(string $key, int $ttlMs): bool

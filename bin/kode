@@ -33,11 +33,13 @@ switch ($command) {
             exit(1);
         }
 
-        // 记录 PID 与启动命令，使 stop / reload / status / restart 自洽
-        file_put_contents(KODE_PID_FILE, (string) getmypid());
+        // PID 文件改由 master 进程在真正启动后写入（见 NativeRuntime::writePidFile），
+        // 以兼容 daemonize 两次 fork 后 master PID 与 bin/kode 进程 PID 不同的情形；
+        // 通过环境变量把标准 PID 路径透传给 master。仅记录启动命令供 restart 沿用。
+        putenv('KODE_PID_FILE=' . KODE_PID_FILE);
         file_put_contents(KODE_CMD_FILE, $file);
 
-        echo "Starting server from {$file} (PID: " . getmypid() . ")...\n";
+        echo "Starting server from {$file}...\n";
         $code = include $file;
         break;
 
@@ -51,14 +53,28 @@ switch ($command) {
 
         $pid = (int) file_get_contents($pidFile);
 
-        if (posix_kill($pid, Signal::TERM)) {
-            echo "Server stopped (PID: {$pid})\n";
+        if (!isKodeMaster($pid)) {
+            echo "Stale PID file (process not a running kode master). Cleaning up.\n";
             unlink($pidFile);
             @unlink(KODE_CMD_FILE);
-        } else {
-            echo "Failed to stop server.\n";
             exit(1);
         }
+
+        posix_kill($pid, Signal::TERM);
+        // 等待优雅退出（最多约 5 秒）
+        for ($i = 0; $i < 50; $i++) {
+            if (!@posix_kill($pid, 0)) {
+                break;
+            }
+            usleep(100_000);
+        }
+        // 超时仍未退出则强杀，避免残留孤儿
+        if (@posix_kill($pid, 0)) {
+            @posix_kill($pid, SIGKILL);
+        }
+        unlink($pidFile);
+        @unlink(KODE_CMD_FILE);
+        echo "Server stopped (PID: {$pid})\n";
         break;
 
     case 'restart':
@@ -75,6 +91,13 @@ switch ($command) {
         }
 
         $pid = (int) file_get_contents($pidFile);
+
+        if (!isKodeMaster($pid)) {
+            echo "Stale PID file (process not a running kode master). Cleaning up.\n";
+            unlink($pidFile);
+            @unlink(KODE_CMD_FILE);
+            exit(1);
+        }
 
         if (posix_kill($pid, Signal::HUP)) {
             echo "Server reloaded (PID: {$pid})\n";
@@ -94,7 +117,7 @@ switch ($command) {
 
         $pid = (int) file_get_contents($pidFile);
 
-        if (posix_kill($pid, 0)) {
+        if (isKodeMaster($pid)) {
             echo "Server is running (PID: {$pid})\n";
         } else {
             echo "Server is not running (stale PID file).\n";
@@ -169,22 +192,36 @@ function restartServer(?string $file): void
         exit(1);
     }
 
-    // 2. 停止旧进程（若存在且存活）
+    // 2. 停止旧进程（若存在且确为 kode master）
     if (file_exists(KODE_PID_FILE)) {
         $pid = (int) file_get_contents(KODE_PID_FILE);
-        if ($pid > 0 && @posix_kill($pid, 0)) {
+        if (isKodeMaster($pid)) {
             echo "Stopping old server (PID: {$pid})...\n";
             @posix_kill($pid, Signal::TERM);
-            // 等待旧进程退出（最多约 5 秒）
+            // 等待优雅退出（最多约 5 秒）
             for ($i = 0; $i < 50; $i++) {
                 if (!@posix_kill($pid, 0)) {
                     break;
                 }
                 usleep(100_000);
             }
+            // 优雅退出超时则强杀，避免遗留孤儿进程继续占用端口
+            if (@posix_kill($pid, 0)) {
+                @posix_kill($pid, SIGKILL);
+                for ($i = 0; $i < 20; $i++) {
+                    if (!@posix_kill($pid, 0)) {
+                        break;
+                    }
+                    usleep(100_000);
+                }
+            }
         }
-        @unlink(KODE_PID_FILE);
-        @unlink(KODE_CMD_FILE);
+        // 确认旧进程已死亡后再清理 PID 文件，否则新实例 bind 同端口会失败、
+        // 旧进程沦为无 PID 文件可管的孤儿。
+        if (!@posix_kill($pid, 0)) {
+            @unlink(KODE_PID_FILE);
+            @unlink(KODE_CMD_FILE);
+        }
     }
 
     // 3. 以 detached 方式启动新进程（nohup + &，脱离当前进程组独立运行）
@@ -212,6 +249,24 @@ function restartServer(?string $file): void
         echo "Restart launched but new server did not become ready. Check logs.\n";
         exit(1);
     }
+}
+
+/**
+ * 校验给定 PID 是否为存活的 kode master：先确认进程存活，再尽力核对命令行
+ * 含 "kode"（Linux /proc 可用时），避免 PID 复用后误杀无关进程。
+ */
+function isKodeMaster(int $pid): bool
+{
+    if ($pid <= 0 || !@posix_kill($pid, 0)) {
+        return false;
+    }
+    if (is_readable("/proc/{$pid}/cmdline")) {
+        $cmd = @file_get_contents("/proc/{$pid}/cmdline");
+        if ($cmd !== false && !str_contains($cmd, 'kode')) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /**

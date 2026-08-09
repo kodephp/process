@@ -25,6 +25,16 @@ final class Hpack
     private const int ENTRY_OVERHEAD = 32;
 
     /**
+     * 变长整数（RFC 7541 §5.1）续接字节允许的最大位移。
+     *
+     * 允许 shift ∈ {0,7,14,21,28}，即最多 5 个续接字节，可表示到约 3.4e10——
+     * 远超本实现任何合法整数（头块上限 64KB、动态表索引至多数千），却仍安全落在
+     * int64 内，不会溢出。超过即判非法：$shift 无上限时攻击者可用一串 0xFF 让
+     * $value 溢出为负，进而使 STATIC_TABLE[负数] 取到 null 而静默产出 [NULL, NULL]。
+     */
+    private const int MAX_VARINT_SHIFT = 28;
+
+    /**
      * 静态表（RFC 7541 附录 A），索引 1..61。
      *
      * @var array<int, array{0: string, 1: string}>
@@ -313,16 +323,66 @@ final class Hpack
     // ------------------------------------------------------------- 解码
 
     /**
+     * 续读变长整数的后续字节（RFC 7541 §5.1）。
+     *
+     * 仅在前缀位全 1（`$value === $mask`）时调用——前缀未饱和的快路径依旧完全内联在
+     * {@see decode} 里，不经过本方法，因此热路径的调用次数不变。
+     *
+     * 两道硬边界，缺一即为畸形输入：
+     *  - **越界**：续接字节必须真实存在。原先直接 `ord($block[$i])` 读越界偏移，PHP 只
+     *    发一条 Warning 并返回 ""，`ord("")` 得 0，于是循环「正常」结束，截断的头块被
+     *    当作合法输入继续解析。
+     *  - **位移上限**：见 {@see MAX_VARINT_SHIFT}。
+     *
+     * @param int $value 前缀饱和值（即 $mask），续接字节在其之上累加
+     * @throws Http2Exception 截断或超长
+     */
+    private static function readVarintTail(string $block, int &$i, int $len, int $value): int
+    {
+        $shift = 0;
+
+        do {
+            if ($i >= $len) {
+                throw Http2Exception::compression('HPACK 变长整数截断');
+            }
+            if ($shift > self::MAX_VARINT_SHIFT) {
+                throw Http2Exception::compression('HPACK 变长整数过长');
+            }
+            $b      = ord($block[$i]);
+            $i++;
+            $value += ($b & 0x7f) << $shift;
+            $shift += 7;
+        } while (($b & 0x80) !== 0);
+
+        return $value;
+    }
+
+    /**
      * 解码一个完整头块（HEADERS + 所有 CONTINUATION 的拼接结果）。
      *
+     * **解压炸弹防护**：$maxListSize > 0 时，边解码边按 RFC 7541 §4.1 累计
+     * 「解压后头列表体积」（name + value + 32），一旦超限就**不再向 $out 追加**，
+     * 并置 $exceeded = true。攻击者可用 62KB 全是动态表索引的头块，让每个索引
+     * 字节展开成一条 4KB 的头（62000 × 4KB ≈ 241MB）——爆的是输出列表，动态表
+     * 本身另有 maxDynamicSize 封顶。停止追加后内存即被钳住。
+     *
+     * 注意这里**继续解完整个头块**而不是中途抛异常：HPACK 是连接级有状态编码，
+     * 提前退出会漏掉后续的增量索引指令，使本端动态表与对端永久失步，之后所有
+     * 头块都会解错。解完再由调用方按流级 RST_STREAM 拒绝，连接得以存活。
+     *
+     * @param int  $maxListSize 解压后头列表上限（0 = 不限）
+     * @param bool $exceeded    出参：是否超限（超限时 $out 为截断结果）
      * @return list<array{0: string, 1: string}> 有序的 [name, value] 列表（保留重复头）
      * @throws Http2Exception 头块畸形 / 索引越界 / Huffman 非法
      */
-    public function decode(string $block): array
+    public function decode(string $block, int $maxListSize = 0, bool &$exceeded = false): array
     {
         $out = [];
         $len = strlen($block);
         $i   = 0;
+
+        $listSize = 0;
+        $limit    = $maxListSize > 0 ? $maxListSize : PHP_INT_MAX;
 
         while ($i < $len) {
             $byte = ord($block[$i]);
@@ -333,25 +393,21 @@ final class Hpack
                 $value = $byte & $mask;
                 $i++;
                 if ($value === $mask) {
-                    $shift = 0;
-                    do {
-                        $b = ord($block[$i]);
-                        $i++;
-                        $value += ($b & 0x7f) << $shift;
-                        $shift += 7;
-                    } while (($b & 0x80) !== 0);
+                    $value = self::readVarintTail($block, $i, $len, $value);
                 }
                 if ($value === 0) {
                     throw Http2Exception::compression('HPACK 索引 0 非法');
                 }
                 if ($value <= 61) {
                     $entry = self::STATIC_TABLE[$value];
-                    $out[] = [$entry[0], $entry[1]];
                 } else {
                     $entry = $this->dynamic[$value - 62] ?? null;
                     if ($entry === null) {
                         throw Http2Exception::compression('HPACK 索引越界：' . $value);
                     }
+                }
+                $listSize += strlen($entry[0]) + strlen($entry[1]) + self::ENTRY_OVERHEAD;
+                if ($listSize <= $limit) {
                     $out[] = [$entry[0], $entry[1]];
                 }
                 continue;
@@ -363,13 +419,7 @@ final class Hpack
                 $value = $byte & $mask;
                 $i++;
                 if ($value === $mask) {
-                    $shift = 0;
-                    do {
-                        $b = ord($block[$i]);
-                        $i++;
-                        $value += ($b & 0x7f) << $shift;
-                        $shift += 7;
-                    } while (($b & 0x80) !== 0);
+                    $value = self::readVarintTail($block, $i, $len, $value);
                 }
                 if ($value > $this->capacityLimit) {
                     throw Http2Exception::compression('HPACK 动态表大小更新超过上限');
@@ -385,13 +435,7 @@ final class Hpack
                 $value = $byte & $mask;
                 $i++;
                 if ($value === $mask) {
-                    $shift = 0;
-                    do {
-                        $b = ord($block[$i]);
-                        $i++;
-                        $value += ($b & 0x7f) << $shift;
-                        $shift += 7;
-                    } while (($b & 0x80) !== 0);
+                    $value = self::readVarintTail($block, $i, $len, $value);
                 }
                 $nameIndex = $value;
                 if ($nameIndex === 0) {
@@ -403,13 +447,7 @@ final class Hpack
                     $strlen  = ord($block[$i]) & 0x7f;
                     $i++;
                     if ($strlen === 0x7f) {
-                        $shift = 0;
-                        do {
-                            $b = ord($block[$i]);
-                            $i++;
-                            $strlen += ($b & 0x7f) << $shift;
-                            $shift += 7;
-                        } while (($b & 0x80) !== 0);
+                        $strlen = self::readVarintTail($block, $i, $len, $strlen);
                     }
                     if ($i + $strlen > $len) {
                         throw Http2Exception::compression('HPACK 字符串长度越界');
@@ -430,13 +468,7 @@ final class Hpack
                 $strlen  = ord($block[$i]) & 0x7f;
                 $i++;
                 if ($strlen === 0x7f) {
-                    $shift = 0;
-                    do {
-                        $b = ord($block[$i]);
-                        $i++;
-                        $strlen += ($b & 0x7f) << $shift;
-                        $shift += 7;
-                    } while (($b & 0x80) !== 0);
+                    $strlen = self::readVarintTail($block, $i, $len, $strlen);
                 }
                 if ($i + $strlen > $len) {
                     throw Http2Exception::compression('HPACK 字符串长度越界');
@@ -444,8 +476,12 @@ final class Hpack
                 $raw      = substr($block, $i, $strlen);
                 $i       += $strlen;
                 $valueStr = $huffman ? self::huffmanDecode($raw) : $raw;
+                // push() 必须无条件执行：动态表是连接级状态，漏一条即与对端失步
                 $this->push($name, $valueStr);
-                $out[] = [$name, $valueStr];
+                $listSize += strlen($name) + strlen($valueStr) + self::ENTRY_OVERHEAD;
+                if ($listSize <= $limit) {
+                    $out[] = [$name, $valueStr];
+                }
                 continue;
             }
 
@@ -454,13 +490,7 @@ final class Hpack
             $value = $byte & $mask;
             $i++;
             if ($value === $mask) {
-                $shift = 0;
-                do {
-                    $b = ord($block[$i]);
-                    $i++;
-                    $value += ($b & 0x7f) << $shift;
-                    $shift += 7;
-                } while (($b & 0x80) !== 0);
+                $value = self::readVarintTail($block, $i, $len, $value);
             }
             $nameIndex = $value;
             if ($nameIndex === 0) {
@@ -472,13 +502,7 @@ final class Hpack
                 $strlen  = ord($block[$i]) & 0x7f;
                 $i++;
                 if ($strlen === 0x7f) {
-                    $shift = 0;
-                    do {
-                        $b = ord($block[$i]);
-                        $i++;
-                        $strlen += ($b & 0x7f) << $shift;
-                        $shift += 7;
-                    } while (($b & 0x80) !== 0);
+                    $strlen = self::readVarintTail($block, $i, $len, $strlen);
                 }
                 if ($i + $strlen > $len) {
                     throw Http2Exception::compression('HPACK 字符串长度越界');
@@ -499,21 +523,22 @@ final class Hpack
             $strlen  = ord($block[$i]) & 0x7f;
             $i++;
             if ($strlen === 0x7f) {
-                $shift = 0;
-                do {
-                    $b = ord($block[$i]);
-                    $i++;
-                    $strlen += ($b & 0x7f) << $shift;
-                    $shift += 7;
-                } while (($b & 0x80) !== 0);
+                $strlen = self::readVarintTail($block, $i, $len, $strlen);
             }
             if ($i + $strlen > $len) {
                 throw Http2Exception::compression('HPACK 字符串长度越界');
             }
-            $raw = substr($block, $i, $strlen);
-            $i  += $strlen;
-            $out[] = [$name, $huffman ? self::huffmanDecode($raw) : $raw];
+            $raw      = substr($block, $i, $strlen);
+            $i       += $strlen;
+            $valueStr = $huffman ? self::huffmanDecode($raw) : $raw;
+
+            $listSize += strlen($name) + strlen($valueStr) + self::ENTRY_OVERHEAD;
+            if ($listSize <= $limit) {
+                $out[] = [$name, $valueStr];
+            }
         }
+
+        $exceeded = $listSize > $limit;
 
         return $out;
     }
@@ -699,6 +724,17 @@ final class Hpack
                     break;
                 }
             }
+        }
+
+        // 主循环已吃完所有字节却仍剩 ≥ 8 位：这些位无法构成任何码字，属码字截断。
+        // 必须在进入收尾循环**之前**拦下：收尾循环按「剩余 < 8 位」设计，$curBits ≥ 9 时
+        // (8 - $curBits) 为负，`1 << 负数` 抛 ArithmeticError——它不是 Http2Exception，
+        // 会穿透会话层的 catch 直接打死 worker（2 字节 "\x07\xfd" 即可触发）。
+        //
+        // 之所以能带着 ≥ 8 位走到这里：热路径 while ($curBits >= 8) 在 decodeLong()
+        // 返回 false 时 break，而最短长码为 10 位，故 $curBits 为 8 或 9 时必然 break。
+        if ($curBits >= 8) {
+            throw Http2Exception::compression('Huffman 码字截断');
         }
 
         // 收尾：剩余 < 8 位，构造补 1 的 8 位窗口（与 RFC 尾部填充一致）

@@ -123,6 +123,34 @@ final class NativeConnectionTest extends TestCase
         $this->assertFalse($conn->isChunkStarted());
     }
 
+    /**
+     * keep-alive 复用：同一条连接上连续两个 chunked 响应，每个都必须带终止块
+     * `0\r\n\r\n`。缺陷表现为第二个响应缺终止块（httpChunkEnded 未在响应间复位），
+     * 客户端会一直等待而挂起。
+     */
+    public function testKeepAliveSecondChunkedResponseEmitsTerminator(): void
+    {
+        $conn = $this->makeHttpConn();
+
+        // 第一个流式响应
+        $conn->chunk('first');
+        $conn->endChunk();
+
+        // 同一 keep-alive 连接上的第二个流式响应
+        $conn->chunk('second');
+        $conn->endChunk();
+
+        $wire = $this->drain($conn);
+        $this->assertSame(
+            2,
+            substr_count($wire, "0\r\n\r\n"),
+            '两个 chunked 响应都应发送终止块，否则第二个响应客户端会挂起'
+        );
+
+        // 两个响应各自有独立的 beginChunked 头
+        $this->assertSame(2, substr_count($wire, "Transfer-Encoding: chunked\r\n"));
+    }
+
     // ----------------------------------------------------- HTTP gzip 压缩
 
     public function testGzipAutoCompressesOnSend(): void

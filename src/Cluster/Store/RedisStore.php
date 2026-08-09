@@ -201,13 +201,16 @@ final class RedisStore implements StoreInterface
         return (int) $this->call(fn (): mixed => $this->redis->exists($this->k($key))) > 0;
     }
 
-    public function increment(string $key, int $step = 1, int $ttlMs = 0): int
+    public function increment(string $key, int $step = 1, int $ttlMs = 0): int|false
     {
-        return (int) $this->call(fn (): mixed => $this->redis->eval(
+        $value = $this->call(fn (): mixed => $this->redis->eval(
             self::LUA_INCR,
             [$this->k($key), (string) $step, (string) $ttlMs],
             1
         ));
+
+        // 脚本执行失败时 phpredis 返回 false；强转成 0 会让限流器误以为配额没用过
+        return $value === false || $value === null ? false : (int) $value;
     }
 
     public function expire(string $key, int $ttlMs): bool

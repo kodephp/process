@@ -148,8 +148,11 @@ final class RpcClient
                 if ($response === null) {
                     $this->drop($address);
 
+                    // continue 2：跳出 do..while 直接进入下一轮 for，重连再试一次。
+                    // 用 break 只会退出内层循环，然后拿着 null 掉进错误分支，
+                    // 报一句「未知错误」——重试从来没真正发生过。
                     if ($attempt === 0 && $this->persistent) {
-                        break;
+                        continue 2;
                     }
 
                     throw ClusterException::rpcFailed($address, '读取响应超时或连接中断');
@@ -229,7 +232,6 @@ final class RpcClient
         }
 
         $sockets = [];
-        $buffers = [];
         $results = [];
 
         // 阶段一：全部连上并把请求写出去
@@ -243,7 +245,9 @@ final class RpcClient
                 }
 
                 $sockets[$address] = $socket;
-                $buffers[$address] = '';
+                // 复用连接级缓冲：广播读到的半包必须留在这里，
+                // 否则连接还躺在池子里、字节却被丢了，下一次 call() 直接错位
+                $this->readBuffers[$this->normalize($address)] ??= '';
             } catch (Throwable $e) {
                 $this->drop($address);
                 $results[$address] = ['ok' => false, 'error' => $e->getMessage()];
@@ -281,18 +285,30 @@ final class RpcClient
                     continue;
                 }
 
-                $buffers[$address] .= $chunk;
+                $normalized = $this->normalize($address);
+                $buffer     = ($this->readBuffers[$normalized] ?? '') . $chunk;
 
                 try {
-                    $frame = RpcFrame::shift($buffers[$address]);
+                    $frame = RpcFrame::shift($buffer);
                 } catch (Throwable $e) {
                     $results[$address] = ['ok' => false, 'error' => '响应解析失败：' . $e->getMessage()];
                     unset($sockets[$address]);
+                    $this->drop($address);
                     continue;
                 }
 
-                if ($frame === null) {
+                $this->readBuffers[$normalized] = $buffer;
+
+                if ($frame === false) {
                     continue;   // 半包，继续等
+                }
+
+                if ($frame === null) {
+                    // 坏帧：连接已不可信，断开重来好过继续读错位的字节
+                    $results[$address] = ['ok' => false, 'error' => '响应帧非法'];
+                    unset($sockets[$address]);
+                    $this->drop($address);
+                    continue;
                 }
 
                 $results[$address] = ($frame['o'] ?? false) === true
@@ -303,9 +319,11 @@ final class RpcClient
             }
         }
 
-        // 剩下没回包的按超时处理
+        // 剩下没回包的按超时处理：连接上可能已经躺着半个帧，
+        // 继续留在池里只会让下一次 call() 读到错位的字节，直接丢弃
         foreach (array_keys($sockets) as $address) {
             $results[$address] = ['ok' => false, 'error' => '响应超时'];
+            $this->drop($address);
         }
 
         return $results;
@@ -325,9 +343,8 @@ final class RpcClient
         $deadline = microtime(true) + $this->timeout;
 
         while (microtime(true) < $deadline) {
-            // 先尝试从已读缓冲里解析出一条完整帧
-            $buffer = $this->readBuffers[$normalized] ?? '';
-            if ($buffer !== '') {
+            // 先把已读缓冲榨干：里面可能已经躺着好几帧，逐条取直到剩下半包
+            while (($buffer = $this->readBuffers[$normalized] ?? '') !== '') {
                 try {
                     $frame = RpcFrame::shift($buffer);
                 } catch (Throwable) {
@@ -336,9 +353,15 @@ final class RpcClient
                 }
                 $this->readBuffers[$normalized] = $buffer;
 
+                if ($frame === false) {
+                    break;              // 半包，去读更多字节
+                }
+
                 if ($frame !== null) {
                     return $frame;
                 }
+
+                // null：坏帧已被消费，跳过它继续解析下一帧
             }
 
             $read   = [$socket];

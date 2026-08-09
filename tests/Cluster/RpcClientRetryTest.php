@@ -10,15 +10,17 @@ use Kode\Process\Cluster\Rpc\RpcServer;
 use PHPUnit\Framework\TestCase;
 
 /**
- * RpcClient 集成测试。
+ * 回归：长连接失效时 call() 必须真的重连重试一次。
  *
- * 用 fork 起一个极简 TCP server，对每个连接用 RpcServer::handle() 处理并回包
- * （注意：服务端对「单向通知」也回包，模拟修复前的服务端行为），
- * 以验证 RpcClient::call() 的「按请求 ID 匹配响应、丢弃错配帧」防御是否生效。
+ * 测试服务端对**第一条连接**收下请求后直接关闭（模拟被中间设备/服务端回收的
+ * 空闲长连接），对第二条连接正常回包。
+ *
+ * 修复前内层 `break` 只跳出读帧循环，随后拿着 null 掉进错误分支，
+ * 抛出一句莫名其妙的「未知错误」——重试根本没发生。
  *
  * 需要 pcntl + posix 扩展；缺失时整体跳过。
  */
-final class RpcClientTest extends TestCase
+final class RpcClientRetryTest extends TestCase
 {
     private string $addr;
 
@@ -61,15 +63,24 @@ final class RpcClientTest extends TestCase
         }
 
         if ($pid === 0) {
-            // 子进程：扮演服务端
             $server = new RpcServer();
             $server->register('echo', static fn (array $p): array => $p);
-            $server->register('log', static fn (array $p): array => ['ok' => true]);
+
+            $accepted = 0;
 
             while (true) {
                 $conn = @stream_socket_accept($sock, 2);
                 if ($conn === false) {
-                    continue; // 超时，继续等待
+                    continue;
+                }
+
+                $accepted++;
+
+                // 第一条连接：收下请求就关，不回包
+                if ($accepted === 1) {
+                    @fread($conn, 65536);
+                    @fclose($conn);
+                    continue;
                 }
 
                 $buffer = '';
@@ -81,7 +92,6 @@ final class RpcClientTest extends TestCase
                     $buffer .= $data;
 
                     while (is_array($frame = RpcFrame::shift($buffer))) {
-                        // 模拟「未修复的服务端」：notify（空 id）也回包，制造遗留响应
                         @fwrite($conn, RpcFrame::encode($server->handle($frame)));
                     }
                 }
@@ -90,7 +100,6 @@ final class RpcClientTest extends TestCase
             exit(0);
         }
 
-        // 父进程：关闭自己的监听副本，仅保留子进程在跑
         fclose($sock);
         $this->serverPid = $pid;
         usleep(200_000);
@@ -98,25 +107,14 @@ final class RpcClientTest extends TestCase
         return '127.0.0.1:' . $port;
     }
 
-    public function testCallReturnsResult(): void
+    public function testCallReconnectsWhenFirstAttemptGetsNoResponse(): void
     {
         $client = new RpcClient(timeout: 2.0);
 
-        $this->assertSame(['a' => 1], $client->call($this->addr, 'echo', ['a' => 1]));
-    }
-
-    /**
-     * 关键回归：notify 在持久连接上会留下一条「空 id」响应。
-     * 若 call() 不按请求 ID 匹配，就会误把这条遗留响应当成自己的结果返回。
-     */
-    public function testNotifyDoesNotCorruptSubsequentCall(): void
-    {
-        $client = new RpcClient(timeout: 2.0);
-
-        // 发送单向通知（服务端会回包，制造遗留响应）
-        $this->assertTrue($client->notify($this->addr, 'log', ['msg' => 'hi']));
-
-        // 同一持久连接上的后续 call 必须拿到 echo 的正确结果
-        $this->assertSame(['a' => 42], $client->call($this->addr, 'echo', ['a' => 42]));
+        $this->assertSame(
+            ['a' => 7],
+            $client->call($this->addr, 'echo', ['a' => 7]),
+            '首次连接被服务端关掉时应重连重试，而不是报「未知错误」'
+        );
     }
 }

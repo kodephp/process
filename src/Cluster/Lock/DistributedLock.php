@@ -142,8 +142,16 @@ final class DistributedLock
     public function tryAcquire(): bool
     {
         if ($this->depth > 0) {
-            $this->depth++;
-            return true;
+            // depth>0 只说明「本实例曾经拿到过锁」。TTL 一到锁就自动没了，
+            // 此时闭眼 +1 会让本进程和新持有者同时进临界区——重入前先确认还没过期
+            if ($this->remaining() > 0.0) {
+                $this->depth++;
+                return true;
+            }
+
+            // 本地视角已过期：清掉残留状态，当作全新一次获取去抢
+            $this->depth      = 0;
+            $this->acquiredAt = 0.0;
         }
 
         if ($this->store->setIfAbsent($this->storeKey(), $this->token, $this->ttlMs())) {

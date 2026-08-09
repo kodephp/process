@@ -147,6 +147,48 @@ final class NativeRuntimeTest extends TestCase
     }
 
     /**
+     * start() 之前通过 addTimer() 注册的定时器必须进入「待重放」队列，
+     * 且 $timers[$id] 存 null —— 否则 runWorker() 会把它当底层 timer id 解包，
+     * 在 strict_types 下抛 TypeError，导致 worker 启动即崩、master 满速 refork。
+     */
+    public function testAddTimerBeforeStartIsQueuedForReplay(): void
+    {
+        $rt = new NativeRuntime();
+        $id = $rt->addTimer(1.0, static fn () => null, true);
+        $this->assertGreaterThan(0, $id);
+
+        $ref     = new \ReflectionClass(NativeRuntime::class);
+        $pending = $ref->getProperty('pendingTimers');
+        $pending->setAccessible(true);
+        $timers = $ref->getProperty('timers');
+        $timers->setAccessible(true);
+
+        $this->assertArrayHasKey($id, $pending->getValue($rt), 'start 前注册的定时器应进入待重放队列');
+        $this->assertNull($timers->getValue($rt)[$id], '未启动时 $timers[$id] 应为 null，避免被当底层 id 解包崩溃');
+
+        // delTimer 能正确移除待重放项
+        $this->assertTrue($rt->delTimer($id));
+        $this->assertArrayNotHasKey($id, $pending->getValue($rt));
+    }
+
+    /**
+     * master 的停机总超时须覆盖 worker 的优雅宽限期，否则会在宽限期内 SIGKILL
+     * 在途请求（gracefulShutdownTimeout=30 而 stopTimeout=5 时必现）。
+     */
+    public function testStopTimeoutCoversGracefulShutdownTimeout(): void
+    {
+        $ref    = new \ReflectionClass(NativeRuntime::class);
+        $apply  = $ref->getMethod('applyOptions');
+        $apply->setAccessible(true);
+        $stopProp = $ref->getProperty('stopTimeout');
+        $stopProp->setAccessible(true);
+
+        $rt = new NativeRuntime();
+        $apply->invoke($rt, ['gracefulShutdownTimeout' => 30, 'stopTimeout' => 5]);
+        $this->assertGreaterThanOrEqual(31, $stopProp->getValue($rt));
+    }
+
+    /**
      * 子进程冒烟：真实起 master-worker，text 协议回显。
      */
     public function testNativeTextServerRoundTrip(): void

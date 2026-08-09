@@ -53,6 +53,38 @@ final class ProtocolTest extends TestCase
         $this->assertSame($data, $decoded);
     }
 
+    /**
+     * frame:// 监听走 LengthPrefix，报文完全由对端控制。
+     * 默认必须关闭类还原，否则任意对端都能触发对象注入。
+     */
+    public function testLengthPrefixRefusesObjectRestorationByDefault(): void
+    {
+        $payload = 'O:8:"stdClass":1:{s:1:"a";i:1;}';
+        $encoded = pack('N', 4 + strlen($payload)) . $payload;
+
+        $decoded = LengthPrefix::decode($encoded);
+
+        $this->assertNotInstanceOf(\stdClass::class, $decoded);
+        $this->assertInstanceOf(\__PHP_Incomplete_Class::class, $decoded);
+    }
+
+    public function testLengthPrefixRestoresObjectsOnlyAfterOptIn(): void
+    {
+        $payload = 'O:8:"stdClass":1:{s:1:"a";i:1;}';
+        $encoded = pack('N', 4 + strlen($payload)) . $payload;
+
+        LengthPrefix::setAllowedClasses([\stdClass::class]);
+
+        try {
+            $decoded = LengthPrefix::decode($encoded);
+
+            $this->assertInstanceOf(\stdClass::class, $decoded);
+            $this->assertSame(1, $decoded->a);
+        } finally {
+            LengthPrefix::setAllowedClasses(false);
+        }
+    }
+
     public function testTextProtocol(): void
     {
         $this->assertSame('text', TextProtocol::getName());

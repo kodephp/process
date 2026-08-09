@@ -75,6 +75,11 @@ final class RateLimiter
             (int) round($window * 2 * 1000)
         );
 
+        // 后端故障时 fail-closed：计不了数就等于限不住，此时放行等于把限流整个关掉
+        if ($current === false) {
+            return false;
+        }
+
         return $current <= $limit;
     }
 

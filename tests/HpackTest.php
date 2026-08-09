@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Kode\Process\Tests;
 
+use Kode\Process\Protocol\Http2\Frame;
 use Kode\Process\Protocol\Http2\Hpack;
 use Kode\Process\Protocol\Http2\Http2Exception;
 use PHPUnit\Framework\TestCase;
@@ -503,5 +504,202 @@ final class HpackTest extends TestCase
         $this->assertLessThanOrEqual(1024, $entries, '整头缓存不得超过上限');
 
         Hpack::clearHeaderCache();
+    }
+
+    // ------------------------------------------- 安全：变长整数（RFC 7541 §5.1）
+
+    /**
+     * 变长整数的续接字节串没有位移上限时，$shift 会一路涨到 63 以上，
+     * `($b & 0x7f) << $shift` 溢出成负数，$value 随之为负；负索引让
+     * `STATIC_TABLE[$value]` 取到 null，解码器于是**不抛异常地**吐出一条
+     * `[NULL, NULL]` 头部。这是静默数据损坏，比死循环更危险——上层拿到的
+     * 是一条看似合法、内容却是 null 的头。修复后必须是受控的 COMPRESSION_ERROR。
+     */
+    public function testOverlongVarintThrowsInsteadOfSilentlyCorruptingHeader(): void
+    {
+        // 索引头字段前缀饱和（0xff）+ 41 个续接字节，足以把 $shift 推过 63
+        $block = "\xff" . str_repeat("\xff", 40) . "\x00";
+
+        try {
+            $out = (new Hpack())->decode($block);
+            self::fail(sprintf(
+                '超长变长整数必须抛 Http2Exception，实际静默返回了 %d 条头部：%s',
+                count($out),
+                var_export($out, true)
+            ));
+        } catch (Http2Exception $e) {
+            self::assertSame(Frame::ERROR_COMPRESSION, $e->errorCode());
+            self::assertStringContainsString('变长整数过长', $e->getMessage());
+        }
+    }
+
+    /**
+     * 续接字节跑出头块末尾时必须判为截断。
+     *
+     * 修复前循环里直接 `ord($block[$i])` 读越界偏移：PHP 只发一条 Warning 并返回 ""，
+     * `ord("")` 得 0，于是「高位为 0」让循环正常收尾，截断的头块被当成合法输入继续解析。
+     */
+    public function testTruncatedVarintContinuationThrows(): void
+    {
+        // 不索引字面量 → 头名字面量长度前缀饱和（0x7f），续接字节缺失
+        $block = "\x00\x7f";
+
+        $this->expectException(Http2Exception::class);
+        $this->expectExceptionMessage('变长整数截断');
+        (new Hpack())->decode($block);
+    }
+
+    /** 合法的多字节变长整数不得被上限误伤（RFC 7541 §5.1 的 1337 用例） */
+    public function testLegitimateMultiByteVarintStillDecodes(): void
+    {
+        // 动态表大小更新到 1337：001 前缀 + 5 位饱和 + 续接 0x9a 0x0a
+        $hpack = new Hpack(4096);
+        $hpack->decode(self::hex('3f 9a 0a'));
+
+        self::assertSame(1337, $hpack->maxDynamicSize());
+    }
+
+    // ----------------------------------------------- 安全：Huffman 边界
+
+    /**
+     * 畸形 Huffman 串必须抛 Http2Exception，绝不能抛 ArithmeticError。
+     *
+     * 根因：热路径 `while ($curBits >= 8)` 在 decodeLong() 返回 false 时 break，
+     * 而最短长码为 10 位，故 $curBits 为 8 或 9 时必然 break；随后收尾循环按
+     * 「剩余 < 8 位」的假设算 `1 << (8 - $curBits)`，$curBits = 9 即负位移。
+     * ArithmeticError 不是 Http2Exception，会穿透会话层的 catch 直接打死 worker。
+     * 仅 2 字节即可触发。
+     */
+    public function testTruncatedHuffmanCodeThrowsHttp2ExceptionNotArithmeticError(): void
+    {
+        try {
+            Hpack::huffmanDecode("\x07\xfd");
+            self::fail('截断的 Huffman 码字必须抛 Http2Exception');
+        } catch (Http2Exception $e) {
+            self::assertSame(Frame::ERROR_COMPRESSION, $e->errorCode());
+        } catch (\ArithmeticError $e) {
+            self::fail('抛出了 ArithmeticError（会打死 worker）而非 Http2Exception：' . $e->getMessage());
+        }
+    }
+
+    /** 同样的畸形串走完整头块解码路径，也必须收敛为 Http2Exception */
+    public function testTruncatedHuffmanInsideHeaderBlockDoesNotEscapeAsError(): void
+    {
+        // 不索引字面量：头名 "a"（原文），头值 Huffman 编码且内容为 07 fd
+        $block = "\x00\x01a\x82\x07\xfd";
+
+        $this->expectException(Http2Exception::class);
+        (new Hpack())->decode($block);
+    }
+
+    /**
+     * 两字节输入全穷举：任何畸形组合都不得逃逸出 Http2Exception 之外的错误。
+     * 这是对「解码器只会抛 Http2Exception」这一契约的强断言。
+     */
+    public function testHuffmanDecoderNeverEscapesNonHttp2Exception(): void
+    {
+        $escaped = [];
+
+        for ($a = 0; $a < 256; $a++) {
+            for ($b = 0; $b < 256; $b++) {
+                try {
+                    Hpack::huffmanDecode(chr($a) . chr($b));
+                } catch (Http2Exception) {
+                    // 预期内
+                } catch (\Throwable $e) {
+                    $escaped[] = sprintf('%02x%02x => %s', $a, $b, get_class($e));
+                }
+            }
+        }
+
+        self::assertSame([], $escaped, '这些输入逃逸出了非 Http2Exception 的错误');
+    }
+
+    // --------------------------------------- 安全：解压炸弹（HPACK bomb）
+
+    /**
+     * 构造一个「解压炸弹」头块：先用增量索引往动态表塞一条大条目，
+     * 再用大量单字节索引引用把它反复展开。
+     */
+    private static function bomb(int $valueSize, int $references): string
+    {
+        // 增量索引 + 新名字："x"，值为 $valueSize 字节
+        $block = "\x40" . "\x01x" . self::literalLength($valueSize) . str_repeat('A', $valueSize);
+
+        // 索引头字段，索引 62 = 动态表首项
+        return $block . str_repeat("\xbe", $references);
+    }
+
+    /** 字符串字面量的长度前缀（7 位前缀、不使用 Huffman） */
+    private static function literalLength(int $length): string
+    {
+        if ($length < 0x7f) {
+            return chr($length);
+        }
+
+        $out     = "\x7f";
+        $length -= 0x7f;
+        while ($length >= 0x80) {
+            $out    .= chr(($length & 0x7f) | 0x80);
+            $length >>= 7;
+        }
+
+        return $out . chr($length);
+    }
+
+    /**
+     * 超过 maxListSize 后解码器必须**停止向输出列表追加**，把内存钳住。
+     *
+     * 攻击面：62KB 全是索引字节的头块，每个字节展开成一条 4KB 的头，
+     * 解压后列表可达数百 MB。这里用很小的上限触发同一条代码路径，不真的分配大内存。
+     */
+    public function testDecodeStopsAccumulatingOnceHeaderListLimitExceeded(): void
+    {
+        $references = 2000;
+        $block      = self::bomb(1000, $references);
+
+        $exceeded = false;
+        $out      = (new Hpack(8192))->decode($block, 5000, $exceeded);
+
+        self::assertTrue($exceeded, '超限必须置位 $exceeded');
+        // 每条引用计 1(name) + 1000(value) + 32 = 1033 字节，5000 上限最多容下 4 条
+        self::assertLessThanOrEqual(
+            10,
+            count($out),
+            sprintf('超限后必须停止追加，实际累积了 %d 条（共发了 %d 条引用）', count($out), $references)
+        );
+    }
+
+    /**
+     * 关键：超限时**不能**中途放弃解码。
+     *
+     * HPACK 是连接级有状态编码，提前退出会漏掉后续的增量索引指令，让本端动态表与
+     * 对端编码器永久失步，之后每个头块都会解错。所以必须解完整块、只是不再累积输出。
+     */
+    public function testOversizedHeaderListStillAdvancesHpackContext(): void
+    {
+        $hpack = new Hpack(8192);
+
+        // 头块尾部再追加一条增量索引：只有真的解完整块，它才会进动态表
+        $block  = self::bomb(1000, 500);
+        $block .= "\x40" . "\x06second" . "\x02v2";
+
+        $exceeded = false;
+        $hpack->decode($block, 5000, $exceeded);
+
+        self::assertTrue($exceeded);
+        self::assertSame(2, $hpack->dynamicCount(), '超限也必须解完整块，动态表要收下两条');
+
+        // 上下文完好：索引 62 应当解出最后插入的 second
+        self::assertSame([['second', 'v2']], $hpack->decode("\xbe"));
+    }
+
+    /** 不传上限时行为与修复前完全一致，不得误伤正常解码 */
+    public function testDecodeWithoutLimitIsUnaffected(): void
+    {
+        $out = (new Hpack(8192))->decode(self::bomb(100, 50));
+
+        self::assertCount(51, $out, '未设上限时应完整返回全部头部');
+        self::assertSame(['x', str_repeat('A', 100)], $out[50]);
     }
 }

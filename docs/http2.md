@@ -202,6 +202,22 @@ $s['queued_control'];  // 两次 drain 之间排队的控制帧 ACK 数
 > RST_STREAM 预算（Rapid Reset）、控制帧排队上限（PING/SETTINGS 洪泛），分别覆盖
 > 「分片堆积」「高压缩比膨胀」「合法请求高频重置」「ACK 堆积」四类攻击面。
 
+## 解析层健壮性（v5.2.12）
+
+HPACK 与流状态机针对畸形输入做了五处加固，全部由回归测试覆盖：
+
+| 问题 | 原行为 | 现行为 |
+|------|--------|--------|
+| HPACK 变长整数超长 | 位移涨过 63 位后 `$value` 整数溢出为负，`STATIC_TABLE[负数]` 取到 `null`，**静默产出 `[NULL, NULL]` 头部并正常返回** | 位移超过 28 位或续读越界 → `Http2Exception`(COMPRESSION_ERROR) |
+| Huffman 码字截断 | 最短长码为 10 位，`curBits` 为 8/9 时收尾循环算出 `1 << -1` 抛 `ArithmeticError`——不是 `Http2Exception`，穿透会话层 catch，**2 字节 `\x07\xfd` 即可打死 worker** | 抛 `Http2Exception`(COMPRESSION_ERROR)，降级为流/连接级错误 |
+| HPACK 解压炸弹 | 头列表体积在**解完之后**才校验，62KB 全索引头块先展开成数百 MB 再被拒 | 解码循环内按 RFC 7541 §4.1 逐项累计（`name + value + 32`），超限即停止累积 |
+| DATA 帧不校验流状态 | 对已发过 `END_STREAM` 的流继续发 DATA 会追加进 body，第二个 `END_STREAM` 让**同一请求被二次派发**给业务 handler | 非 `OPEN` 状态收到 DATA → `RST_STREAM(STREAM_CLOSED)`，不派发 |
+| 被拒流跳过 HPACK 解码 | 触发并发上限被拒的流直接跳过解码，而 HPACK 是**连接级有状态**的，动态表就此与对端失步，后续所有流的头部解码全部错乱 | 始终解完头块维持上下文，之后才发 `RST_STREAM(REFUSED_STREAM)` |
+
+> 前两条的共同性质是「解压缩阶段的异常没有被收敛成协议错误」——HPACK 解码在
+> 业务 handler 之前执行，任何逃逸出去的 `Error` 都会直接带走整个 worker 进程。
+> 现在 Huffman 解码器对全部 2 字节输入穷举验证，非 `Http2Exception` 逃逸为 0。
+
 ## 优雅关闭（GOAWAY）
 
 进程收到 `SIGTERM`（`bin/kode stop` / `restart` 也是经由此信号）时，Native 运行时

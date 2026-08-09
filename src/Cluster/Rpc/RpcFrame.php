@@ -42,21 +42,28 @@ final class RpcFrame
     /**
      * 从缓冲区头部切出一条完整报文。
      *
-     * 缓冲区会被就地消费掉已解析的字节。
+     * 缓冲区会被就地消费掉已解析的字节。三种返回值语义必须分清，
+     * 否则调用方无法区分「再等等」和「这帧废了、看下一帧」：
+     *
+     * | 返回  | 含义                     | 调用方应当           |
+     * |-------|--------------------------|----------------------|
+     * | array | 完整一帧                 | 处理它               |
+     * | false | 数据不足（半包）         | 继续读，别再解析     |
+     * | null  | 坏帧，已从缓冲区中丢弃   | 跳过，继续解析下一帧 |
      *
      * @param  string $buffer 引用传入，解析后剩余部分回写
-     * @return array<string, mixed>|null 数据不足返回 null
+     * @return array<string, mixed>|false|null
      * @throws \JsonException 报文体非法 JSON
      */
-    public static function shift(string &$buffer): ?array
+    public static function shift(string &$buffer): array|false|null
     {
         if (strlen($buffer) < self::HEAD_LEN) {
-            return null;
+            return false;
         }
 
         $header = unpack('Nlen', $buffer);
         if ($header === false) {
-            return null;
+            return false;
         }
 
         $total = $header['len'];
@@ -69,7 +76,7 @@ final class RpcFrame
         }
 
         if (strlen($buffer) < $total) {
-            return null;
+            return false;
         }
 
         $body   = substr($buffer, self::HEAD_LEN, $total - self::HEAD_LEN);
@@ -77,6 +84,7 @@ final class RpcFrame
 
         $decoded = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
 
+        // 合法 JSON 但不是对象/数组（如裸标量）：帧已消费，当坏帧丢掉
         return is_array($decoded) ? $decoded : null;
     }
 

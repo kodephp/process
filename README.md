@@ -15,9 +15,7 @@ Kode Process 是一个「进程编排内核 + 多运行时兼容层」：你只�
 
 切换运行时（`native` / `swoole` / `workerman`）只需改一个参数，协议、连接 API、编排原语全部一致。
 
-> **关于「自研 vs 兼容层」**：早期曾以「相对 Workerman 吞吐提升 30%」作为自研内核的硬门槛，实测仅 **1.010×**。
-> 但 PHP 用户态只占全链路约 13%，Amdahl 上限仅 +14.9%，该门槛在数学上不可达，故结论已撤回。
-> v5.0.0 起**自研 Native 运行时成为默认形态**，并补齐分布式协调能力（服务发现、分布式锁、Leader 选举、负载均衡、分布式 ID、限流、集群 RPC），
+> **关于「自研 vs 兼容层」**：v5.0.0 起**自研 Native 运行时成为默认形态**，并补齐分布式协调能力（服务发现、分布式锁、Leader 选举、负载均衡、分布式 ID、限流、集群 RPC），
 > 同时保留 Swoole / Workerman 作为可插拔的高性能运行时。详见 [docs/runtime.md](docs/runtime.md) 与 [docs/cluster.md](docs/cluster.md)。
 
 > **最低要求 PHP 8.3**。若仍在 PHP 8.1 / 8.2 上运行，请使用旧版 `^2.9`。
@@ -36,6 +34,7 @@ Kode Process 是一个「进程编排内核 + 多运行时兼容层」：你只�
 | 🛡️ **HTTP/2 DoS 四层防护** | Rapid Reset（CVE-2023-44487）预算抵扣 + CONTINUATION 洪泛 + MAX_HEADER_LIST_SIZE 解压后体积上限 + PING/SETTINGS 控制帧洪泛；流级拒绝不拖垮连接，水位可由 `stats()` 观测 |
 | ⚡ **HTTP/2 纯函数缓存提速** | HPACK 字面量编码缓存 5.7× + 响应头整块缓存 ≈2.2× + Huffman 解码缓存 ≈1.93× + 解码主循环内联 ≈1.47×（v5.2.6）+ 整头编码缓存 ≈3.4×（v5.2.7）+ 解码字符串读取内联 ≈1.22×（v5.2.9），线格式完全不变；`Hpack::decode` 较 v5.2.7 基线再快约 21%，请求热路径自 v5.2.3 起累计快约 2.0× |
 | 🚀 **HTTP/2 大响应线性发送** | 切帧由平方复杂度改为游标推进 + 待发流索引（v5.2.8）：1MB 响应端到端吞吐 **2.73×**、延迟中位数 **−67%**，`WINDOW_UPDATE` 耗时与并发流数解耦；线格式逐字节不变 |
+| 🔐 **协议层严格校验** | HTTP 请求走私（CL/TE 冲突）拒绝 + 响应头 CRLF 注入过滤 + WebSocket 掩码/控制帧/RSV 按 RFC 6455 校验 + HPACK 变长整数与 Huffman 截断收敛为协议错误（不再打死 worker） |
 | 🗄️ **共享数据（零安装兜底）** | 同主机多进程共享表，apcu → sysvshm 自动择优；也可复用 Swoole/Workerman 表 |
 | 🕸️ **分布式集群** | 服务发现、分布式锁、Leader 选举、负载均衡（5 策略）、分布式 ID(Snowflake)、限流、集群 RPC；可零依赖（包内 GlobalData）或基于 Redis |
 | 🧵 **多线程并行** | 真正的 CPU 多线程（需 ZTS + ext-parallel），与协程桥接 |

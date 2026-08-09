@@ -62,24 +62,42 @@ final class Snowflake
     /** 累计生成个数，用于观测。 */
     private int $generated = 0;
 
+    /** 本进程的持有者标识，首次使用时算一次并缓存。 */
+    private static ?string $owner = null;
+
     /**
      * @param int $workerId 机器 ID，0 ~ 1023，必须集群内唯一
      * @param int $epoch    自定义纪元（毫秒时间戳），设得越晚可用年限越长；上线后不可再改
      */
     public function __construct(
-        private readonly int $workerId = 0,
+        private int $workerId = 0,
         private readonly int $epoch = self::DEFAULT_EPOCH,
     ) {
-        if ($workerId < 0 || $workerId > self::MAX_WORKER_ID) {
-            throw new ClusterException(
-                sprintf('机器 ID 必须在 0 ~ %d 之间，收到 %d', self::MAX_WORKER_ID, $workerId)
-            );
-        }
+        $this->rebind($workerId);
     }
 
     public function workerId(): int
     {
         return $this->workerId;
+    }
+
+    /**
+     * 就地换绑机器 ID（租约丢失后重新分配时用）。
+     *
+     * 必须原地改而不是换个新实例：调用方多半早把生成器引用存起来了，
+     * 换新实例只会让它们继续拿着已失效的机器 ID 发号，撞号而不自知。
+     *
+     * @throws ClusterException 机器 ID 越界
+     */
+    public function rebind(int $workerId): void
+    {
+        if ($workerId < 0 || $workerId > self::MAX_WORKER_ID) {
+            throw new ClusterException(
+                sprintf('机器 ID 必须在 0 ~ %d 之间，收到 %d', self::MAX_WORKER_ID, $workerId)
+            );
+        }
+
+        $this->workerId = $workerId;
     }
 
     public function epoch(): int
@@ -192,7 +210,7 @@ final class Snowflake
         int $ttlMs = 300_000,
         ?string $owner = null,
     ): int {
-        $owner ??= gethostname() . ':' . getmypid();
+        $owner ??= self::owner();
 
         // 从随机位置开始探测，降低多节点同时启动时的抢占碰撞
         $start = random_int(0, self::MAX_WORKER_ID);
@@ -218,7 +236,7 @@ final class Snowflake
         int $ttlMs = 300_000,
         ?string $owner = null,
     ): bool {
-        $owner ??= gethostname() . ':' . getmypid();
+        $owner ??= self::owner();
 
         return $store->compareAndSet(self::workerKey($namespace, $workerId), $owner, $owner, $ttlMs);
     }
@@ -230,9 +248,20 @@ final class Snowflake
         int $workerId,
         ?string $owner = null,
     ): bool {
-        $owner ??= gethostname() . ':' . getmypid();
+        $owner ??= self::owner();
 
         return $store->compareAndDelete(self::workerKey($namespace, $workerId), $owner);
+    }
+
+    /**
+     * 本进程的持有者标识。
+     *
+     * 只算一次并缓存：fork 之后 getmypid() 会变，每次现算会让续租/归还的
+     * compareAndSet 与分配时写下的值对不上，租约白白丢掉。
+     */
+    private static function owner(): string
+    {
+        return self::$owner ??= gethostname() . ':' . getmypid();
     }
 
     private static function workerKey(string $namespace, int $workerId): string

@@ -119,11 +119,15 @@ final class RpcServer
             return RpcFrame::fail($id, '缺少方法名');
         }
 
-        if ($this->token !== null && (string) ($params['_token'] ?? '') !== $this->token) {
+        // hash_equals：定长比较，不给「按字符提前返回」的计时侧信道留口子
+        if ($this->token !== null && !hash_equals($this->token, (string) ($params['_token'] ?? ''))) {
             $this->failed++;
 
             return RpcFrame::fail($id, '鉴权失败');
         }
+
+        // 令牌是协议层字段，别漏进业务处理器——一次参数回显或请求日志就能把它泄出去
+        unset($params['_token']);
 
         $handler = $this->handlers[$method] ?? null;
         if ($handler === null) {
@@ -140,8 +144,16 @@ final class RpcServer
         } catch (Throwable $e) {
             $this->failed++;
 
-            // 只回错误摘要，不外泄调用栈
-            return RpcFrame::fail($id, $e->getMessage());
+            // 细节只写本地日志：异常消息常带表名、文件路径、内网地址，回给调用方等于送情报
+            error_log(sprintf(
+                '[Kode\Process\Cluster\Rpc\RpcServer] 方法 %s 执行失败：%s（%s:%d）',
+                $method,
+                $e->getMessage(),
+                $e->getFile(),
+                $e->getLine()
+            ));
+
+            return RpcFrame::fail($id, '服务端内部错误');
         }
     }
 
@@ -194,8 +206,12 @@ final class RpcServer
                 return;
             }
 
+            if ($request === false) {
+                return;     // 半包，等后续字节
+            }
+
             if ($request === null) {
-                return;
+                continue;   // 坏帧已被丢弃，跳过它继续处理后面的帧，别把后续请求晾在缓冲区里
             }
 
             // 单向通知（空 id）：执行处理器但不回包，避免污染长连接缓冲

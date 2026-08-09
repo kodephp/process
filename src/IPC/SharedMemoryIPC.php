@@ -60,14 +60,15 @@ class SharedMemoryIPC implements IPCInterface
 
         $this->key = $projectId ?? ftok(__FILE__, 'a');
 
-        $shm = @shm_attach($this->key, $shmSize, 0644);
+        // 0600：仅属主可读写，避免同主机上任意本地用户读取 / 抽干共享内存队列
+        $shm = @shm_attach($this->key, $shmSize, 0600);
         if ($shm === false) {
             throw IPCException::sharedMemoryFailed('attach', '无法创建共享内存段（可能超出系统 shmmax 限制）');
         }
         $this->shm = $shm;
 
         $semKey = ($this->key & 0x7FFFFFFF) ^ 0x6B1D8A31;
-        $sem = @sem_get($semKey, 1, 0644, true);
+        $sem = @sem_get($semKey, 1, 0600, true);
         if ($sem === false) {
             $this->logger->warning('无法创建信号量，将使用无锁模式（不保证并发安全）');
             $this->sem = null;
@@ -166,7 +167,15 @@ class SharedMemoryIPC implements IPCInterface
             if ($header['count'] >= $header['capacity']) {
                 return false; // 队列已满
             }
-            shm_put_var($this->shm, $this->slotVar($header['tail']), $serialized);
+            // 共享内存段耗尽时 shm_put_var 会失败。此前忽略返回值，照样推进 tail/count，
+            // 消费者随后会从一个根本没写进去的槽位读到 false。必须先确认写入成功再推进游标。
+            if (@shm_put_var($this->shm, $this->slotVar($header['tail']), $serialized) === false) {
+                $this->logger->warning('共享内存段已满，消息未入队', [
+                    'size' => $len,
+                    'slot' => $header['tail'],
+                ]);
+                return false;
+            }
             $tail = ($header['tail'] + 1) % $header['capacity'];
             $this->writeHeader($header['head'], $tail, $header['count'] + 1);
         } finally {
@@ -306,7 +315,9 @@ class SharedMemoryIPC implements IPCInterface
     private function unserialize(string $data): mixed
     {
         try {
-            return unserialize($data);
+            // allowed_classes => false：IPC 报文只承载数据，禁止实例化任意类，
+            // 避免本地攻击者写入共享内存段触发反序列化利用链。
+            return @unserialize($data, ['allowed_classes' => false]);
         } catch (\Throwable $e) {
             throw IPCException::serializationFailed($data, $e->getMessage());
         }
