@@ -229,16 +229,34 @@ final class FileStoreTest extends TestCase
         @rmdir($this->path . '/tenant-a');
     }
 
-    public function testObjectValueRoundTrips(): void
+    public function testObjectValueRoundTripsWhenWhitelisted(): void
     {
         $obj = new \stdClass();
         $obj->name = 'x';
         $obj->nested = ['a' => 1];
 
-        $this->store->set('obj', $obj);
+        // 集群存储默认禁止还原类（v5.2.17 对象注入防护），存对象需显式白名单
+        $this->store->setAllowedClasses([\stdClass::class]);
+        try {
+            $this->store->set('obj', $obj);
+            $got = $this->store->get('obj');
+            $this->assertEquals($obj, $got);
+        } finally {
+            $this->store->setAllowedClasses(false);
+        }
+    }
 
+    public function testObjectValueIsDowngradedByDefault(): void
+    {
+        // 默认不还原类：来自不可信后端的对象载荷一律降级，绝不触发原类 __wakeup/__destruct
+        $obj = new \stdClass();
+        $obj->name = 'x';
+
+        $this->store->set('obj', $obj);
         $got = $this->store->get('obj');
-        $this->assertEquals($obj, $got);
+
+        $this->assertNotInstanceOf(\stdClass::class, $got);
+        $this->assertSame('__PHP_Incomplete_Class', get_class($got));
     }
 
     public function testDirectoryIsRestrictedToOwner(): void

@@ -115,6 +115,17 @@ $table->set('ticket', 'abc', ttl: 60);
 > 对象注入——共享表内存可被同机其他进程写入。构造函数新增第三参 `$allowedClasses`
 > （默认 `false`，向后兼容），确需存对象时显式传类名白名单。此前裸 `unserialize()` 会被投毒载荷触发对象注入。
 
+> **集群存储对象注入防护（v5.2.17）**：集群存储值编解码 `ValueCodec::decodeValue` 此前同样使用**裸 `unserialize()`、
+> 且无 `allowed_classes` 限制**。RedisStore / GlobalDataStore 是**网络可达**的——能连上后端的人可把任意字节写进共享键，
+> 等于把对象注入面直接暴露给网络。现已默认收紧为 `allowed_classes => false`（与共享表同一套策略），
+> 仅还原标量 / 数组，对象一律降级为 `__PHP_Incomplete_Class`；确需存对象时通过
+> `ValueCodec::setAllowedClasses()` 显式声明白名单。FileStore 的写前日志此前已是安全写法，本次未改动。
+
+> **WorkermanTable TTL / 原子性语义对齐（v5.2.17）**：`WorkermanTable` 此前与 `SwooleTable` / `SharedMemoryTable` 的 TTL 语义不一致：
+> `exists()` 直接调 `Workerman\Table::exist()` **不检查过期**，导致过期键仍被误报为「存在」；`add()` 因此误判「已存在」而失败，
+> `replace()` 误判「已存在」而覆盖；`keys()` 返回**包含过期键**的全部键。现已补齐过期感知——`exists()` / `add()` / `replace()`
+> 对过期键一律按「不存在」处理（过期行惰性删除），`keys()` 过滤过期键，`clear()` 清掉所有行（含过期残留），与 SwooleTable 完全对齐。
+
 ## 1.3 典型场景：跨进程计数器 / 限流
 
 ```php

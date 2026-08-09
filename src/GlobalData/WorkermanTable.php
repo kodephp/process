@@ -97,7 +97,7 @@ final class WorkermanTable implements TableInterface
         $this->assertOpen();
         $this->acquire();
         try {
-            if ($this->table->exist($key)) {
+            if ($this->existsUnlocked($key)) {
                 return false;
             }
             $this->table->set($key, $this->encode($value, $ttl));
@@ -113,7 +113,7 @@ final class WorkermanTable implements TableInterface
         $this->assertOpen();
         $this->acquire();
         try {
-            if (!$this->table->exist($key)) {
+            if (!$this->existsUnlocked($key)) {
                 return false;
             }
             $this->table->set($key, $this->encode($value, $ttl));
@@ -161,7 +161,7 @@ final class WorkermanTable implements TableInterface
     {
         $this->assertOpen();
 
-        return $this->table->exist($key);
+        return $this->existsUnlocked($key);
     }
 
     public function delete(string $key): bool
@@ -225,8 +225,10 @@ final class WorkermanTable implements TableInterface
     {
         $this->assertOpen();
         $keys = [];
-        foreach ($this->table as $k => $_) {
-            $keys[] = (string) $k;
+        foreach ($this->table as $k => $row) {
+            if (!$this->expired($row)) {
+                $keys[] = (string) $k;
+            }
         }
 
         return $keys;
@@ -242,8 +244,10 @@ final class WorkermanTable implements TableInterface
     public function clear(): void
     {
         $this->assertOpen();
-        foreach ($this->keys() as $k) {
-            $this->table->del($k);
+        // 直接遍历整张表并删除每一行（含已过期但尚未被惰性清理的行），
+        // 不能用 keys()：keys() 会跳过过期行，导致 clear() 留下过期残留。
+        foreach ($this->table as $k => $_) {
+            $this->table->del((string) $k);
         }
     }
 
@@ -332,6 +336,27 @@ final class WorkermanTable implements TableInterface
         $exp = (int) ($row['e'] ?? 0);
 
         return $exp > 0 ? max(1, $exp - time()) : 0;
+    }
+
+    /**
+     * 是否「真实存在且未过期」。过期行在此被惰性删除并返回 false，
+     * 使 exists / add / replace 与 get 的 TTL 语义一致（过期键视为不存在）。
+     *
+     * @param array<string, mixed> $row
+     */
+    private function existsUnlocked(string $key): bool
+    {
+        $row = $this->table->get($key, null);
+        if ($row === null || $row === false) {
+            return false;
+        }
+        if ($this->expired($row)) {
+            $this->table->del($key);
+
+            return false;
+        }
+
+        return true;
     }
 
     private function assertOpen(): void
