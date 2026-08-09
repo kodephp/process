@@ -293,24 +293,58 @@ class MasterProcess implements ProcessInterface
         $this->logger->info('进入事件循环');
 
         while ($this->running) {
-            pcntl_signal_dispatch();
-
-            $this->checkHeartbeat();
-
-            $this->checkMemory();
-
-            $this->checkWorkers();
-
-            if ($this->processedRequests >= $this->maxRequests) {
-                $this->logger->info('达到最大请求数，准备重启');
-                $this->restart();
-                break;
-            }
-
-            usleep(10000);
+            $this->tick();
         }
 
         $this->logger->info('事件循环结束');
+    }
+
+    /**
+     * 单次事件循环迭代。
+     *
+     * 每个检查步骤都在孤立的错误边界内执行：任一回调（如用户 heartbeat 回调）
+     * 或检查逻辑抛异常都只记录日志、绝不穿透外层循环——否则一个瞬态错误就会
+     * 崩掉 master 并连带杀死所有 worker（常驻循环异常边界全局约定）。
+     */
+    private function tick(): void
+    {
+        try {
+            pcntl_signal_dispatch();
+        } catch (\Throwable $e) {
+            $this->logger->error('信号派发异常', ['exception' => $e->getMessage()]);
+        }
+
+        try {
+            $this->checkHeartbeat();
+        } catch (\Throwable $e) {
+            $this->logger->error('心跳检查异常', ['exception' => $e->getMessage()]);
+        }
+
+        try {
+            $this->checkMemory();
+        } catch (\Throwable $e) {
+            $this->logger->error('内存检查异常', ['exception' => $e->getMessage()]);
+        }
+
+        try {
+            $this->checkWorkers();
+        } catch (\Throwable $e) {
+            $this->logger->error('Worker 检查异常', ['exception' => $e->getMessage()]);
+        }
+
+        if ($this->processedRequests >= $this->maxRequests) {
+            $this->logger->info('达到最大请求数，准备重启');
+            try {
+                $this->restart();
+            } catch (\Throwable $e) {
+                $this->logger->error('自动重启异常', ['exception' => $e->getMessage()]);
+            }
+            // 等价原 while 循环的 break：强制退出外层循环，避免 restart→start
+            // 重入 runEventLoop 后 running 被重置为 true 导致外层循环不终止。
+            $this->running = false;
+        }
+
+        usleep(10000);
     }
 
     private function checkHeartbeat(): void

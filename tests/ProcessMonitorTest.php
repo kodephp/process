@@ -24,6 +24,11 @@ final class ProcessMonitorTest extends TestCase
 
     public function testIsProcessAlive(): void
     {
+        // 抬高 CPU 阈值：本用例只验证「存活/死亡」判定契约，不依赖测试运行器
+        // 在满负载下的瞬时 CPU 读数（macOS 下 ps 读到的 phpunit 进程 CPU 可能
+        // 短时 >80% 默认阈值而误判 unhealthy，导致用例在满载套件下偶发失败）。
+        $this->monitor->setMaxCpuUsage(1000.0);
+
         // 当前进程存活
         $this->monitor->register(getmypid());
         $alive = $this->monitor->check(getmypid());
@@ -130,8 +135,10 @@ final class ProcessMonitorTest extends TestCase
      */
     public function testThrowingUnhealthyCallbackDoesNotAbortCheckAll(): void
     {
+        // 999999 必然 dead；当前进程放宽阈值，避免依赖运行器瞬时 CPU/内存读数
+        // （满负载套件下 phpunit 进程 CPU 可能短时 >80% 而误判 unhealthy，导致用例偶发失败）。
         $this->monitor->register(999999);
-        $this->monitor->register(getmypid());
+        $this->monitor->register(getmypid(), ['memory_limit' => PHP_INT_MAX, 'cpu_limit' => 1000.0]);
 
         $this->monitor->onUnhealthy(function (): void {
             throw new \RuntimeException('不健康回调炸了');

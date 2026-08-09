@@ -367,6 +367,7 @@ if ($rt->supports(Capability::Coroutine)) {
 | **UDP 回包路由（v5.2.19）** | `receiveUdp()` 单次可读事件内**循环排空**所有挂起数据报（`recvfrom` 直到 EAGAIN），边缘触发 loop（ev）下不循环会丢包；缓冲区上限用 `UDP_MAX_PACKET = 65507`（UDP 数据报理论最大值），杜绝大包被 `recvfrom` 静默截断 |
 | **TCP 连接异常回收（v5.2.19）** | message handler 抛异常被 error 处理器兜底后，运行时会**主动关闭该 TCP 连接**，而非留在连接表等心跳超时——避免半响应挂住客户端、连接泄漏。底层由 `fireMessage()` 返回 `bool` 告知调用方是否发生异常 |
 | **message handler 异常对称回收（v5.2.20）** | Swoole / Workerman 的 message 派发同样消费 `fireMessage()` 返回的 `bool`：HTTP 场景通过 `close()` 干净结束响应（空 200）、TCP/WebSocket 主动关闭底层连接，兜底后不再让半响应挂住客户端（与 Native 一致）。UDP 数据报（`packet` 回调）无连接，其 fd 是 server socket，**绝不做关闭动作** |
+| **Master 主循环错误边界（v5.2.21）** | `runEventLoop()` 单次迭代抽成 `tick()`，对 `pcntl_signal_dispatch` / `checkHeartbeat` / `checkMemory` / `checkWorkers` / 自动重启**每一步分别做 try/catch 隔离**——用户 heartbeat 回调或任一检查抛异常只记日志、绝不穿透外层循环崩掉 master（连带杀死所有 worker）。信号回调层此前已由 `SignalHandler::dispatch` 隔离 |
 | **PID 文件由 master 写** | 见下方 CLI 小节 |
 
 ## 环境自检
