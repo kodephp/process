@@ -24,10 +24,11 @@ final class ProcessMonitorTest extends TestCase
 
     public function testIsProcessAlive(): void
     {
-        // 抬高 CPU 阈值：本用例只验证「存活/死亡」判定契约，不依赖测试运行器
-        // 在满负载下的瞬时 CPU 读数（macOS 下 ps 读到的 phpunit 进程 CPU 可能
-        // 短时 >80% 默认阈值而误判 unhealthy，导致用例在满载套件下偶发失败）。
+        // 抬高 CPU / 内存阈值：本用例只验证「存活/死亡」判定契约，不依赖测试
+        // 运行器在满负载下的瞬时 CPU/内存读数（满负载套件下 phpunit 进程内存
+        // 可能短时超过 512MB 默认阈值而误判 unhealthy，导致用例偶发失败）。
         $this->monitor->setMaxCpuUsage(1000.0);
+        $this->monitor->setMaxMemoryUsage(PHP_INT_MAX);
 
         // 当前进程存活
         $this->monitor->register(getmypid());

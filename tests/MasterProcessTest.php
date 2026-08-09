@@ -231,4 +231,63 @@ class MasterProcessTest extends TestCase
         self::assertSame(0, $spawnCount, '非运行状态下不应重生');
         self::assertCount(0, $master->getWorkers());
     }
+
+    // ---- 热重载边界（#193） ----
+
+    /**
+     * reload() 只应向「运行态」worker 发 USR1 重载信号。已停止的 worker
+     * （stale pid）必须跳过，否则会命中内核回收的其它进程；运行态但 pid 回退到
+     * master 自身的 worker 也必须被 self-pid 守卫跳过，否则误触发 master 的
+     * USR1 日志轮转甚至关闭自身（原实现直接向所有 worker 的 pid 调 posix_kill）。
+     */
+    #[AllowMockObjectsWithoutExpectations]
+    public function testReloadSignalsOnlyRunningWorkers(): void
+    {
+        $master = $this->getMockBuilder(MasterProcess::class)
+            ->setConstructorArgs([['heartbeat_interval' => 0.0], new NullLogger()])
+            ->onlyMethods(['deliverReloadSignal'])
+            ->getMock();
+
+        $running = $this->createMock(WorkerInterface::class);
+        $running->method('getId')->willReturn(1);
+        $running->method('getPid')->willReturn(12345);
+        $running->method('getState')->willReturn(ProcessInterface::STATE_RUNNING);
+
+        $stopped = $this->createMock(WorkerInterface::class);
+        $stopped->method('getId')->willReturn(2);
+        $stopped->method('getPid')->willReturn(99999);
+        $stopped->method('getState')->willReturn(ProcessInterface::STATE_STOPPED);
+
+        // 运行态但 pid 回退到 master 自身：必须被 self-pid 守卫跳过，绝不误发
+        $selfLike = $this->createMock(WorkerInterface::class);
+        $selfLike->method('getId')->willReturn(3);
+        $selfLike->method('getPid')->willReturn(posix_getpid());
+        $selfLike->method('getState')->willReturn(ProcessInterface::STATE_RUNNING);
+
+        $master->addWorker($running);
+        $master->addWorker($stopped);
+        $master->addWorker($selfLike);
+
+        // 仅 running（pid=12345）应被发信号；stopped 与 self-pid 均跳过
+        $master->expects($this->once())->method('deliverReloadSignal')->willReturn(true);
+
+        $master->reload();
+    }
+
+    /**
+     * 真实 deliverReloadSignal 必须调用 posix_kill(workerPid, USR1)；对不存在的
+     * pid 返回 false（由 reload 记 warning 而非崩溃）。
+     */
+    #[AllowMockObjectsWithoutExpectations]
+    public function testDeliverReloadSignalInvokesPosixKill(): void
+    {
+        $master = $this->makeMaster();
+
+        $worker = $this->createMock(WorkerInterface::class);
+        $worker->method('getPid')->willReturn(999999); // 不存在的 pid：posix_kill 返回 false
+
+        $result = $this->callMethodByName($master, 'deliverReloadSignal', $worker);
+
+        self::assertFalse($result, '对不存在的 pid 发信号应返回 false（由 reload 记 warning）');
+    }
 }

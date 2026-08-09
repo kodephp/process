@@ -369,6 +369,7 @@ if ($rt->supports(Capability::Coroutine)) {
 | **message handler 异常对称回收（v5.2.20）** | Swoole / Workerman 的 message 派发同样消费 `fireMessage()` 返回的 `bool`：HTTP 场景通过 `close()` 干净结束响应（空 200）、TCP/WebSocket 主动关闭底层连接，兜底后不再让半响应挂住客户端（与 Native 一致）。UDP 数据报（`packet` 回调）无连接，其 fd 是 server socket，**绝不做关闭动作** |
 | **Master 主循环错误边界（v5.2.21）** | `runEventLoop()` 单次迭代抽成 `tick()`，对 `pcntl_signal_dispatch` / `checkHeartbeat` / `checkMemory` / `checkWorkers` / 自动重启**每一步分别做 try/catch 隔离**——用户 heartbeat 回调或任一检查抛异常只记日志、绝不穿透外层循环崩掉 master（连带杀死所有 worker）。信号回调层此前已由 `SignalHandler::dispatch` 隔离 |
 | **子进程回收 / 僵尸处理（v5.2.22）** | `reapChildren()` 退出状态解读修正：先 `pcntl_wifsignaled` 再取 `pcntl_wtermsig`，避免被信号杀死的 worker 误用 `pcntl_wexitstatus` 得到垃圾退出码并触发 PHP warning（原实现缺陷）；结构化记录「正常退出 / 被信号终止(signal 名)」。并新增 **worker 自动重生**：worker 退出时若处于运行中且注入了 spawner（ProcessManager 默认注入 `WorkerPool::addWorker`），按稳定 slot 重生以维持池容量；连续异常退出超过上限（`maxRestartAttempts=5`）则停止重生并告警，防 fork bomb。干净退出（如达 max_requests）直接重生不计入崩溃上限。停止/重启阶段不重生（否则关不掉） |
+| **热重载边界（v5.2.23）** | `reload()`（HUP 触发）向 worker 发 USR1 前做边界隔离：仅向 `getState()===RUNNING` 的 worker 投递（`getState()` 是无副作用判活，不调用 `pcntl_waitpid` 干扰 CHLD 回收协议）；并跳过 `pid<=0` 或命中 master 自身 pid 的情况——原实现直接向所有 worker 的 pid 调 `posix_kill`，对已退出未重生的 stale pid 会命中内核回收的其它进程，且 `getPid()` 在 pid 为 0 时回退到 master 自身 pid、会误触发 master 的 USR1 日志轮转。失败记 warning 而非忽略。`posix_kill` 抽成 `deliverReloadSignal()` 便于测试 |
 | **PID 文件由 master 写** | 见下方 CLI 小节 |
 
 ## 环境自检

@@ -163,13 +163,51 @@ class MasterProcess implements ProcessInterface
     {
         $this->logger->info('重新加载配置...');
 
+        $selfPid = posix_getpid();
+        $signaled = 0;
+        $skipped = 0;
+
         foreach ($this->workers as $worker) {
-            if ($worker instanceof WorkerInterface) {
-                posix_kill($worker->getPid(), Signal::USR1);
+            if (!$worker instanceof WorkerInterface) {
+                continue;
+            }
+
+            // 热重载边界安全：仅向真正处于运行态的 worker 发送 USR1。
+            // 已停止 / 从未启动的 worker 不在线，向其陈旧 pid 发送只会命中内核
+            // 回收的其它进程；而 getPid() 在 pid 为 0 时回退到 master 自身 pid，
+            // 若不拦截会误触发 master 的 USR1 日志轮转甚至关闭自身。
+            if ($worker->getState() !== ProcessInterface::STATE_RUNNING) {
+                $skipped++;
+                continue;
+            }
+
+            $pid = $worker->getPid();
+            if ($pid <= 0 || $pid === $selfPid) {
+                $skipped++;
+                continue;
+            }
+
+            if ($this->deliverReloadSignal($worker)) {
+                $signaled++;
+            } else {
+                $this->logger->warning('向 Worker 发送重载信号失败', [
+                    'worker_id' => $worker->getId(),
+                    'pid' => $pid,
+                ]);
+                $skipped++;
             }
         }
 
-        $this->logger->info('配置重载信号已发送到所有 Worker');
+        $this->logger->info('配置重载信号已发送', ['signaled' => $signaled, 'skipped' => $skipped]);
+    }
+
+    /**
+     * 向单个 worker 投递 USR1 重载信号。抽成受保护方法便于在测试中替换，
+     * 隔离对全局 posix_kill 的依赖。
+     */
+    protected function deliverReloadSignal(WorkerInterface $worker): bool
+    {
+        return posix_kill($worker->getPid(), Signal::USR1);
     }
 
     private function daemonize(): void
