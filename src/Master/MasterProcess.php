@@ -33,7 +33,26 @@ class MasterProcess implements ProcessInterface
 
     private SignalDispatcher $signalDispatcher;
 
+    /** worker 内部按 slot 索引（Worker id 不稳定，重生需稳定槽位做崩溃计数） */
     private array $workers = [];
+
+    /** pid => slot 反向索引，供 reapChildren O(1) 定位 */
+    private array $pidToSlot = [];
+
+    /** worker id => slot 反向索引，供 removeWorker(int $workerId) 定位 */
+    private array $workerIdToSlot = [];
+
+    /** slot => 连续异常退出次数，超过上限则停止自动重生，防 fork bomb */
+    private array $restartCounts = [];
+
+    /** 下一可用 slot */
+    private int $nextSlot = 0;
+
+    /** 单槽位允许的最大连续异常重生次数 */
+    private int $maxRestartAttempts = 5;
+
+    /** 可选：提供则 worker 异常退出时自动重生（由 ProcessManager 注入 WorkerPool 的 addWorker） */
+    private ?\Closure $workerSpawner = null;
 
     private array $config;
 
@@ -357,12 +376,12 @@ class MasterProcess implements ProcessInterface
 
         $this->lastHeartbeat = $now;
 
-        foreach ($this->workers as $id => $worker) {
+        foreach ($this->workers as $worker) {
             if ($worker instanceof WorkerInterface) {
                 $status = $worker->heartbeat();
 
                 if (isset($status['overdue']) && $status['overdue']) {
-                    $this->logger->warning('Worker 心跳超时', ['worker_id' => $id]);
+                    $this->logger->warning('Worker 心跳超时', ['worker_id' => $worker->getId()]);
                 }
             }
         }
@@ -388,10 +407,10 @@ class MasterProcess implements ProcessInterface
 
     private function checkWorkers(): void
     {
-        foreach ($this->workers as $id => $worker) {
+        foreach ($this->workers as $worker) {
             if ($worker instanceof WorkerInterface) {
                 if (!$worker->isRunning()) {
-                    $this->logger->warning('Worker 已停止', ['worker_id' => $id]);
+                    $this->logger->warning('Worker 已停止', ['worker_id' => $worker->getId()]);
                 }
             }
         }
@@ -430,20 +449,128 @@ class MasterProcess implements ProcessInterface
     private function reapChildren(): void
     {
         while (($pid = pcntl_waitpid(-1, $status, WNOHANG)) > 0) {
-            foreach ($this->workers as $id => $worker) {
-                if ($worker instanceof WorkerInterface && $worker->getPid() === $pid) {
-                    $exitCode = pcntl_wexitstatus($status);
-                    $this->logger->info('Worker 进程已退出', [
-                        'worker_id' => $id,
-                        'pid' => $pid,
-                        'exit_code' => $exitCode
-                    ]);
+            $slot = $this->pidToSlot[$pid] ?? null;
 
-                    unset($this->workers[$id]);
-                    break;
-                }
+            if ($slot === null) {
+                // 非本 master 跟踪的子进程（如孙进程），已被回收，忽略
+                continue;
+            }
+
+            $this->handleWorkerExit($slot, $status);
+        }
+    }
+
+    /**
+     * 处理单个槽位 worker 的退出：结构化记录退出原因（正常退出 / 被信号杀死），
+     * 触发 worker_exit 回调，并在运行中且已注入重生器时按需自动重生。
+     */
+    private function handleWorkerExit(int $slot, int $status): void
+    {
+        $worker = $this->workers[$slot] ?? null;
+        $workerId = $worker instanceof WorkerInterface ? $worker->getId() : null;
+        $pid = $worker instanceof WorkerInterface ? $worker->getPid() : null;
+
+        $info = $this->interpretExitStatus($status);
+
+        if ($info['signaled']) {
+            $this->logger->warning('Worker 被信号终止', [
+                'worker_id' => $workerId,
+                'pid' => $pid,
+                'signal' => $info['signal'],
+                'signal_name' => $info['signal_name'],
+            ]);
+        } else {
+            $this->logger->info('Worker 已退出', [
+                'worker_id' => $workerId,
+                'pid' => $pid,
+                'exit_code' => $info['exit_code'],
+            ]);
+        }
+
+        $this->unregisterSlot($slot);
+
+        // 触发 worker_exit 回调（如有），隔离异常避免穿透
+        if (isset($this->callbacks['worker_exit'])) {
+            try {
+                ($this->callbacks['worker_exit'])($workerId, $info);
+            } catch (\Throwable $e) {
+                $this->logger->error('worker_exit 回调异常', ['exception' => $e->getMessage()]);
             }
         }
+
+        // 仅在运行中、且注入了重生器时自动重生；停止/重启阶段不重生（避免关不掉）
+        if ($this->state !== ProcessInterface::STATE_RUNNING || $this->workerSpawner === null) {
+            return;
+        }
+
+        $abnormal = $info['signaled'] || $info['exit_code'] !== 0;
+
+        if (!$abnormal) {
+            // 干净退出（如达到 max_requests）：维持池容量，直接重生且不计入崩溃上限
+            $this->respawn($slot);
+            return;
+        }
+
+        $attempts = $this->restartCounts[$slot] ?? 0;
+        if ($attempts >= $this->maxRestartAttempts) {
+            $this->logger->critical('Worker 反复异常退出，停止自动重生', [
+                'worker_id' => $workerId,
+                'slot' => $slot,
+                'attempts' => $attempts,
+            ]);
+            return;
+        }
+
+        $this->restartCounts[$slot] = $attempts + 1;
+        $this->respawn($slot);
+    }
+
+    private function respawn(int $slot): void
+    {
+        try {
+            $replacement = ($this->workerSpawner)();
+
+            if (!$replacement instanceof WorkerInterface) {
+                $this->logger->error('Worker 重生器返回非 WorkerInterface', ['slot' => $slot]);
+                return;
+            }
+
+            $this->registerWorker($replacement, $slot);
+            $this->logger->info('Worker 已自动重生', [
+                'slot' => $slot,
+                'attempt' => $this->restartCounts[$slot] ?? 0,
+            ]);
+        } catch (\Throwable $e) {
+            $this->logger->error('Worker 自动重生失败', ['slot' => $slot, 'error' => $e->getMessage()]);
+        }
+    }
+
+    /**
+     * 解析 wait 状态。必须先判 wifexited/wifsignaled 再取退出码：被信号杀死时
+     * 直接 pcntl_wexitstatus 会返回无意义值并触发 PHP warning（原实现缺陷）。
+     *
+     * @return array{signaled: bool, signal: int, signal_name: string, exit_code: int, exited: bool}
+     */
+    private function interpretExitStatus(int $status): array
+    {
+        if (pcntl_wifsignaled($status)) {
+            $signal = pcntl_wtermsig($status);
+            return [
+                'signaled' => true,
+                'signal' => $signal,
+                'signal_name' => Signal::getName($signal),
+                'exit_code' => -1,
+                'exited' => false,
+            ];
+        }
+
+        return [
+            'signaled' => false,
+            'signal' => 0,
+            'signal_name' => '',
+            'exit_code' => pcntl_wexitstatus($status),
+            'exited' => pcntl_wifexited($status),
+        ];
     }
 
     private function rotateLog(): void
@@ -471,9 +598,9 @@ class MasterProcess implements ProcessInterface
             'workers' => [],
         ];
 
-        foreach ($this->workers as $id => $worker) {
+        foreach ($this->workers as $worker) {
             if ($worker instanceof WorkerInterface) {
-                $status['workers'][$id] = [
+                $status['workers'][$worker->getId()] = [
                     'pid' => $worker->getPid(),
                     'state' => $worker->getState(),
                     'processed' => $worker->getProcessedCount(),
@@ -512,14 +639,54 @@ class MasterProcess implements ProcessInterface
 
     public function addWorker(WorkerInterface $worker): void
     {
-        $this->workers[$worker->getId()] = $worker;
-        $this->logger->debug('Worker 已添加', ['worker_id' => $worker->getId()]);
+        $this->registerWorker($worker, $this->nextSlot++);
+    }
+
+    /**
+     * 注册 worker 到指定 slot，并建立 pid / id 反向索引。
+     * 重生时复用同一 slot，使崩溃计数能稳定累计。
+     */
+    private function registerWorker(WorkerInterface $worker, int $slot): void
+    {
+        $this->workers[$slot] = $worker;
+        $this->pidToSlot[$worker->getPid()] = $slot;
+        $this->workerIdToSlot[$worker->getId()] = $slot;
+        $this->logger->debug('Worker 已注册', ['worker_id' => $worker->getId(), 'slot' => $slot]);
+    }
+
+    /**
+     * 注入 worker 重生器（返回已启动的 WorkerInterface）。未注入时 worker 退出
+     * 不自动重生（保持旧行为）。
+     */
+    public function setWorkerSpawner(callable $spawner): void
+    {
+        $this->workerSpawner = $spawner instanceof \Closure ? $spawner : \Closure::fromCallable($spawner);
     }
 
     public function removeWorker(int $workerId): void
     {
-        unset($this->workers[$workerId]);
-        $this->logger->debug('Worker 已移除', ['worker_id' => $workerId]);
+        $slot = $this->workerIdToSlot[$workerId] ?? null;
+
+        if ($slot === null) {
+            $this->logger->debug('Worker 移除：未找到', ['worker_id' => $workerId]);
+            return;
+        }
+
+        $this->unregisterSlot($slot);
+        $this->logger->debug('Worker 已移除', ['worker_id' => $workerId, 'slot' => $slot]);
+    }
+
+    private function unregisterSlot(int $slot): void
+    {
+        $worker = $this->workers[$slot] ?? null;
+
+        if ($worker instanceof WorkerInterface) {
+            unset($this->pidToSlot[$worker->getPid()], $this->workerIdToSlot[$worker->getId()]);
+        }
+
+        // 注意：刻意保留 $this->restartCounts[$slot]——重生复用同一 slot，
+        // 崩溃计数需跨重生累计才能触发上限（防 fork bomb）。仅在命中上限后停止重生。
+        unset($this->workers[$slot]);
     }
 
     public function onHeartbeat(callable $callback): void

@@ -77,6 +77,10 @@ class ProcessManager
             $this->master->addWorker($worker);
         }
 
+        // 注入 worker 重生器：worker 异常退出时由 Master 自动拉起新实例，维持池容量。
+        // 未注入时（直接 new MasterProcess 使用）保持旧行为——退出不重生。
+        $this->master->setWorkerSpawner(fn() => $this->workerPool->addWorker());
+
         if ($masterCallback !== null) {
             $this->master->onHeartbeat($masterCallback);
         }
