@@ -125,6 +125,8 @@ $qm->diagnose();                        // 驱动自检信息
 
 失败的任务由 kode/queue 的失败存储接管；`stats()['failed']` 可观察失败计数，具体失败原因与重试由 kode/queue 完成。消费方法在处理器抛异常时返回 `Response::error($message)`（若任务仍可重试则自动重新入队）。
 
+> **消费循环防崩溃（v5.2.14）**：`handle()` 中对 `ack` / `fail` / `release` 的调用现已全部纳入异常保护。`handle()`（以及其上层的 `process()` / `processBatch()` / `consume()` 生成器）保证**永不抛出**——即使后端在任务处理成功后 `ack` 失败（如网络抖动）、或失败登记本身抛异常，也只向上返回 `Response::error(...)`，任务会按 at-least-once 语义重投，常驻消费循环不会因单条任务的底层异常而中断。
+
 ## 在 Worker 中使用
 
 ```php

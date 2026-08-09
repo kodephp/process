@@ -274,25 +274,57 @@ final class QueueManager
         $name = $reserved->job->name;
 
         if (!isset($this->handlers[$name])) {
-            // 没有处理器：直接判失败，交由死信存储，避免无限重投
-            $this->queue->fail($reserved, new \RuntimeException("任务处理器不存在: {$name}"));
+            // 没有处理器：直接判失败，交由死信存储，避免无限重投。
+            // fail() 本身可能抛网络异常，包一层避免穿透消费循环。
+            $this->failJob($reserved, new \RuntimeException("任务处理器不存在: {$name}"));
 
             return Response::notFound("任务处理器不存在: {$name}");
         }
 
         try {
             $result = ($this->handlers[$name])($reserved->job->payload, $reserved);
-            $this->queue->ack($reserved);
-
-            return Response::ok($result);
         } catch (\Throwable $e) {
+            return $this->failOrRelease($reserved, $e);
+        }
+
+        // 处理成功但 ack 失败（如网络抖动）：任务会按 at-least-once 语义重投，
+        // 不应因此打断消费循环（processBatch / consume），故仅向上返回错误。
+        try {
+            $this->queue->ack($reserved);
+        } catch (\Throwable $e) {
+            return Response::error('ack 失败: ' . $e->getMessage());
+        }
+
+        return Response::ok($result);
+    }
+
+    /**
+     * 处理器抛错后的重试 / 失败登记；登记本身失败也只返回错误，不穿透循环。
+     */
+    private function failOrRelease(ReservedJob $reserved, \Throwable $e): Response
+    {
+        try {
             if ($reserved->job->canRetry()) {
                 $this->queue->release($reserved, $reserved->job->nextRetryDelay());
             } else {
                 $this->queue->fail($reserved, $e);
             }
+        } catch (\Throwable $recordErr) {
+            return Response::error('任务结果登记失败: ' . $recordErr->getMessage());
+        }
 
-            return Response::error($e->getMessage());
+        return Response::error($e->getMessage());
+    }
+
+    /**
+     * 登记任务失败（死信），忽略登记过程本身的异常，避免穿透消费循环。
+     */
+    private function failJob(ReservedJob $reserved, \Throwable $e): void
+    {
+        try {
+            $this->queue->fail($reserved, $e);
+        } catch (\Throwable) {
+            // 登记失败不应打断消费循环
         }
     }
 

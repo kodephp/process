@@ -142,4 +142,33 @@ final class QueueManagerTest extends TestCase
         $qm->unregister('one');
         $this->assertFalse($qm->hasHandler('one'));
     }
+
+    public function testProcessBatchToleratesHandlerException(): void
+    {
+        $qm = QueueManager::useMemory();
+        $qm->register('boom', function (): void {
+            throw new \RuntimeException('kaboom');
+        });
+        $qm->dispatch('boom', []);
+
+        // 处理器抛错不应让批量消费崩溃，应作为「已处理」计入并返回
+        $processed = $qm->processBatch();
+        $this->assertSame(1, $processed);
+    }
+
+    public function testConsumeDoesNotThrowOnHandlerError(): void
+    {
+        $qm = QueueManager::useMemory();
+        $qm->register('boom', function (): void {
+            throw new \RuntimeException('kaboom');
+        });
+        $qm->dispatch('boom', []);
+
+        // consume() 生成器在处理器错误时必须产出 Response 而非抛出异常，
+        // 保证消费循环（如常驻 worker）不会因单条任务失败而中断。
+        $responses = iterator_to_array($qm->consume(limit: 1));
+        $this->assertCount(1, $responses);
+        $this->assertTrue($responses[0]->isError());
+        $this->assertStringContainsString('kaboom', $responses[0]->message);
+    }
 }
