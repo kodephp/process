@@ -71,6 +71,14 @@ final class NativeRuntime extends AbstractRuntime
     /** 单次读取字节数 */
     private const int READ_CHUNK = 65535;
 
+    /**
+     * UDP 数据报理论最大长度（IPv4 65535 − 20 IP 头 − 8 UDP 头 = 65507）。
+     *
+     * `receiveUdp()` 用此值作为 `stream_socket_recvfrom` 的缓冲区上限，
+     * 避免更大的数据报被静默截断（recvfrom 不会报错，只会返回被截断的前段字节）。
+     */
+    private const int UDP_MAX_PACKET = 65507;
+
     /** @var array<int, resource> 非 reusePort 模式下 master 预开的监听套接字（子进程继承） */
     private array $sharedSockets = [];
 
@@ -877,23 +885,45 @@ final class NativeRuntime extends AbstractRuntime
      * @param resource             $serverSock
      * @param array<string, mixed> $listener
      */
+    /**
+     * 接收 UDP 数据报并派发。
+     *
+     * 一次可读事件内**循环排空**所有挂起的数据报：底层事件循环在边缘触发语义下
+     * （ev 扩展的 EvLoop 等）只在可读状态变化时才回调一次，若不循环 recvfrom 直到
+     * EAGAIN，排队的数据报会永远等不到下一次回调而**丢包**；即便水平触发，循环排空
+     * 也能显著降低突发流量下的事件往返开销。
+     *
+     * 缓冲区上限用 {@see self::UDP_MAX_PACKET}（65507），覆盖 UDP 数据报理论最大值，
+     * 避免更大的包被 `recvfrom` 静默截断。
+     *
+     * @param resource             $serverSock
+     * @param array<string, mixed> $listener
+     */
     private function receiveUdp($serverSock, array $listener): void
     {
-        $peer = '';
-        $data = @stream_socket_recvfrom($serverSock, self::READ_CHUNK, 0, $peer);
-        if ($data === false || $data === '') {
-            return;
-        }
-        $conn = new NativeConnection(
-            $serverSock,
-            $peer,
-            $this->protocolClassFor((string)$listener['scheme']),
-            $this->loop,
-            $peer,
-            $this->maxSendBuffer
-        );
-        $this->fireMessage($conn, $data);
-        $this->countRequest();
+        $protocolClass = $this->protocolClassFor((string)$listener['scheme']);
+
+        do {
+            $peer = '';
+            $data = @stream_socket_recvfrom($serverSock, self::UDP_MAX_PACKET, 0, $peer);
+            if ($data === false) {
+                break; // EAGAIN 或读取出错，无更多数据报
+            }
+            if ($data === '') {
+                continue; // 空数据报：跳过但不终止循环，后面可能还有包
+            }
+
+            $conn = new NativeConnection(
+                $serverSock,
+                $peer,
+                $protocolClass,
+                $this->loop,
+                $peer,
+                $this->maxSendBuffer
+            );
+            $this->fireMessage($conn, $data);
+            $this->countRequest();
+        } while (true);
     }
 
     /**
@@ -1051,8 +1081,16 @@ final class NativeRuntime extends AbstractRuntime
                 }
             }
 
-            $this->fireMessage($conn, $message);
+            $ok = $this->fireMessage($conn, $message);
             $this->countRequest();
+
+            // handler 抛异常已被 error 处理器兜底：连接进入不可恢复状态
+            // （可能已写出半截响应），必须主动断开，避免半响应挂住客户端、
+            // 连接泄漏在连接表直到心跳超时回收。
+            if (!$ok) {
+                $this->closeConnection($conn);
+                return;
+            }
 
             // 这里只需知道业务有没有在 handler 里主动关掉连接，用状态位判断即可；
             // isAlive() 还会做一次 feof() 流探测，那是每请求都要付出的真实开销。

@@ -172,22 +172,34 @@ abstract class AbstractRuntime implements RuntimeInterface
      * 再在调用点展开，而 message 是唯一每请求都必然触发一次的事件，
      * 这笔固定开销会被请求量整体放大。
      */
-    protected function fireMessage(mixed $connection, mixed $message): void
+    /**
+     * 派发 message 事件——热路径专用的定参版本。
+     *
+     * 语义与 `fire('message', $connection, $message)` 完全一致，包括异常兜底；
+     * 唯一的区别是不经过可变参数：`...$args` 每次调用都要打包一个数组、
+     * 再在调用点展开，而 message 是唯一每请求都必然触发一次的事件，
+     * 这笔固定开销会被请求量整体放大。
+     *
+     * @return bool true=正常派发（含无 handler 的情况）；false=handler 抛异常，
+     *             已被 error 处理器兜底。调用方据此回收不可恢复的 TCP 连接。
+     */
+    protected function fireMessage(mixed $connection, mixed $message): bool
     {
         $handler = $this->handlers['message'] ?? null;
         if ($handler === null) {
-            return;
+            return true;
         }
 
         try {
             $handler($connection, $message);
+            return true;
         } catch (\Throwable $e) {
             if (isset($this->handlers['error'])) {
                 ($this->handlers['error'])(
                     $connection instanceof ConnectionInterface ? $connection : null,
                     $e
                 );
-                return;
+                return false;
             }
             throw $e;
         }

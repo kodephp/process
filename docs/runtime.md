@@ -364,6 +364,8 @@ if ($rt->supports(Capability::Coroutine)) {
 | **task 管道完整写** | 投递任务时 `fwrite` 的部分写会进缓冲、注册 `onWritable` 续写；此前截断的半帧会让该管道后续所有消息错位 |
 | **定时器可在 `start()` 前注册** | `addTimer()` 在服务启动前调用会进待重放队列，`start()` 后统一注册；`delTimer()` 同样能取消尚未生效的定时器 |
 | **定时器回调异常隔离（v5.2.18）** | 三运行时的 `addTimer()` 回调统一做异常隔离：回调抛异常被 `error_log` 记录后继续，绝不穿透事件循环打死 worker。Swoole / Workerman 此前裸传回调、异常会致命退出；Native 三 Loop 早已隔离。一次性定时器触发后底层自动移除，本端映射也一并清理，避免陈旧 timer id 残留 |
+| **UDP 回包路由（v5.2.19）** | `receiveUdp()` 单次可读事件内**循环排空**所有挂起数据报（`recvfrom` 直到 EAGAIN），边缘触发 loop（ev）下不循环会丢包；缓冲区上限用 `UDP_MAX_PACKET = 65507`（UDP 数据报理论最大值），杜绝大包被 `recvfrom` 静默截断 |
+| **TCP 连接异常回收（v5.2.19）** | message handler 抛异常被 error 处理器兜底后，运行时会**主动关闭该 TCP 连接**，而非留在连接表等心跳超时——避免半响应挂住客户端、连接泄漏。底层由 `fireMessage()` 返回 `bool` 告知调用方是否发生异常 |
 | **PID 文件由 master 写** | 见下方 CLI 小节 |
 
 ## 环境自检

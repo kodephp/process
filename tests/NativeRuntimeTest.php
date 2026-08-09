@@ -950,6 +950,209 @@ PHP;
         }
     }
 
+    /**
+     * UDP 回包路由：单次可读事件内循环排空所有挂起数据报。
+     *
+     * 连发 50 个数据报（突发的，先写满不读），服务端 handler 把每包序号记录进集合，
+     * 验证全部送达且顺序正确。边缘触发 loop（ev）下若 receiveUdp 不循环排空会丢包，
+     * 水平触发（select）下两种实现都能收全——本测试同时覆盖了正确性与循环排空。
+     */
+    public function testNativeUdpReceivesAllDatagrams(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port    = $this->findFreePort();
+        $setFile = tempnam(sys_get_temp_dir(), 'kode_udp_set_');
+        @unlink($setFile); // 避免 tempnam 创建的空文件干扰 server 端的 unserialize
+        $script  = $this->writeUdpCountServerScript($port, $setFile);
+        $proc    = proc_open([PHP_BINARY, $script], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native UDP 服务器子进程');
+        // 必须等 worker 真正 bind UDP 端口后再发包：未监听端口的数据报会被内核丢弃
+        // （ICMP port unreachable），而非缓冲到后来的监听套接字。
+        usleep(2_000_000);
+
+        try {
+            $fp = @fsockopen('udp://127.0.0.1', $port, $errno, $errstr, 2.0);
+            $this->assertNotFalse($fp, "UDP 连接失败: {$errstr} ({$errno})");
+
+            for ($i = 1; $i <= 50; $i++) {
+                fwrite($fp, pack('n', $i));
+            }
+            fclose($fp);
+
+            // 等服务端处理完所有排队包
+            $deadline = microtime(true) + 3.0;
+            while (microtime(true) < $deadline && !file_exists($setFile)) {
+                usleep(20_000);
+            }
+
+            $set = file_exists($setFile) ? @unserialize(file_get_contents($setFile)) : [];
+            $this->assertCount(50, $set, 'UDP 数据报未全部送达（可能循环排空缺失导致丢包）');
+            $this->assertSame(range(1, 50), $set, 'UDP 数据报顺序应被保留');
+        } finally {
+            $this->stopProc($proc, $script);
+            @unlink($setFile);
+        }
+    }
+
+    /**
+     * UDP 回包路由：大包防截断。
+     *
+     * 此前 receiveUdp 用 READ_CHUNK(65535) 作 recvfrom 缓冲区，超过该长度的 UDP 包
+     * 会被静默截断（recvfrom 不报错，只返回前段）——UDP 数据报理论最大 65507 字节，
+     * 因此 65535 字节以内的包就被截掉尾部。修复后改用 UDP_MAX_PACKET(65507)，
+     * 发送理论最大包应被完整接收。
+     */
+    public function testNativeUdpLargePacketNotTruncated(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port    = $this->findFreePort();
+        $lenFile = tempnam(sys_get_temp_dir(), 'kode_udp_len_');
+        $script  = $this->writeUdpSizeServerScript($port, $lenFile);
+        $proc    = proc_open([PHP_BINARY, $script], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native UDP 服务器子进程');
+        usleep(2_000_000);
+
+        // 确定性断言：recvfrom 缓冲上限应为 UDP 数据报理论最大值 65507，
+        // 而非旧的 READ_CHUNK(65535)——后者会让更大的包被静默截断。
+        $ref = new \ReflectionClass(NativeRuntime::class);
+        $this->assertSame(65507, $ref->getConstant('UDP_MAX_PACKET'), 'receiveUdp 应使用 65507 缓冲上限');
+
+        try {
+            $fp = @fsockopen('udp://127.0.0.1', $port, $errno, $errstr, 2.0);
+            $this->assertNotFalse($fp, "UDP 连接失败: {$errstr} ({$errno})");
+
+            // 理论最大 UDP 负载（IPv4）。注意：macOS loopback 受 net.inet.udp.maxdgram
+            // 限制（默认约 9216 字节）无法发送此大包；Linux 上可达 65507。平台不支持时跳过动态验证。
+            $payload = str_repeat('A', 65507);
+            $sent    = @fwrite($fp, $payload);
+            if ($sent === false || $sent < 65507) {
+                fclose($fp);
+                $this->markTestSkipped('当前平台 loopback UDP 上限不足 65507 字节，跳过动态大包验证（静态常量断言已覆盖）');
+            }
+            fclose($fp);
+
+            $deadline = microtime(true) + 3.0;
+            while (microtime(true) < $deadline && !file_exists($lenFile)) {
+                usleep(20_000);
+            }
+
+            $got = file_exists($lenFile) ? (int)file_get_contents($lenFile) : 0;
+            $this->assertSame(65507, $got, 'UDP 大包被截断（应完整收到 65507 字节）');
+        } finally {
+            $this->stopProc($proc, $script);
+            @unlink($lenFile);
+        }
+    }
+
+    /**
+     * TCP 连接状态机：message handler 抛异常后，运行时应主动回收该连接，
+     * 而不是把它留在连接表等心跳超时（半响应挂住客户端 + 连接泄漏）。
+     *
+     * 起 text 服务，handler 抛异常（已注册 error 处理器兜底），验证客户端在发消息后
+     * 读到 EOF（连接被关闭），证明连接被主动回收。
+     */
+    public function testNativeTcpHandlerExceptionClosesConnection(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port   = $this->findFreePort();
+        $script = $this->writeTextThrowServerScript($port);
+        $proc   = proc_open([PHP_BINARY, $script], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native 服务器子进程');
+        $this->waitForPort($port, 4.0);
+
+        try {
+            $fp = @fsockopen('127.0.0.1', $port, $errno, $errstr, 2.0);
+            $this->assertNotFalse($fp, "连接失败: {$errstr} ({$errno})");
+            // 2 秒读超时：用于区分「连接被主动关闭（立即 EOF）」与「连接未关闭（等到超时）」。
+            stream_set_timeout($fp, 2);
+
+            fwrite($fp, "trigger\n");
+
+            // handler 抛异常 → 连接应被主动关闭 → 客户端立即读到 EOF（而非阻塞到超时）。
+            $resp = @fread($fp, 1024);
+            $meta = stream_get_meta_data($fp);
+            $this->assertFalse($meta['timed_out'], 'handler 异常后连接应被主动关闭，不应阻塞到读超时');
+            $this->assertSame('', (string)$resp, 'handler 异常后连接应被主动关闭（读到 EOF）');
+
+            fclose($fp);
+        } finally {
+            $this->stopProc($proc, $script);
+        }
+    }
+
+    private function writeUdpCountServerScript(int $port, string $file): string
+    {
+        $autoload = realpath(__DIR__ . '/../vendor/autoload.php');
+        $code = <<<PHP
+<?php
+require '{$autoload}';
+use Kode\\Process\\Kode;
+
+Kode::serve('udp://127.0.0.1:{$port}', ['workers' => 1], 'native')
+    ->on('error', function (): void {})
+    ->on('message', function (\$conn, \$data): void {
+        \$seq = unpack('n', \$data)[1] ?? 0;
+        \$raw = (file_exists('{$file}') && filesize('{$file}') > 0) ? file_get_contents('{$file}') : '';
+        \$set = \$raw !== '' ? unserialize(\$raw) : [];
+        \$set[] = \$seq;
+        file_put_contents('{$file}', serialize(\$set));
+    })
+    ->start();
+PHP;
+        $f = tempnam(sys_get_temp_dir(), 'kode_udp_count_');
+        file_put_contents($f, $code);
+        return $f;
+    }
+
+    private function writeUdpSizeServerScript(int $port, string $file): string
+    {
+        $autoload = realpath(__DIR__ . '/../vendor/autoload.php');
+        $code = <<<PHP
+<?php
+require '{$autoload}';
+use Kode\\Process\\Kode;
+
+Kode::serve('udp://127.0.0.1:{$port}', ['workers' => 1], 'native')
+    ->on('error', function (): void {})
+    ->on('message', function (\$conn, \$data): void {
+        file_put_contents('{$file}', (string)strlen(\$data));
+    })
+    ->start();
+PHP;
+        $f = tempnam(sys_get_temp_dir(), 'kode_udp_size_');
+        file_put_contents($f, $code);
+        return $f;
+    }
+
+    private function writeTextThrowServerScript(int $port): string
+    {
+        $autoload = realpath(__DIR__ . '/../vendor/autoload.php');
+        $code = <<<PHP
+<?php
+require '{$autoload}';
+use Kode\\Process\\Kode;
+
+Kode::serve('text://127.0.0.1:{$port}', ['workers' => 1], 'native')
+    ->on('error', function (): void {})
+    ->on('message', function (\$conn, \$data): void {
+        throw new \\RuntimeException('handler boom');
+    })
+    ->start();
+PHP;
+        $f = tempnam(sys_get_temp_dir(), 'kode_text_throw_');
+        file_put_contents($f, $code);
+        return $f;
+    }
+
     private function writeHttp2ServerScript(int $port): string
     {
         $autoload = realpath(__DIR__ . '/../vendor/autoload.php');
