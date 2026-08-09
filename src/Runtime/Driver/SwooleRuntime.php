@@ -169,9 +169,15 @@ final class SwooleRuntime extends AbstractRuntime
                 // 统一交付 Kode\Process\Http\Request，而不是把 Swoole\Http\Request 直接抛给业务：
                 // 三个运行时的 handler 因此看到同一个类型、同一套字段。需要 Swoole 专有能力时
                 // 用 $request->native() 取回原对象。
-                $this->fireMessage($conn, Request::fromSwoole($req));
+                $ok = $this->fireMessage($conn, Request::fromSwoole($req));
                 if ($conn->isChunkStarted()) {
                     $conn->endChunk();
+                }
+                // message handler 抛异常已被 error 处理器兜底：请求未正常结束，主动关闭连接
+                // 回收资源、避免客户端挂起（与 Native 一致）。HTTP 响应会以空 200 干净结束，
+                // 半响应不会泄漏给客户端。
+                if (!$ok) {
+                    $conn->close();
                 }
             });
             return;
@@ -184,7 +190,12 @@ final class SwooleRuntime extends AbstractRuntime
                 });
             }
             $server->on('message', function (object $srv, object $frame): void {
-                $this->fireMessage(new SwooleConnection($srv, (int)$frame->fd), $frame->data);
+                $conn = new SwooleConnection($srv, (int)$frame->fd);
+                $ok = $this->fireMessage($conn, $frame->data);
+                // handler 异常兜底后主动关闭连接，避免半响应挂客户端（与 Native 一致）
+                if (!$ok) {
+                    $conn->close();
+                }
             });
             if ($this->hasHandler('close')) {
                 $server->on('close', function (object $srv, int $fd): void {
@@ -207,7 +218,12 @@ final class SwooleRuntime extends AbstractRuntime
             });
         } else {
             $server->on('receive', function (object $srv, int $fd, int $reactorId, string $data): void {
-                $this->fireMessage(new SwooleConnection($srv, $fd), $data);
+                $conn = new SwooleConnection($srv, $fd);
+                $ok = $this->fireMessage($conn, $data);
+                // handler 异常兜底后主动关闭连接，避免半响应挂客户端（与 Native 一致）
+                if (!$ok) {
+                    $conn->close();
+                }
             });
         }
 

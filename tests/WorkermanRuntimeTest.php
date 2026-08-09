@@ -263,4 +263,63 @@ final class WorkermanRuntimeTest extends TestCase
 
         return $pid;
     }
+
+    /**
+     * message handler 抛异常被 error 处理器兜底后，Workerman 必须主动关闭 TCP 连接，
+     * 否则客户端会挂起等待（与 Native/Swoole 的回收一致）。
+     */
+    public function testMessageHandlerExceptionClosesTcpConnection(): void
+    {
+        $port   = $this->freePort();
+        $script = $this->writeThrowServerScript($port);
+        $pid    = $this->spawn($script);
+
+        try {
+            $this->assertTrue($this->waitForPort($port, 8.0), "Workerman 服务未能在超时内监听 {$port}");
+
+            $fp = @stream_socket_client("tcp://127.0.0.1:{$port}", $errno, $errstr, 2.0);
+            $this->assertIsResource($fp, "连接失败：[{$errno}] {$errstr}");
+            stream_set_timeout($fp, 2);
+            fwrite($fp, "ping\n");
+
+            // handler 抛异常被兜底并主动关闭连接：客户端应快速收到 EOF（''），而非挂起
+            $response = @fread($fp, 1024);
+            $meta     = stream_get_meta_data($fp);
+            fclose($fp);
+
+            $this->assertSame('', (string)$response, 'handler 异常后连接应被主动关闭（EOF），不应有半响应残留');
+            $this->assertFalse($meta['timed_out'], 'handler 异常后连接应被主动关闭，不应挂起等待超时');
+        } finally {
+            $this->terminate($pid);
+            @unlink($script);
+        }
+    }
+
+    private function writeThrowServerScript(int $port): string
+    {
+        $autoload = dirname(__DIR__) . '/vendor/autoload.php';
+        $file     = sys_get_temp_dir() . '/kode-wm-throw-' . getmypid() . '-' . $port . '.php';
+
+        $code = <<<PHP
+        <?php
+        \$argv = [__FILE__, 'start'];
+        \$_SERVER['argv'] = \$argv;
+        require '{$autoload}';
+        use Kode\\Process\\Runtime;
+
+        \$rt = Runtime::make('workerman');
+        \$rt->listen('tcp://127.0.0.1:{$port}', ['workers' => 1]);
+        \$rt->on('message', static function (\$conn, \$data): void {
+            throw new \\RuntimeException('boom-from-message');
+        });
+        \$rt->on('error', static function (\$conn, \$e): void {
+            \\error_log('wm-msg-err: ' . \$e->getMessage());
+        });
+        \$rt->start();
+        PHP;
+
+        file_put_contents($file, $code);
+
+        return $file;
+    }
 }

@@ -206,9 +206,14 @@ final class WorkermanRuntime extends AbstractRuntime
                     $data = $request;
                 }
 
-                $this->fireMessage($wrap, $data);
+                $ok = $this->fireMessage($wrap, $data);
                 if ($wrap->isChunkStarted()) {
                     $wrap->endChunk();
+                }
+                // message handler 抛异常已被 error 处理器兜底：主动关闭连接回收资源、
+                // 避免半响应挂客户端（与 Native/Swoole 一致）。
+                if (!$ok) {
+                    $wrap->close();
                 }
             };
         }

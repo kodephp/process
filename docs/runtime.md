@@ -366,6 +366,7 @@ if ($rt->supports(Capability::Coroutine)) {
 | **定时器回调异常隔离（v5.2.18）** | 三运行时的 `addTimer()` 回调统一做异常隔离：回调抛异常被 `error_log` 记录后继续，绝不穿透事件循环打死 worker。Swoole / Workerman 此前裸传回调、异常会致命退出；Native 三 Loop 早已隔离。一次性定时器触发后底层自动移除，本端映射也一并清理，避免陈旧 timer id 残留 |
 | **UDP 回包路由（v5.2.19）** | `receiveUdp()` 单次可读事件内**循环排空**所有挂起数据报（`recvfrom` 直到 EAGAIN），边缘触发 loop（ev）下不循环会丢包；缓冲区上限用 `UDP_MAX_PACKET = 65507`（UDP 数据报理论最大值），杜绝大包被 `recvfrom` 静默截断 |
 | **TCP 连接异常回收（v5.2.19）** | message handler 抛异常被 error 处理器兜底后，运行时会**主动关闭该 TCP 连接**，而非留在连接表等心跳超时——避免半响应挂住客户端、连接泄漏。底层由 `fireMessage()` 返回 `bool` 告知调用方是否发生异常 |
+| **message handler 异常对称回收（v5.2.20）** | Swoole / Workerman 的 message 派发同样消费 `fireMessage()` 返回的 `bool`：HTTP 场景通过 `close()` 干净结束响应（空 200）、TCP/WebSocket 主动关闭底层连接，兜底后不再让半响应挂住客户端（与 Native 一致）。UDP 数据报（`packet` 回调）无连接，其 fd 是 server socket，**绝不做关闭动作** |
 | **PID 文件由 master 写** | 见下方 CLI 小节 |
 
 ## 环境自检
