@@ -82,7 +82,11 @@ final class EventLoop implements LoopInterface
             $stream,
             Event::READ | Event::PERSIST,
             static function ($fd) use ($callback, $stream): void {
-                $callback($stream);
+                try {
+                    $callback($stream);
+                } catch (\Throwable $e) {
+                    \error_log("EventLoop: read/write 回调异常已隔离，循环继续: " . $e->getMessage());
+                }
             }
         );
         $event->add();
@@ -108,7 +112,11 @@ final class EventLoop implements LoopInterface
             $stream,
             Event::WRITE | Event::PERSIST,
             static function ($fd) use ($callback, $stream): void {
-                $callback($stream);
+                try {
+                    $callback($stream);
+                } catch (\Throwable $e) {
+                    \error_log("EventLoop: read/write 回调异常已隔离，循环继续: " . $e->getMessage());
+                }
             }
         );
         $event->add();
@@ -129,7 +137,11 @@ final class EventLoop implements LoopInterface
         $this->offSignal($signal);
 
         $event = Event::signal($this->base, $signal, static function ($sig) use ($callback): void {
-            $callback($sig);
+            try {
+                $callback($sig);
+            } catch (\Throwable $e) {
+                \error_log("EventLoop: signal#{$sig} 回调异常已隔离，循环继续: " . $e->getMessage());
+            }
         });
         $event->add();
         $this->signalEvents[$signal] = $event;
@@ -153,7 +165,11 @@ final class EventLoop implements LoopInterface
             if (!$periodic) {
                 unset($this->timerEvents[$id]);
             }
-            $callback();
+            try {
+                $callback();
+            } catch (\Throwable $e) {
+                \error_log("EventLoop: timer#{$id} 回调异常已隔离，循环继续: " . $e->getMessage());
+            }
         });
         $event->add($interval);
         $this->timerEvents[$id] = $event;
@@ -184,7 +200,11 @@ final class EventLoop implements LoopInterface
             $pending          = $this->deferred;
             $this->deferred   = [];
             foreach ($pending as $cb) {
-                $cb();
+                try {
+                    $cb();
+                } catch (\Throwable $e) {
+                    \error_log('EventLoop: deferred 回调异常已隔离，循环继续: ' . $e->getMessage());
+                }
             }
         });
         $this->deferTimer->add(0.0);

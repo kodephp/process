@@ -71,6 +71,8 @@ $loop->stats();      // ['driver'=>..., 'read'=>, 'write'=>, 'timer'=>, 'signal'
 - `defer()` 的回调在**下一次**迭代执行，晚于当前同步代码
 - `destroy()` 幂等，清空所有计数
 
+> **回调异常隔离（v5.2.15）**：read / write / 定时器 / 信号 / deferred 回调中抛出的任何异常都会被事件循环**就地捕获并隔离**（`error_log` 记录后继续运行），不会穿透 `run()` 打死整个循环。长驻服务中单条任务的底层异常不应中断整个事件循环——这与 `QueueManager` 消费循环、`NativeRuntime` handler 的错误边界策略一致。需要「失败即停」的语义请在回调内部自行处理。
+
 ## 与运行时的关系
 
 Reactor 是**独立的统一事件循环层**（`Kode::loop()`），与 `Runtime` 兼容层正交：

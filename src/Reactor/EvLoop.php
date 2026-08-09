@@ -65,7 +65,11 @@ final class EvLoop implements LoopInterface
         $id = (int)$stream;
         $this->offReadable($stream);
         $this->readWatchers[$id] = new EvIo($stream, Ev::READ, static function () use ($callback, $stream): void {
-            $callback($stream);
+            try {
+                $callback($stream);
+            } catch (\Throwable $e) {
+                \error_log("EvLoop: read 回调异常已隔离，循环继续: " . $e->getMessage());
+            }
         });
     }
 
@@ -83,7 +87,11 @@ final class EvLoop implements LoopInterface
         $id = (int)$stream;
         $this->offWritable($stream);
         $this->writeWatchers[$id] = new EvIo($stream, Ev::WRITE, static function () use ($callback, $stream): void {
-            $callback($stream);
+            try {
+                $callback($stream);
+            } catch (\Throwable $e) {
+                \error_log("EvLoop: write 回调异常已隔离，循环继续: " . $e->getMessage());
+            }
         });
     }
 
@@ -100,7 +108,11 @@ final class EvLoop implements LoopInterface
     {
         $this->offSignal($signal);
         $this->signalWatchers[$signal] = new EvSignal($signal, static function () use ($callback, $signal): void {
-            $callback($signal);
+            try {
+                $callback($signal);
+            } catch (\Throwable $e) {
+                \error_log("EvLoop: signal#{$signal} 回调异常已隔离，循环继续: " . $e->getMessage());
+            }
         });
     }
 
@@ -125,7 +137,11 @@ final class EvLoop implements LoopInterface
                 if (!$periodic) {
                     unset($this->timerWatchers[$id]);
                 }
-                $callback();
+                try {
+                    $callback();
+                } catch (\Throwable $e) {
+                    \error_log("EvLoop: timer#{$id} 回调异常已隔离，循环继续: " . $e->getMessage());
+                }
             }
         );
 
@@ -153,7 +169,11 @@ final class EvLoop implements LoopInterface
             $pending          = $this->deferred;
             $this->deferred   = [];
             foreach ($pending as $cb) {
-                $cb();
+                try {
+                    $cb();
+                } catch (\Throwable $e) {
+                    \error_log('EvLoop: deferred 回调异常已隔离，循环继续: ' . $e->getMessage());
+                }
             }
         });
     }

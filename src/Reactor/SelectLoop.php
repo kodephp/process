@@ -95,8 +95,13 @@ final class SelectLoop implements LoopInterface
         $this->enableAsyncSignals();
         $this->signalCallbacks[$signal] = $callback;
         \pcntl_signal($signal, function (int $sig): void {
-            if (isset($this->signalCallbacks[$sig])) {
+            if (!isset($this->signalCallbacks[$sig])) {
+                return;
+            }
+            try {
                 ($this->signalCallbacks[$sig])($sig);
+            } catch (\Throwable $e) {
+                \error_log("SelectLoop: signal#{$sig} 回调异常已隔离，循环继续: " . $e->getMessage());
             }
         });
     }
@@ -212,14 +217,24 @@ final class SelectLoop implements LoopInterface
 
         foreach ($read as $stream) {
             $id = (int)$stream;
-            if (isset($this->readCallbacks[$id])) {
+            if (!isset($this->readCallbacks[$id])) {
+                continue;
+            }
+            try {
                 ($this->readCallbacks[$id])($stream);
+            } catch (\Throwable $e) {
+                \error_log("SelectLoop: read 回调异常已隔离，循环继续: " . $e->getMessage());
             }
         }
         foreach ($write as $stream) {
             $id = (int)$stream;
-            if (isset($this->writeCallbacks[$id])) {
+            if (!isset($this->writeCallbacks[$id])) {
+                continue;
+            }
+            try {
                 ($this->writeCallbacks[$id])($stream);
+            } catch (\Throwable $e) {
+                \error_log("SelectLoop: write 回调异常已隔离，循环继续: " . $e->getMessage());
             }
         }
     }
@@ -240,7 +255,11 @@ final class SelectLoop implements LoopInterface
             } else {
                 unset($this->timers[$id]);
             }
-            ($timer['callback'])();
+            try {
+                ($timer['callback'])();
+            } catch (\Throwable $e) {
+                \error_log("SelectLoop: timer#{$id} 回调异常已隔离，循环继续: " . $e->getMessage());
+            }
         }
     }
 
@@ -252,7 +271,11 @@ final class SelectLoop implements LoopInterface
         $pending        = $this->deferred;
         $this->deferred = [];
         foreach ($pending as $callback) {
-            $callback();
+            try {
+                $callback();
+            } catch (\Throwable $e) {
+                \error_log('SelectLoop: deferred 回调异常已隔离，循环继续: ' . $e->getMessage());
+            }
         }
     }
 
