@@ -204,6 +204,8 @@ $rt->listen('http://0.0.0.0:8080', [
 | `finish` | `fn(mixed $result)` | task 结果回到投递方 |
 
 > 任一回调抛出的异常都会被收敛到 `error` 处理器，不会打挂整个 worker。
+> 定时器回调（`addTimer`）同样做异常隔离：回调抛异常被 `error_log` 记录后继续，
+> 绝不穿透事件循环打死 worker（详见下方「进程健壮性」）。
 
 ### 连接抽象
 
@@ -361,6 +363,7 @@ if ($rt->supports(Capability::Coroutine)) {
 | **`unix://` + `reusePort`** | Unix socket 监听一律由 master 打开并共享。此前每个 worker 各自 `bind` 同一路径，后启动的会删掉先启动的 socket 文件 |
 | **task 管道完整写** | 投递任务时 `fwrite` 的部分写会进缓冲、注册 `onWritable` 续写；此前截断的半帧会让该管道后续所有消息错位 |
 | **定时器可在 `start()` 前注册** | `addTimer()` 在服务启动前调用会进待重放队列，`start()` 后统一注册；`delTimer()` 同样能取消尚未生效的定时器 |
+| **定时器回调异常隔离（v5.2.18）** | 三运行时的 `addTimer()` 回调统一做异常隔离：回调抛异常被 `error_log` 记录后继续，绝不穿透事件循环打死 worker。Swoole / Workerman 此前裸传回调、异常会致命退出；Native 三 Loop 早已隔离。一次性定时器触发后底层自动移除，本端映射也一并清理，避免陈旧 timer id 残留 |
 | **PID 文件由 master 写** | 见下方 CLI 小节 |
 
 ## 环境自检

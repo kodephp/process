@@ -67,6 +67,39 @@ final class WorkermanRuntimeTest extends TestCase
         $this->assertFalse((new WorkermanRuntime())->delTimer(4242));
     }
 
+    /**
+     * 定时回调抛异常必须被隔离，绝不能穿透 Workerman 事件循环打死 worker。
+     *
+     * Workerman 的 Timer::add 只能在 Worker 事件循环内注册，故用子进程起一个真实
+     * Workerman worker，在 workerStart 里注册抛异常的周期定时器。若异常未被隔离，
+     * worker 进程会被致命错误打死、本测试断言进程存活即失败。
+     */
+    public function testThrowingTimerCallbackIsIsolated(): void
+    {
+        $port    = $this->freePort();
+        $script  = $this->writeTimerServerScript($port);
+        $logFile = sys_get_temp_dir() . '/kode-wm-timer-' . getmypid() . '-' . $port . '.log';
+        $pid     = $this->spawnCapturing($script, $logFile);
+
+        try {
+            $this->assertTrue($this->waitForPort($port), "Workerman 服务未能在超时内监听 {$port}");
+
+            // 让周期定时器触发若干次（含异常被隔离的回调）
+            usleep(1_200_000);
+
+            // 进程仍存活：异常隔离生效，worker 未被未捕获异常打死
+            $this->assertTrue(@posix_kill($pid, 0), 'worker 进程在定时回调抛异常后已退出，说明异常未被隔离');
+
+            // 隔离日志出现：证明定时器确实触发且异常被捕获而非致命
+            $log = (string)@file_get_contents($logFile);
+            $this->assertStringContainsString('WorkermanRuntime: timer#', $log);
+        } finally {
+            $this->terminate($pid);
+            @unlink($script);
+            @unlink($logFile);
+        }
+    }
+
     public function testEndToEndHttpRoundTrip(): void
     {
         $port   = $this->freePort();
@@ -177,5 +210,57 @@ final class WorkermanRuntimeTest extends TestCase
         if (@posix_kill($pid, 0)) {
             @posix_kill($pid, SIGKILL);
         }
+    }
+
+    /**
+     * 写一个会注册「抛异常周期定时器」的 Workerman 服务脚本（在 workerStart 内注册）。
+     */
+    private function writeTimerServerScript(int $port): string
+    {
+        $autoload = dirname(__DIR__) . '/vendor/autoload.php';
+        $file     = sys_get_temp_dir() . '/kode-wm-timer-' . getmypid() . '-' . $port . '.php';
+
+        $code = <<<PHP
+        <?php
+        \$argv = [__FILE__, 'start'];
+        \$_SERVER['argv'] = \$argv;
+        require '{$autoload}';
+
+        use Kode\\Process\\Runtime;
+
+        \$rt = Runtime::make('workerman');
+        \$rt->listen('http://127.0.0.1:{$port}', ['workers' => 1, 'name' => 'kode-wm-timer']);
+        \$rt->on('workerStart', static function () use (\$rt): void {
+            \$rt->addTimer(0.05, static function (): void {
+                throw new \\RuntimeException('boom-from-timer');
+            });
+        });
+        \$rt->on('message', static function (\$conn, \$req): void {
+            \$conn->send('ok');
+        });
+        \$rt->start();
+        PHP;
+
+        file_put_contents($file, $code);
+
+        return $file;
+    }
+
+    /**
+     * 启动子进程并把 stderr 重定向到 \$logFile（用于断言隔离日志出现）。
+     */
+    private function spawnCapturing(string $script, string $logFile): int
+    {
+        $cmd = sprintf(
+            '%s %s >/dev/null 2>%s & echo $!',
+            escapeshellarg(PHP_BINARY),
+            escapeshellarg($script),
+            escapeshellarg($logFile)
+        );
+
+        $pid = (int)shell_exec($cmd);
+        $this->assertGreaterThan(0, $pid, '无法启动 Workerman 定时器测试服务');
+
+        return $pid;
     }
 }

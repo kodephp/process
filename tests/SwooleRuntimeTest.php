@@ -73,4 +73,50 @@ final class SwooleRuntimeTest extends TestCase
     {
         $this->assertFalse((new SwooleRuntime())->delTimer(4242));
     }
+
+    /**
+     * 定时回调抛异常必须被隔离，绝不能穿透 Swoole 事件循环打死 worker。
+     *
+     * 用原生 Swoole 定时器驱动 reactor 退出，让上面的周期定时器真正触发若干次；
+     * 若异常未被隔离，进程会在此处之前崩溃、测试直接失败。
+     */
+    public function testThrowingTimerCallbackIsIsolated(): void
+    {
+        $rt = new SwooleRuntime();
+        $fired = new \stdClass();
+        $fired->count = 0;
+
+        $id = $rt->addTimer(0.02, static function () use ($fired): void {
+            $fired->count++;
+            throw new \RuntimeException('boom-from-timer');
+        });
+        $this->assertIsInt($id);
+
+        \Swoole\Timer::after(300, static fn() => \Swoole\Event::exit());
+        \Swoole\Event::wait();
+
+        // 进程没崩（异常被隔离）且定时器确实多次触发
+        self::assertGreaterThan(0, $fired->count);
+    }
+
+    /**
+     * 一次性定时器触发后底层已自动移除，本端映射也应清理：delTimer 应返回 false。
+     */
+    public function testOneShotTimerCleansUpMapAfterFiring(): void
+    {
+        $rt = new SwooleRuntime();
+
+        // 触发前可正常删除（尚未移除）
+        $id = $rt->addTimer(0.02, static fn() => null, false);
+        $this->assertIsInt($id);
+        $this->assertTrue($rt->delTimer($id));
+
+        // 再注册一个，让它真正触发一次
+        $id2 = $rt->addTimer(0.02, static fn() => null, false);
+        \Swoole\Timer::after(300, static fn() => \Swoole\Event::exit());
+        \Swoole\Event::wait();
+
+        // 触发后映射已清理：delTimer 返回 false（避免陈旧的 timer id 残留）
+        self::assertFalse($rt->delTimer($id2));
+    }
 }

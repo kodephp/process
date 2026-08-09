@@ -266,7 +266,22 @@ final class WorkermanRuntime extends AbstractRuntime
         }
 
         $id = ++$this->timerSeq;
-        $this->timers[$id] = (int)$timerClass::add($interval, $callback, [], $periodic);
+
+        // 异常隔离：定时回调抛异常绝不能穿透 Workerman 事件循环、打死 worker。
+        // 与 Native 三个 Loop 的定时器回调统一约定一致。
+        // 一次性定时器触发后底层已自动移除，顺手清掉本端映射，避免陈旧的 timer id 残留。
+        $wrapped = function () use ($callback, $id, $periodic): void {
+            try {
+                $callback();
+            } catch (\Throwable $e) {
+                \error_log(sprintf('WorkermanRuntime: timer#%d 回调异常已隔离，循环继续: %s', $id, $e->getMessage()));
+            }
+            if (!$periodic) {
+                unset($this->timers[$id]);
+            }
+        };
+
+        $this->timers[$id] = (int)$timerClass::add($interval, $wrapped, [], $periodic);
         return $id;
     }
 
