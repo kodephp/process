@@ -30,6 +30,9 @@ class SignalHandler
 
     private bool $processing = false;
 
+    /** 异步排队信号上限，避免信号风暴（如 SIGCHLD）下队列无界增长 */
+    private const int MAX_QUEUED = 256;
+
     private function __construct(?LoggerInterface $logger = null)
     {
         $this->logger = $logger ?? new NullLogger();
@@ -94,18 +97,27 @@ class SignalHandler
     public function register(int $signal, callable $handler): void
     {
         if (!Signal::isCatchable($signal)) {
-            $this->logger->warning('信号 %d 不可捕获，将使用默认处理器', [$signal]);
+            $this->logger->warning('信号 {signal} 不可捕获，将使用默认处理器', ['signal' => $signal]);
         }
 
         $this->handlers[$signal] = $handler;
 
-        $result = pcntl_signal($signal, [$this, 'handleSignal'], $this->async);
+        // 第 3 参是 restart_syscalls（默认 true）：让被信号打断的慢系统调用
+        // （如 read/write）自动重启，避免 EINTR。异步分发由 pcntl_async_signals() 控制。
+        $result = pcntl_signal($signal, [$this, 'handleSignal'], true);
+
+        if ($this->async && function_exists('pcntl_async_signals')) {
+            pcntl_async_signals(true);
+        }
 
         if (!$result) {
             throw SignalException::handlerRegistrationFailed($signal, error_get_last()['message'] ?? '');
         }
 
-        $this->logger->debug('已注册信号处理器: %s (%d)', [Signal::getName($signal), $signal]);
+        $this->logger->debug('已注册信号处理器: {name} ({signal})', [
+            'name' => Signal::getName($signal),
+            'signal' => $signal,
+        ]);
     }
 
     public function unregister(int $signal): void
@@ -114,7 +126,10 @@ class SignalHandler
 
         pcntl_signal($signal, SIG_DFL);
 
-        $this->logger->debug('已注销信号处理器: %s (%d)', [Signal::getName($signal), $signal]);
+        $this->logger->debug('已注销信号处理器: {name} ({signal})', [
+            'name' => Signal::getName($signal),
+            'signal' => $signal,
+        ]);
     }
 
     public function dispatch(int $signal, mixed $info = null): void
@@ -122,16 +137,16 @@ class SignalHandler
         $handler = $this->handlers[$signal] ?? $this->defaultHandlers[$signal] ?? null;
 
         if ($handler === null) {
-            $this->logger->warning('信号 %d 没有注册处理器', [$signal]);
+            $this->logger->warning('信号 {signal} 没有注册处理器', ['signal' => $signal]);
             return;
         }
 
         try {
             ($handler)($signal, $info);
         } catch (\Throwable $e) {
-            $this->logger->error('信号处理器执行失败 [%s]: %s', [
-                Signal::getName($signal),
-                $e->getMessage()
+            $this->logger->error('信号处理器执行失败 [{name}]: {message}', [
+                'name' => Signal::getName($signal),
+                'message' => $e->getMessage(),
             ]);
         }
     }
@@ -139,7 +154,10 @@ class SignalHandler
     public function handleSignal(int $signal): void
     {
         if ($this->async) {
-            $this->signalQueue[] = $signal;
+            // 去重 + 上限：信号风暴（如 SIGCHLD）下避免队列无界增长与重复分发
+            if (count($this->signalQueue) < self::MAX_QUEUED && !in_array($signal, $this->signalQueue, true)) {
+                $this->signalQueue[] = $signal;
+            }
             return;
         }
 
@@ -191,7 +209,10 @@ class SignalHandler
         pcntl_signal($signal, SIG_IGN);
         unset($this->handlers[$signal]);
 
-        $this->logger->debug('已忽略信号: %s (%d)', [Signal::getName($signal), $signal]);
+        $this->logger->debug('已忽略信号: {name} ({signal})', [
+            'name' => Signal::getName($signal),
+            'signal' => $signal,
+        ]);
     }
 
     public function getDefaultHandler(int $signal): ?callable
@@ -203,11 +224,18 @@ class SignalHandler
     {
         $this->async = $async;
 
-        foreach (array_keys($this->handlers) as $signal) {
-            pcntl_signal($signal, [$this, 'handleSignal'], $async);
+        // 真正启用/禁用引擎级异步信号分发：开启后信号会在 opcode 边界立即送达 handleSignal
+        if (function_exists('pcntl_async_signals')) {
+            pcntl_async_signals($async);
         }
 
-        $this->logger->debug('异步信号分发模式: %s', [$async ? '启用' : '禁用']);
+        foreach (array_keys($this->handlers) as $signal) {
+            pcntl_signal($signal, [$this, 'handleSignal'], true);
+        }
+
+        $this->logger->debug('异步信号分发模式: {mode}', [
+            'mode' => $async ? '启用' : '禁用',
+        ]);
     }
 
     public function isAsyncDispatch(): bool

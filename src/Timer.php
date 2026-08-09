@@ -20,6 +20,18 @@ final class Timer
 {
     public const TIMER_PERSISTENT = -1;
 
+    /**
+     * 最小触发间隔。持久/重复定时器若 delay<=0 会在每个 tick 必触发，
+     * 形成 100% CPU 忙轮询；重排时 clamp 到此下限即可避免。
+     */
+    public const MIN_DELAY = 0.001;
+
+    /**
+     * parseCronNext 单次扫描上限（约 32 天分钟数）。超出则退化为 hourly 重算，
+     * 避免对永不匹配的表达式（如 2 月 30 日）做数十万次 getdate 造成秒级停顿。
+     */
+    public const CRON_MAX_ITER = 46080;
+
     private static array $timers = [];
     private static array $cronJobs = [];
     private static int $timerId = 0;
@@ -32,6 +44,7 @@ final class Timer
         'total_removed' => 0,
     ];
     private static ?EventEmitter $emitter = null;
+    private static bool $errorListenerRegistered = false;
 
     public static function init(): void
     {
@@ -193,17 +206,31 @@ final class Timer
             if ($now >= $timer['run_at']) {
                 try {
                     ($timer['callback'])(...$timer['args']);
-                    self::$stats['total_executed']++;
-                    self::$timers[$id]['executed']++;
                 } catch (\Throwable $e) {
                     self::$emitter?->emit('timer.error', $id, $e);
+                    if (!self::$errorListenerRegistered) {
+                        trigger_error(
+                            "Timer #{$id} callback threw: " . $e->getMessage(),
+                            E_USER_WARNING
+                        );
+                    }
                 }
 
+                // 回调可能在执行期间 del/delAll 本定时器，必须复检避免把已删条目
+                // 复活成残缺数组（自增/重排会 auto-vivify 出只剩部分键的数组，
+                // 下一 tick 访问 paused/count 等键即崩溃）。复检必须早于任何写入。
+                if (!isset(self::$timers[$id])) {
+                    continue;
+                }
+
+                self::$stats['total_executed']++;
+                self::$timers[$id]['executed']++;
+
                 if ($timer['count'] === self::TIMER_PERSISTENT) {
-                    self::$timers[$id]['run_at'] = $now + $timer['delay'];
+                    self::$timers[$id]['run_at'] = $now + max($timer['delay'], self::MIN_DELAY);
                 } elseif ($timer['remaining'] > 1) {
                     self::$timers[$id]['remaining']--;
-                    self::$timers[$id]['run_at'] = $now + $timer['delay'];
+                    self::$timers[$id]['run_at'] = $now + max($timer['delay'], self::MIN_DELAY);
                 } else {
                     unset(self::$timers[$id]);
                     self::$stats['total_removed']++;
@@ -319,6 +346,7 @@ final class Timer
     {
         self::init();
         self::$emitter?->on('timer.error', $callback);
+        self::$errorListenerRegistered = true;
     }
 
     public static function reset(): void
@@ -330,6 +358,7 @@ final class Timer
         self::$initialized = false;
         self::$lastTick = 0.0;
         self::$emitter = null;
+        self::$errorListenerRegistered = false;
         self::$stats = [
             'total_created' => 0,
             'total_executed' => 0,
@@ -347,7 +376,8 @@ final class Timer
 
         $now = time();
 
-        for ($i = 1; $i <= 525600; $i++) {
+        $limit = min(self::CRON_MAX_ITER, 525600);
+        for ($i = 1; $i <= $limit; $i++) {
             $candidate = $now + ($i * 60);
             $date = getdate($candidate);
 
@@ -360,34 +390,60 @@ final class Timer
             }
         }
 
-        return microtime(true) + 60;
+        // 在扫描上限内未找到匹配（含永不匹配的表达式）：退化为 hourly 重算，
+        // 避免对不可能命中的表达式反复做数十万次 getdate 造成秒级停顿。
+        return microtime(true) + 3600;
     }
 
+    /**
+     * 匹配单个 cron 字段。
+     *
+     * 支持 `*`、`a-b` 区间、`a/b` 步长、`a,b,c` 枚举，以及它们的组合（如 `1,2-5`）。
+     * 逗号枚举优先拆分，每个子项再递归匹配，从而正确支持 `1,2-5` = {1,2,3,4,5}
+     * 与 `1-30/5` 这种「区间 + 步长」组合。
+     */
     private static function matchCronPart(string $part, int $value): bool
     {
         if ($part === '*') {
             return true;
         }
 
-        if (strpos($part, '/') !== false) {
-            [$range, $step] = explode('/', $part);
-            $step = (int) $step;
-
-            if ($range === '*') {
-                return $value % $step === 0;
+        if (str_contains($part, ',')) {
+            foreach (explode(',', $part) as $sub) {
+                if (self::matchCronPart($sub, $value)) {
+                    return true;
+                }
             }
 
             return false;
         }
 
-        if (strpos($part, '-') !== false) {
-            [$min, $max] = explode('-', $part);
-            return $value >= (int) $min && $value <= (int) $max;
+        if (str_contains($part, '/')) {
+            [$range, $step] = explode('/', $part, 2);
+            $step = (int) $step;
+
+            if ($step <= 0) {
+                return false;
+            }
+
+            if ($range === '*') {
+                return $value % $step === 0;
+            }
+
+            if (str_contains($range, '-')) {
+                [$min, $max] = explode('-', $range, 2);
+                $min = (int) $min;
+                $max = (int) $max;
+
+                return $value >= $min && $value <= $max && ($value - $min) % $step === 0;
+            }
+
+            return $value % $step === 0;
         }
 
-        if (strpos($part, ',') !== false) {
-            $values = array_map('intval', explode(',', $part));
-            return in_array($value, $values, true);
+        if (str_contains($part, '-')) {
+            [$min, $max] = explode('-', $part, 2);
+            return $value >= (int) $min && $value <= (int) $max;
         }
 
         return (int) $part === $value;

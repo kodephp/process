@@ -40,7 +40,7 @@ final class FileStore implements StoreInterface
 
         $this->path = $prefix === '' ? $base : $base . '/' . $prefix;
 
-        if (!is_dir($this->path) && !@mkdir($this->path, (int) ($options['mode'] ?? 0o777), true) && !is_dir($this->path)) {
+        if (!is_dir($this->path) && !@mkdir($this->path, (int) ($options['mode'] ?? 0o700), true) && !is_dir($this->path)) {
             throw ClusterException::backendUnavailable('file', sprintf('无法创建目录 %s', $this->path));
         }
         if (!is_writable($this->path)) {
@@ -111,10 +111,12 @@ final class FileStore implements StoreInterface
                 fwrite($handle, $payload);
                 fflush($handle);
             } elseif (isset($action['delete'])) {
-                ftruncate($handle, 0);
-                fflush($handle);
-                @unlink($file);
-            } elseif ($record === null) {
+            ftruncate($handle, 0);
+            fflush($handle);
+            // 不 unlink：保留空墓碑文件（inode 持续存在），由 flock 继续串行化，
+            // 避免「持锁中删除 inode → 他者新建同名文件获得新 inode」破坏互斥。
+            // 空墓碑由后续读操作在持锁下清理（见下方 $record === null 分支）。
+        } elseif ($record === null) {
                 // 读操作命中不存在的键时 fopen('c+') 会留下空文件，顺手清掉避免目录膨胀
                 $stat = fstat($handle);
                 if (($stat['size'] ?? 0) === 0) {
@@ -144,7 +146,7 @@ final class FileStore implements StoreInterface
             return null;
         }
 
-        $record = @unserialize($raw);
+        $record = @unserialize($raw, ['allowed_classes' => false]);
         if (!is_array($record) || !array_key_exists('v', $record)) {
             return null;
         }
@@ -267,7 +269,7 @@ final class FileStore implements StoreInterface
                 continue;
             }
 
-            $record = @unserialize($raw);
+            $record = @unserialize($raw, ['allowed_classes' => false]);
             if (!is_array($record) || !isset($record['k'])) {
                 continue;
             }

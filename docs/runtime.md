@@ -148,10 +148,17 @@ $rt->listen('http://0.0.0.0:8080', [
     'logFile'       => '/var/log/app.log',
     'user'          => 'www',   // 降权运行
     'group'         => 'www',
-    'heartbeat'     => 60,      // 空闲连接回收秒数，0 关闭
+    'heartbeat'     => 60,      // 空闲连接回收秒数（默认 0 = 关闭！见下方安全提示）
     'keepAlive'     => true,    // HTTP keep-alive，默认开
     'maxSendBuffer' => 8388608, // 单连接发送缓冲上限，超出即断开（背压）
     'stopTimeout'   => 10,      // 优雅停机最长等待秒数
+    'gracefulShutdownTimeout' => 3, // 收到停机信号后，等待在途连接优雅收尾的秒数（默认 3）
+
+    // ---- HTTP/2（Native 专有，默认开启）----
+    'http2'                       => true,    // 是否在 TLS 监听上协商 HTTP/2
+    'http2MaxConcurrentStreams'   => 128,    // 单连接最大并发流数（防单连接占满）
+    'http2InitialWindow'          => 1048576,// 流初始窗口字节数
+    'http2MaxHeaderListSize'      => 65536,  // 请求头列表最大字节数（防超大头攻击）
 
     // ---- Swoole 专有 ----
     'mode'       => 'process',  // 切到 SWOOLE_PROCESS（默认 BASE，吞吐高约 8%）
@@ -160,6 +167,11 @@ $rt->listen('http://0.0.0.0:8080', [
     'workermanCli' => true,     // 保留 Workerman 原生 CLI（start/stop/reload/status）
 ]);
 ```
+
+> **⚠️ 安全：空闲连接回收 `heartbeat` 默认是 0（关闭）。**
+> 不配置时，空闲连接会一直挂着，恶意客户端可借此发起 **慢速攻击（Slowloris）**——开大量半开/空闲连接耗尽 worker 与文件描述符。
+> 生产环境建议显式配置，例如 `'heartbeat' => 60`（60 秒无活动即回收）。
+> 同理，TLS 监听下 `http2MaxConcurrentStreams` / `http2MaxHeaderListSize` 已设上限以抵御单连接占满与超大头攻击，按需收紧即可。
 
 > **事件循环**：Native 通过 `LoopFactory` 自动择优 `ext-event` → `ext-ev` → `stream_select`。
 > 装了 `ext-event` 就自动走 C 层多路复用，高连接数下是数量级差异。

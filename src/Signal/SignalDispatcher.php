@@ -37,7 +37,8 @@ class SignalDispatcher
 
     public function on(int $signal, callable $listener, int $priority = 0): string
     {
-        $eventId = spl_object_hash((object) $listener) . '_' . (++$this->priorityCounter);
+        // 稳定的唯一事件 id（不依赖 spl_object_hash，避免 off() 时无法匹配）
+        $eventId = 'evt_' . (++$this->priorityCounter);
 
         $this->eventListeners[$signal][$eventId] = [
             'listener' => $listener,
@@ -54,9 +55,9 @@ class SignalDispatcher
             });
         }
 
-        $this->logger->debug('注册信号监听器: %s (优先级: %d)', [
-            Signal::getName($signal),
-            $priority
+        $this->logger->debug('注册信号监听器: {name} (优先级: {priority})', [
+            'name' => Signal::getName($signal),
+            'priority' => $priority,
         ]);
 
         return $eventId;
@@ -80,9 +81,10 @@ class SignalDispatcher
             return;
         }
 
-        $listenerId = spl_object_hash((object) $listener);
+        // 按可调用对象身份（===）匹配，避免 spl_object_hash((object)$listener)
+        // 每次生成新 stdClass 导致永远匹配不上、监听器泄漏。
         foreach ($this->eventListeners[$signal] ?? [] as $id => $data) {
-            if (str_starts_with($id, $listenerId)) {
+            if (($data['listener'] ?? null) === $listener) {
                 unset($this->eventListeners[$signal][$id]);
             }
         }
@@ -91,7 +93,7 @@ class SignalDispatcher
     public function offAll(int $signal): void
     {
         unset($this->eventListeners[$signal]);
-        $this->logger->debug('移除信号 %s 的所有监听器', [Signal::getName($signal)]);
+        $this->logger->debug('移除信号 {name} 的所有监听器', ['name' => Signal::getName($signal)]);
     }
 
     private function dispatchEvent(int $signal): void
@@ -116,9 +118,9 @@ class SignalDispatcher
             }
         }
 
-        $this->logger->debug('信号事件已分发: %s (%d 个监听器)', [
-            Signal::getName($signal),
-            count($listeners)
+        $this->logger->debug('信号事件已分发: {name} ({count} 个监听器)', [
+            'name' => Signal::getName($signal),
+            'count' => count($listeners),
         ]);
     }
 
@@ -142,23 +144,23 @@ class SignalDispatcher
             }
         }
 
-        $this->logger->debug('创建信号组: %s (%d 个信号)', [
-            $name,
-            count($signals)
+        $this->logger->debug('创建信号组: {name} ({count} 个信号)', [
+            'name' => $name,
+            'count' => count($signals),
         ]);
     }
 
     public function dispatchToGroup(string $groupName, int $signal): bool
     {
         if (!isset($this->signalGroups[$groupName])) {
-            $this->logger->warning('信号组不存在: %s', [$groupName]);
+            $this->logger->warning('信号组不存在: {name}', ['name' => $groupName]);
             return false;
         }
 
         if (!in_array($signal, $this->signalGroups[$groupName], true)) {
-            $this->logger->warning('信号 %d 不属于组 %s', [
-                Signal::getName($signal),
-                $groupName
+            $this->logger->warning('信号 {name} 不属于组 {group}', [
+                'name' => Signal::getName($signal),
+                'group' => $groupName,
             ]);
             return false;
         }

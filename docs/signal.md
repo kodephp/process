@@ -110,26 +110,40 @@ Kode::serve('http://0.0.0.0:8080', ['workers' => 4])
 
 ## 信号分发器
 
+`SignalDispatcher` 在 `SignalHandler` 之上提供更易用的「事件监听器」模型：每个信号可挂多个
+监听器、支持优先级、一次性监听器、按监听器移除。
+
 ```php
 use Kode\Process\Signal\SignalDispatcher;
 
-$dispatcher = SignalDispatcher::getInstance();
+$dispatcher = new SignalDispatcher();
 
-// 注册信号处理器
-$dispatcher->register(SIGTERM, function () {
+// 注册监听器，返回事件 id（可用于按 id 移除）
+$id = $dispatcher->on(SIGTERM, function () {
     echo "终止信号\n";
 });
 
-$dispatcher->register(SIGUSR1, function () {
+$dispatcher->on(SIGUSR1, function () {
     echo "用户信号1\n";
 });
 
-// 分发信号
-$dispatcher->dispatch(SIGTERM);
+// 一次性监听器：触发一次后自动移除
+$dispatcher->once(SIGUSR2, function () {
+    echo "只处理一次\n";
+});
 
-// 移除处理器
-$dispatcher->unregister(SIGUSR1);
+// 按 on() 返回的事件 id 移除
+$dispatcher->off(SIGTERM, $id);
+
+// 或按回调函数引用移除
+$dispatcher->off(SIGUSR1, $theCallback);
+
+// 同步派发（直接调用已注册处理器，不经过 pcntl 投递）
+$dispatcher->getHandler()->dispatch(SIGTERM);
 ```
+
+> `SignalDispatcher` 未提供 `getInstance()`，直接 `new` 即可；`on()` / `off()` 才是它的注册接口，
+> 不要调用 `SignalHandler` 的 `register()` / `unregister()`（那是单例底层的底层注册）。
 
 ## 进程控制命令
 

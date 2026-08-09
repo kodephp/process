@@ -4,18 +4,19 @@
 
 `Kode::serve()` 通过地址 scheme 自动选择协议。各运行时支持的协议略有差异：
 
-| 协议 | 地址格式 | Swoole | Workerman |
-|------|----------|:------:|:---------:|
-| HTTP | `http://0.0.0.0:8080` | ✅ | ✅ |
-| WebSocket | `websocket://0.0.0.0:8081` | ✅ | ✅ |
-| TCP | `tcp://0.0.0.0:9000` | ✅ | ✅ |
-| Text | `text://0.0.0.0:9001` | ✅ | ✅ |
-| 自定义长度前缀 | `frame://0.0.0.0:9002` | ✅ | ✅ |
-| Unix Socket | `unix:///tmp/app.sock` | ✅ | ✅ |
-| SSL | `ssl://0.0.0.0:443` | ✅ | ✅* |
-| UDP | `udp://0.0.0.0:9002` | ✅ | ✅ |
+| 协议 | 地址格式 | Native | Swoole | Workerman |
+|------|----------|:------:|:------:|:---------:|
+| HTTP | `http://0.0.0.0:8080` | ✅ | ✅ | ✅ |
+| WebSocket | `websocket://0.0.0.0:8081` | ✅ | ✅ | ✅ |
+| TCP | `tcp://0.0.0.0:9000` | ✅ | ✅ | ✅ |
+| Text | `text://0.0.0.0:9001` | ✅ | ✅ | ✅ |
+| 自定义长度前缀 | `frame://0.0.0.0:9002` | ✅ | ✅ | ✅ |
+| Unix Socket | `unix:///tmp/app.sock` | ✅ | ✅ | ✅ |
+| SSL | `ssl://0.0.0.0:443` | ✅* | ✅ | ✅* |
+| UDP | `udp://0.0.0.0:9002` | ✅ | ✅ | ✅ |
 
-> \* SSL 需要 `ext-openssl`。UDP 仅 Swoole / Workerman 运行时支持（本包不自带服务器，运行时二者必有其一）。
+> \* SSL 需要 `ext-openssl`（Swoole 还需编译时开启）。
+> Native 运行时（零扩展、纯 PHP 8.3+）同样自带 UDP / HTTP / WebSocket 等服务器，无需依赖 Swoole / Workerman；三种运行时均支持上述全部协议。
 
 ## 内置协议
 
@@ -72,12 +73,12 @@ Kode::serve('tcp://0.0.0.0:9001', ['workers' => 4])
 
 ### UDP 协议
 
-> 仅 Swoole / Workerman 运行时支持（本包不自带服务器，运行时二者必有其一）。
+> Native / Swoole / Workerman 三种运行时均自带 UDP 服务器，无需额外依赖。
 
 ```php
 use Kode\Process\Kode;
 
-Kode::serve('udp://0.0.0.0:9002', ['workers' => 1], 'swoole')
+Kode::serve('udp://0.0.0.0:9002', ['workers' => 1])
     ->on('message', fn($conn, $data) => $conn->send("UDP: {$data}"))
     ->start();
 ```

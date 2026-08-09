@@ -62,6 +62,7 @@ final class SelectLoop implements LoopInterface
     public function onReadable($stream, callable $callback): void
     {
         $id = (int)$stream;
+        $this->guardFdLimit($id);
         $this->readStreams[$id]   = $stream;
         $this->readCallbacks[$id] = $callback;
     }
@@ -75,6 +76,7 @@ final class SelectLoop implements LoopInterface
     public function onWritable($stream, callable $callback): void
     {
         $id = (int)$stream;
+        $this->guardFdLimit($id);
         $this->writeStreams[$id]   = $stream;
         $this->writeCallbacks[$id] = $callback;
     }
@@ -174,6 +176,10 @@ final class SelectLoop implements LoopInterface
      */
     private function select(?float $timeout): void
     {
+        // 先剔除已失效的流：把非资源传给 stream_select 会直接抛 TypeError（@ 不抑制 Throwable），
+        // 导致每轮空转 100% CPU；提前剔除可避免。
+        $this->pruneInvalidStreams();
+
         $read   = $this->readStreams;
         $write  = $this->writeStreams;
         $except = [];
@@ -192,7 +198,15 @@ final class SelectLoop implements LoopInterface
         $usec = (int)(($wait - $sec) * 1_000_000);
 
         $count = @\stream_select($read, $write, $except, $sec, $usec);
-        if ($count === false || $count === 0) {
+        if ($count === false) {
+            // stream_select 失败通常是集合里混入了高 fd（>= FD_SETSIZE）等平台限制。
+            // 若不处理会每轮空转 100% CPU：剔除失效流并短暂退避再重试。
+            $this->pruneInvalidStreams();
+            \usleep(1000);
+            return;
+        }
+
+        if ($count === 0) {
             return;
         }
 
@@ -239,6 +253,44 @@ final class SelectLoop implements LoopInterface
         $this->deferred = [];
         foreach ($pending as $callback) {
             $callback();
+        }
+    }
+
+    /**
+     * stream_select 底层 bitset 受系统 FD_SETSIZE 限制（通常 1024），
+     * 任何 fd 编号 >= 上限都会导致 select 直接失败并空转。超过时仅告警一次，
+     * 提示切换到 ext-event / ext-ev 的 C 层多路复用。
+     */
+    private bool $fdSetSizeWarned = false;
+
+    private function guardFdLimit(int $fd): void
+    {
+        if ($fd >= 1024 && !$this->fdSetSizeWarned) {
+            $this->fdSetSizeWarned = true;
+            // 非抛出：高 fd 在某些平台（如 macOS）是常态，避免打断运行；
+            // 仅记录一次，提示切换到 C 层多路复用。
+            \error_log(
+                "SelectLoop: fd #{$fd} >= 1024 (FD_SETSIZE)，stream_select 将无法监听该流；"
+                . '请安装 ext-event / ext-ev 切换到 C 层多路复用以避免连接数受限。'
+            );
+        }
+    }
+
+    /**
+     * 剔除已失效（非资源）的读写流，避免 stream_select 因 Bad file descriptor 反复失败空转。
+     */
+    private function pruneInvalidStreams(): void
+    {
+        foreach ($this->readStreams as $id => $stream) {
+            if (!\is_resource($stream)) {
+                unset($this->readStreams[$id], $this->readCallbacks[$id]);
+            }
+        }
+
+        foreach ($this->writeStreams as $id => $stream) {
+            if (!\is_resource($stream)) {
+                unset($this->writeStreams[$id], $this->writeCallbacks[$id]);
+            }
         }
     }
 

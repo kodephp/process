@@ -83,7 +83,7 @@ Cluster::leave();                 // 优雅下线：注销注册、让出 Leader
 ## 分布式锁
 
 基于存储层的原子 `setIfAbsent`（Redis 即 `SET NX PX`），具备互斥、防死锁（带 TTL）、
-防误删（`compareAndDelete` 令牌校验）、可续期（看门狗）四个生产级性质，且支持可重入。
+防误删（`compareAndDelete` 令牌校验）、可续期（`refresh()`，须手动调用）四个生产级性质，且支持可重入。
 
 ```php
 use Kode\Process\Cluster;
@@ -167,7 +167,8 @@ use Kode\Process\Cluster;
 $snowflake = Cluster::snowflake();      // 自动领取集群内唯一 workerId
 $id        = $snowflake->next();       // 生成下一个 ID
 
-$info = Cluster::snowflake()->parse($id);   // ['ts'=>, 'worker'=>, 'seq'=>, 'id'=>]
+$info = Cluster::snowflake()->parse($id);
+// 返回：['id'=>, 'timestamp'=>, 'datetime'=>, 'worker_id'=>, 'sequence'=>]
 
 // 续租机器 ID（建议周期调用，间隔 < ttl）
 Kode::every(60.0, fn () => Cluster::renewSnowflake());
@@ -209,7 +210,9 @@ use Kode\Process\Cluster;
 
 // 服务端：在每个 worker 起的独立端口上
 $server = Cluster::server(token: 'secret');
-$server->handle($request, $conn);   // $request = ['i'=>id, 'm'=>method, 'p'=>params]
+$server->register('flushCache', fn (array $params) => doFlush($params)); // 先注册方法
+$server->listen('tcp://0.0.0.0:9700', ['workers' => 2])->start();        // 再监听并启动
+// $request 帧格式：['i'=>id, 'm'=>method, 'p'=>params]，由运行时自动解帧后路由到已注册方法
 
 // 客户端：调某个节点 / 广播全集群
 $client  = Cluster::rpc(timeout: 3.0, token: 'secret');

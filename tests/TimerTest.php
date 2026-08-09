@@ -173,4 +173,100 @@ final class TimerTest extends TestCase
         $this->assertArrayHasKey('total_executed', $stats);
         $this->assertArrayHasKey('active_timers', $stats);
     }
+
+    public function testCallbackCanDeleteItselfWithoutResurrection(): void
+    {
+        $holder = new \stdClass();
+        $holder->id = null;
+
+        $timerId = Timer::forever(0.05, function () use ($holder) {
+            Timer::del($holder->id);
+        });
+        $holder->id = $timerId;
+
+        Timer::tick();
+        usleep(60000);
+        Timer::tick();
+        usleep(60000);
+        Timer::tick();
+
+        // 回调内 del 自身后，不应把已删条目复活成残缺数组导致后续 tick 崩溃
+        $this->assertEquals(0, Timer::count());
+    }
+
+    public function testCallbackExceptionDeliveredToErrorListener(): void
+    {
+        $captured = null;
+
+        Timer::onError(function (int $id, \Throwable $e) use (&$captured) {
+            $captured = $e;
+        });
+
+        Timer::once(0.001, static function (): void {
+            throw new \RuntimeException('boom');
+        });
+
+        usleep(2000);
+        Timer::tick();
+
+        $this->assertInstanceOf(\RuntimeException::class, $captured);
+        $this->assertStringContainsString('boom', $captured->getMessage());
+    }
+
+    public function testCallbackExceptionSurfacesWithoutListener(): void
+    {
+        $lastWarning = null;
+        $handler = function (int $errno, string $errstr) use (&$lastWarning) {
+            if ($errno === E_USER_WARNING) {
+                $lastWarning = $errstr;
+                return true;
+            }
+            return false;
+        };
+
+        set_error_handler($handler);
+        try {
+            Timer::once(0.001, static function (): void {
+                throw new \RuntimeException('boom');
+            });
+            usleep(2000);
+            Timer::tick();
+        } finally {
+            restore_error_handler();
+        }
+
+        $this->assertIsString($lastWarning);
+        $this->assertStringContainsString('boom', $lastWarning ?? '');
+    }
+
+    /**
+     * 通过反射直接验证 cron 字段解析，覆盖逗号枚举 + 区间、区间 + 步长等组合。
+     */
+    public function testMatchCronPartCombinations(): void
+    {
+        $m = new \ReflectionMethod(Timer::class, 'matchCronPart');
+        $m->setAccessible(true);
+        $match = fn (string $part, int $value): bool => $m->invoke(null, $part, $value);
+
+        // 1,2-5 = {1,2,3,4,5}
+        $this->assertTrue($match('1,2-5', 3));
+        $this->assertTrue($match('1,2-5', 4));
+        $this->assertFalse($match('1,2-5', 6));
+
+        // 1-30/5 = 1,6,11,16,21,26
+        $this->assertTrue($match('1-30/5', 1));
+        $this->assertTrue($match('1-30/5', 6));
+        $this->assertFalse($match('1-30/5', 7));
+
+        // */15
+        $this->assertTrue($match('*/15', 30));
+        $this->assertFalse($match('*/15', 7));
+
+        // 单值
+        $this->assertTrue($match('5', 5));
+        $this->assertFalse($match('5', 6));
+
+        // 通配
+        $this->assertTrue($match('*', 42));
+    }
 }

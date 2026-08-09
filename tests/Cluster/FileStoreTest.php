@@ -228,4 +228,23 @@ final class FileStoreTest extends TestCase
         $scoped->flush();
         @rmdir($this->path . '/tenant-a');
     }
+
+    public function testObjectValueRoundTrips(): void
+    {
+        $obj = new \stdClass();
+        $obj->name = 'x';
+        $obj->nested = ['a' => 1];
+
+        $this->store->set('obj', $obj);
+
+        $got = $this->store->get('obj');
+        $this->assertEquals($obj, $got);
+    }
+
+    public function testDirectoryIsRestrictedToOwner(): void
+    {
+        // 协调目录必须仅属主可访问，否则同机其它用户可投毒实现对象注入
+        $perms = fileperms($this->path) & 0o777;
+        $this->assertSame(0o700, $perms);
+    }
 }
