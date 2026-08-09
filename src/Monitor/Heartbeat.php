@@ -76,18 +76,21 @@ class Heartbeat
             'dead' => [],
         ];
 
-        foreach ($this->heartbeats as $pid => &$heartbeat) {
-            $elapsed = $now - $heartbeat['last_beat'];
+        $timedOut = [];
+
+        foreach ($this->heartbeats as $pid => $heartbeat) {
+            $elapsed = max(0.0, $now - $heartbeat['last_beat']);
 
             if ($elapsed > $this->timeout) {
-                $heartbeat['status'] = 'timeout';
+                $this->heartbeats[$pid]['status'] = 'timeout';
+
                 $results['timeout'][] = [
                     'pid' => $pid,
                     'elapsed' => $elapsed,
                     'last_beat' => $heartbeat['last_beat'],
                 ];
 
-                $this->handleTimeout($pid, $elapsed);
+                $timedOut[$pid] = $elapsed;
             } else {
                 $results['active'][] = [
                     'pid' => $pid,
@@ -95,6 +98,10 @@ class Heartbeat
                     'count' => $heartbeat['count'],
                 ];
             }
+        }
+
+        foreach ($timedOut as $pid => $elapsed) {
+            $this->handleTimeout($pid, $elapsed);
         }
 
         return $results;
@@ -131,7 +138,14 @@ class Heartbeat
         ]);
 
         foreach ($this->callbacks as $callback) {
-            $callback($pid, $elapsed);
+            try {
+                $callback($pid, $elapsed);
+            } catch (\Throwable $e) {
+                $this->logger->error('心跳超时回调抛出异常', [
+                    'pid' => $pid,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
     }
 

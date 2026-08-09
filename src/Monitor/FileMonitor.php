@@ -6,6 +6,11 @@ namespace Kode\Process\Monitor;
 
 final class FileMonitor
 {
+    /**
+     * 递归扫描的最大深度，配合软链接跳过共同防止目录环导致的无限递归。
+     */
+    private const MAX_SCAN_DEPTH = 32;
+
     private array $watchDirs = [];
     private array $fileMtimes = [];
     private int $checkInterval = 1000000;
@@ -111,9 +116,17 @@ final class FileMonitor
         return $files;
     }
 
-    private function scanDirectory(string $dir, array &$files): void
+    private function scanDirectory(string $dir, array &$files, int $depth = 0): void
     {
-        $items = scandir($dir);
+        if ($depth > self::MAX_SCAN_DEPTH) {
+            return;
+        }
+
+        $items = @scandir($dir);
+
+        if ($items === false) {
+            return;
+        }
 
         foreach ($items as $item) {
             if ($item === '.' || $item === '..') {
@@ -122,20 +135,28 @@ final class FileMonitor
 
             $path = $dir . DIRECTORY_SEPARATOR . $item;
 
+            if (is_link($path)) {
+                continue;
+            }
+
             if (is_dir($path)) {
                 if (in_array($item, $this->excludeDirs, true)) {
                     continue;
                 }
 
-                $this->scanDirectory($path, $files);
+                $this->scanDirectory($path, $files, $depth + 1);
                 continue;
             }
 
             if (is_file($path)) {
                 $extension = '.' . pathinfo($path, PATHINFO_EXTENSION);
-                
+
                 if (in_array($extension, $this->extensions, true)) {
-                    $files[$path] = filemtime($path);
+                    $mtime = @filemtime($path);
+
+                    if ($mtime !== false) {
+                        $files[$path] = $mtime;
+                    }
                 }
             }
         }
@@ -153,7 +174,7 @@ final class FileMonitor
         foreach ($currentFiles as $file => $mtime) {
             if (!isset($this->fileMtimes[$file])) {
                 $changes['added'][] = $file;
-            } elseif ($this->fileMtimes[$file] < $mtime) {
+            } elseif ($this->fileMtimes[$file] !== $mtime) {
                 $changes['modified'][] = $file;
             }
         }
@@ -169,15 +190,22 @@ final class FileMonitor
 
     public function applyChanges(array $changes): void
     {
-        foreach ($changes['added'] as $file) {
-            $this->fileMtimes[$file] = filemtime($file);
+        foreach (['added', 'modified'] as $kind) {
+            foreach ($changes[$kind] ?? [] as $file) {
+                clearstatcache(true, $file);
+
+                $mtime = @filemtime($file);
+
+                if ($mtime === false) {
+                    unset($this->fileMtimes[$file]);
+                    continue;
+                }
+
+                $this->fileMtimes[$file] = $mtime;
+            }
         }
 
-        foreach ($changes['modified'] as $file) {
-            $this->fileMtimes[$file] = filemtime($file);
-        }
-
-        foreach ($changes['deleted'] as $file) {
+        foreach ($changes['deleted'] ?? [] as $file) {
             unset($this->fileMtimes[$file]);
         }
     }
@@ -207,14 +235,33 @@ final class FileMonitor
 
     public function tick(): bool
     {
+        $this->lastCheckTime = time();
+
         $changes = $this->checkChanges();
         $hasChanges = !empty($changes['modified']) || !empty($changes['added']) || !empty($changes['deleted']);
 
-        if ($hasChanges && $this->onChangeCallback !== null) {
-            ($this->onChangeCallback)($changes);
+        if (!$hasChanges) {
+            return false;
         }
 
-        return $hasChanges;
+        if ($this->onChangeCallback !== null) {
+            try {
+                ($this->onChangeCallback)($changes);
+            } catch (\Throwable $e) {
+                error_log('FileMonitor 变更回调异常: ' . $e->getMessage());
+            }
+        }
+
+        // 必须在回调之后推进基线，否则同一次变更会在每个 tick 反复上报，
+        // 热重载场景下会退化为无限重启。
+        $this->applyChanges($changes);
+
+        return true;
+    }
+
+    public function getLastCheckTime(): int
+    {
+        return $this->lastCheckTime;
     }
 
     public function stop(): void
@@ -248,7 +295,7 @@ final class FileMonitor
         return new self($directories);
     }
 
-    public static function watch(array $directories, callable $onChange = null): self
+    public static function watch(array $directories, ?callable $onChange = null): self
     {
         $monitor = new self($directories);
         

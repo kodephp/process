@@ -127,6 +127,14 @@ $qm->diagnose();                        // 驱动自检信息
 
 > **消费循环防崩溃（v5.2.14）**：`handle()` 中对 `ack` / `fail` / `release` 的调用现已全部纳入异常保护。`handle()`（以及其上层的 `process()` / `processBatch()` / `consume()` 生成器）保证**永不抛出**——即使后端在任务处理成功后 `ack` 失败（如网络抖动）、或失败登记本身抛异常，也只向上返回 `Response::error(...)`，任务会按 at-least-once 语义重投，常驻消费循环不会因单条任务的底层异常而中断。
 
+### processBatch 的返回值语义
+
+`processBatch()` 返回的是**本批次消费的条数**，不是「不同任务的个数」。
+
+kode/queue 默认的重试退避策略是 `ExponentialJitter`（`backoffBase = 5`），抖动值取 `[0, base]` 的随机整数。**当抖动掷到 0 时，失败任务会立刻重新可见，在同一次 `processBatch()` 循环里被再次消费**。因此投递 1 条必失败的任务，`processBatch()` 可能返回 2 甚至更多。
+
+稳定成立的不变式是：**消费一条即调用一次处理器**，所以返回值恒等于处理器被调用的次数。需要「每个任务只尝试一次」的语义，请用 `process()` 单条消费，或在投递时指定 `Fixed` 退避与非零 `backoffBase`。
+
 ## 在 Worker 中使用
 
 ```php

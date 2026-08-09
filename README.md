@@ -376,6 +376,7 @@ kode info              # 版本信息
 - [定时器](docs/timer.md)
 - [队列系统](docs/queue.md)
 - [信号管理](docs/signal.md)
+- [监控（进程 / 心跳 / 文件）](docs/monitor.md)
 - [生产部署](docs/deployment.md)
 - [分布式集群](docs/cluster.md)
 - [压测数据](docs/benchmark.md)

@@ -146,14 +146,25 @@ final class QueueManagerTest extends TestCase
     public function testProcessBatchToleratesHandlerException(): void
     {
         $qm = QueueManager::useMemory();
-        $qm->register('boom', function (): void {
+
+        $calls = 0;
+        $qm->register('boom', function () use (&$calls): void {
+            $calls++;
+
             throw new \RuntimeException('kaboom');
         });
         $qm->dispatch('boom', []);
 
-        // 处理器抛错不应让批量消费崩溃，应作为「已处理」计入并返回
+        // 处理器抛错不应让批量消费崩溃，应作为「已处理」计入并返回。
+        //
+        // 这里不能断言恒等于 1：失败任务按 ExponentialJitter 退避重新入队，
+        // 抖动值取 [0, base] 的随机整数，掷到 0 时同一批次内会被立刻再次消费。
+        // 每消费一条必然调用一次处理器，因此 processed 与调用次数恒等——
+        // 这个不变式与退避抖动无关，是稳定的断言。
         $processed = $qm->processBatch();
-        $this->assertSame(1, $processed);
+
+        $this->assertGreaterThanOrEqual(1, $processed);
+        $this->assertSame($calls, $processed);
     }
 
     public function testConsumeDoesNotThrowOnHandlerError(): void

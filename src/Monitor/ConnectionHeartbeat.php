@@ -53,18 +53,22 @@ final class ConnectionHeartbeat
             'need_heartbeat' => []
         ];
 
-        foreach ($this->connections as $id => &$conn) {
-            $elapsed = $now - $conn['last_message_time'];
+        $timedOut = [];
+
+        foreach ($this->connections as $id => $conn) {
+            $elapsed = max(0, $now - $conn['last_message_time']);
 
             if ($elapsed > $this->heartbeatTimeout) {
+                $this->connections[$id]['status'] = 'timeout';
                 $conn['status'] = 'timeout';
+
                 $result['timeout'][] = [
                     'id' => $id,
                     'elapsed' => $elapsed,
                     'last_message_time' => $conn['last_message_time']
                 ];
 
-                $this->handleTimeout($id, $conn);
+                $timedOut[$id] = $conn;
             } elseif ($elapsed > $this->heartbeatInterval) {
                 $result['need_heartbeat'][] = [
                     'id' => $id,
@@ -76,6 +80,10 @@ final class ConnectionHeartbeat
                     'elapsed' => $elapsed
                 ];
             }
+        }
+
+        foreach ($timedOut as $id => $conn) {
+            $this->handleTimeout($id, $conn);
         }
 
         return $result;
@@ -91,7 +99,13 @@ final class ConnectionHeartbeat
         $this->connections[$connectionId]['heartbeat_count']++;
 
         if ($this->onHeartbeatCallback !== null) {
-            return ($this->onHeartbeatCallback)($connectionId, $this->connections[$connectionId]);
+            try {
+                return (bool) ($this->onHeartbeatCallback)($connectionId, $this->connections[$connectionId]);
+            } catch (\Throwable $e) {
+                error_log('ConnectionHeartbeat 心跳回调异常: ' . $e->getMessage());
+
+                return false;
+            }
         }
 
         return true;
@@ -102,8 +116,14 @@ final class ConnectionHeartbeat
         $now = time();
         $sent = 0;
 
-        foreach ($this->connections as $id => $conn) {
-            $elapsed = $now - $conn['last_message_time'];
+        foreach (array_keys($this->connections) as $id) {
+            $conn = $this->connections[$id] ?? null;
+
+            if ($conn === null) {
+                continue;
+            }
+
+            $elapsed = max(0, $now - $conn['last_message_time']);
 
             if ($elapsed > $this->heartbeatInterval && $elapsed <= $this->heartbeatTimeout) {
                 if ($this->sendHeartbeat($id)) {
@@ -118,7 +138,11 @@ final class ConnectionHeartbeat
     private function handleTimeout(int $connectionId, array $connection): void
     {
         if ($this->onTimeoutCallback !== null) {
-            ($this->onTimeoutCallback)($connectionId, $connection);
+            try {
+                ($this->onTimeoutCallback)($connectionId, $connection);
+            } catch (\Throwable $e) {
+                error_log('ConnectionHeartbeat 超时回调异常: ' . $e->getMessage());
+            }
         }
 
         $this->unregister($connectionId);

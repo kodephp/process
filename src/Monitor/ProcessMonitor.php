@@ -167,7 +167,22 @@ class ProcessMonitor implements MonitorInterface
         $unhealthyCount = 0;
 
         foreach (array_keys($this->processes) as $pid) {
-            $result = $this->check($pid);
+            try {
+                $result = $this->check($pid);
+            } catch (\Throwable $e) {
+                $this->logger->error('进程健康检查抛出异常', [
+                    'pid' => $pid,
+                    'error' => $e->getMessage(),
+                ]);
+
+                $result = [
+                    'pid' => $pid,
+                    'status' => 'unknown',
+                    'healthy' => false,
+                    'error' => $e->getMessage(),
+                ];
+            }
+
             $results[$pid] = $result;
 
             if ($result['healthy']) {
@@ -237,7 +252,14 @@ class ProcessMonitor implements MonitorInterface
         $this->restartCount++;
 
         foreach ($this->restartCallbacks as $callback) {
-            $callback($pid);
+            try {
+                $callback($pid);
+            } catch (\Throwable $e) {
+                $this->logger->error('进程重启回调抛出异常', [
+                    'pid' => $pid,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
 
         $this->logger->warning('尝试重启进程', [

@@ -99,4 +99,71 @@ final class ProcessMonitorTest extends TestCase
     {
         $this->assertIsBool($this->monitor->supported());
     }
+
+    /**
+     * 回归守卫：重启回调抛异常不得穿透 checkAll()，
+     * 否则单个进程的重启逻辑出错会打死整轮巡检。
+     */
+    public function testThrowingRestartCallbackDoesNotAbortCheckAll(): void
+    {
+        $this->monitor->register(999999);
+        $this->monitor->register(999998);
+
+        $seen = [];
+        $this->monitor->onRestart(function (int $pid) use (&$seen): void {
+            $seen[] = $pid;
+
+            throw new \RuntimeException('重启回调炸了');
+        });
+
+        $results = $this->monitor->checkAll();
+
+        $this->assertCount(2, $results, '两个进程都必须完成巡检');
+        $this->assertSame('dead', $results[999999]['status']);
+        $this->assertSame('dead', $results[999998]['status']);
+        $this->assertSame([999999, 999998], $seen);
+        $this->assertSame(2, $this->monitor->getRestartCount());
+    }
+
+    /**
+     * 回归守卫：不健康回调抛异常同样不得中断整轮巡检。
+     */
+    public function testThrowingUnhealthyCallbackDoesNotAbortCheckAll(): void
+    {
+        $this->monitor->register(999999);
+        $this->monitor->register(getmypid());
+
+        $this->monitor->onUnhealthy(function (): void {
+            throw new \RuntimeException('不健康回调炸了');
+        });
+
+        $results = $this->monitor->checkAll();
+
+        $this->assertCount(2, $results);
+        $metrics = $this->monitor->getMetrics();
+        $this->assertSame(1, $metrics['healthy']);
+        $this->assertSame(1, $metrics['unhealthy']);
+    }
+
+    public function testRestartAttemptsAreCapped(): void
+    {
+        $this->monitor->setMaxRestartAttempts(2);
+        $this->monitor->register(999999);
+
+        $attempts = 0;
+        $this->monitor->onRestart(function () use (&$attempts): void {
+            $attempts++;
+        });
+
+        $this->monitor->checkAll();
+        $this->monitor->checkAll();
+        $this->monitor->checkAll();
+        $this->monitor->checkAll();
+
+        $this->assertSame(2, $attempts, '超过上限后不得继续触发重启回调');
+
+        $this->monitor->resetRestartAttempts(999999);
+        $this->monitor->checkAll();
+        $this->assertSame(3, $attempts, 'reset 之后应允许重新尝试');
+    }
 }
