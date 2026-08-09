@@ -37,11 +37,18 @@ final class SwooleTable implements TableInterface
     private int $valueSize;
     private bool $closed = false;
 
+    /** @var bool|list<class-string> 反序列化时放行的类 */
+    private bool|array $allowedClasses;
+
     /**
      * @param int $rows      最大行数（会被 Swoole 向上取整到 2 的幂）
      * @param int $valueSize 单值序列化后的最大字节数
+     * @param bool|list<class-string> $allowedClasses 反序列化白名单。默认 false：
+     *        只还原标量/数组，任何对象一律降级为 __PHP_Incomplete_Class，杜绝对象注入。
+     *        表内存可被同机的其他进程写入，把任意字节交给无限制的 unserialize()
+     *        等于把 __wakeup/__destruct 链暴露给攻击者。确需存对象时显式传类名列表。
      */
-    public function __construct(int $rows = 65536, int $valueSize = 8192)
+    public function __construct(int $rows = 65536, int $valueSize = 8192, bool|array $allowedClasses = false)
     {
         if (!self::isSupported()) {
             throw GlobalDataException::unsupported('swoole');
@@ -49,6 +56,7 @@ final class SwooleTable implements TableInterface
 
         $this->rows = $rows;
         $this->valueSize = $valueSize;
+        $this->allowedClasses = $allowedClasses;
 
         /** @var class-string $tableClass */
         $tableClass = '\Swoole\Table';
@@ -314,10 +322,10 @@ final class SwooleTable implements TableInterface
      */
     private function decode(array $row): mixed
     {
-        return match ((int) $row['f']) {
-            self::FLAG_INT => (int) $row['n'],
-            self::FLAG_FLOAT => (float) $row['n'],
-            default => unserialize((string) $row['v']),
+        return match ((int) ($row['f'] ?? self::FLAG_SERIALIZED)) {
+            self::FLAG_INT => (int) ($row['n'] ?? 0),
+            self::FLAG_FLOAT => (float) ($row['n'] ?? 0),
+            default => SafeUnserialize::value((string) ($row['v'] ?? ''), $this->allowedClasses),
         };
     }
 

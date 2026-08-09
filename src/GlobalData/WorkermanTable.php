@@ -27,15 +27,21 @@ final class WorkermanTable implements TableInterface
     private const int FLAG_FLOAT = 2;
 
     private object $table;
+    private ?object $lock = null;
     private int $rows;
     private int $valueSize;
     private bool $closed = false;
 
+    /** @var bool|list<class-string> 反序列化时放行的类 */
+    private bool|array $allowedClasses;
+
     /**
      * @param int $rows      最大行数（Workerman 会向上取整到 2 的幂）
      * @param int $valueSize 单值序列化后的最大字节数
+     * @param bool|list<class-string> $allowedClasses 反序列化白名单，语义同 {@see SwooleTable}。
+     *        默认 false，禁止从共享内存还原任意对象，避免 __wakeup/__destruct 对象注入。
      */
-    public function __construct(int $rows = 65536, int $valueSize = 8192)
+    public function __construct(int $rows = 65536, int $valueSize = 8192, bool|array $allowedClasses = false)
     {
         if (!self::isSupported()) {
             throw GlobalDataException::unsupported('workerman');
@@ -43,6 +49,7 @@ final class WorkermanTable implements TableInterface
 
         $this->rows = $rows;
         $this->valueSize = $valueSize;
+        $this->allowedClasses = $allowedClasses;
 
         /** @var class-string $tableClass */
         $tableClass = '\Workerman\Table';
@@ -59,6 +66,14 @@ final class WorkermanTable implements TableInterface
             ]);
         }
         $this->table = $table;
+
+        // Workerman\Table 依赖 ext-swoole，因此 Swoole\Lock 必然可用；
+        // 没有它的话 add/replace/cas/increment 只是「检查后再写」，跨进程并不原子。
+        if (class_exists('\Swoole\Lock')) {
+            /** @var class-string $lockClass */
+            $lockClass = '\Swoole\Lock';
+            $this->lock = new $lockClass($lockClass::MUTEX);
+        }
     }
 
     public static function isSupported(): bool
@@ -80,10 +95,15 @@ final class WorkermanTable implements TableInterface
     public function add(string $key, mixed $value, int $ttl = 0): bool
     {
         $this->assertOpen();
-        if ($this->table->exist($key)) {
-            return false;
+        $this->acquire();
+        try {
+            if ($this->table->exist($key)) {
+                return false;
+            }
+            $this->table->set($key, $this->encode($value, $ttl));
+        } finally {
+            $this->release();
         }
-        $this->table->set($key, $this->encode($value, $ttl));
 
         return true;
     }
@@ -91,10 +111,15 @@ final class WorkermanTable implements TableInterface
     public function replace(string $key, mixed $value, int $ttl = 0): bool
     {
         $this->assertOpen();
-        if (!$this->table->exist($key)) {
-            return false;
+        $this->acquire();
+        try {
+            if (!$this->table->exist($key)) {
+                return false;
+            }
+            $this->table->set($key, $this->encode($value, $ttl));
+        } finally {
+            $this->release();
         }
-        $this->table->set($key, $this->encode($value, $ttl));
 
         return true;
     }
@@ -149,19 +174,24 @@ final class WorkermanTable implements TableInterface
     public function increment(string $key, int|float $step = 1): int|float
     {
         $this->assertOpen();
-        if (!$this->table->exist($key) || $this->expired($this->table->get($key, []))) {
-            $this->table->set($key, [
-                'v' => '',
-                'n' => 0.0,
-                'e' => 0,
-                'f' => is_float($step) ? self::FLAG_FLOAT : self::FLAG_INT,
-            ]);
-        } elseif (is_float($step) && (int) ($this->table->get($key, ['f' => self::FLAG_INT])['f'] ?? self::FLAG_INT) === self::FLAG_INT) {
-            $this->table->set($key, ['f' => self::FLAG_FLOAT]);
-        }
+        $this->acquire();
+        try {
+            if (!$this->table->exist($key) || $this->expired($this->table->get($key) ?? [])) {
+                $this->table->set($key, [
+                    'v' => '',
+                    'n' => 0.0,
+                    'e' => 0,
+                    'f' => is_float($step) ? self::FLAG_FLOAT : self::FLAG_INT,
+                ]);
+            } elseif (is_float($step) && (int) ($this->table->get($key, 'f') ?? self::FLAG_INT) === self::FLAG_INT) {
+                $this->table->set($key, ['f' => self::FLAG_FLOAT]);
+            }
 
-        $next = $this->table->inc($key, 'n', $step);
-        $isFloat = (int) ($this->table->get($key, ['f' => self::FLAG_INT])['f'] ?? self::FLAG_INT) === self::FLAG_FLOAT;
+            $next = $this->table->inc($key, 'n', $step);
+            $isFloat = (int) ($this->table->get($key, 'f') ?? self::FLAG_INT) === self::FLAG_FLOAT;
+        } finally {
+            $this->release();
+        }
 
         return $isFloat ? (float) $next : (int) $next;
     }
@@ -174,14 +204,19 @@ final class WorkermanTable implements TableInterface
     public function cas(string $key, mixed $oldValue, mixed $newValue): bool
     {
         $this->assertOpen();
-        $row = $this->table->get($key, null);
-        if ($row === null || $row === false || $this->expired($row)) {
-            return false;
+        $this->acquire();
+        try {
+            $row = $this->table->get($key, null);
+            if ($row === null || $row === false || $this->expired($row)) {
+                return false;
+            }
+            if ($this->decode($row) !== $oldValue) {
+                return false;
+            }
+            $this->table->set($key, $this->encode($newValue, $this->remainingTtl($row)));
+        } finally {
+            $this->release();
         }
-        if ($this->decode($row) !== $oldValue) {
-            return false;
-        }
-        $this->table->set($key, $this->encode($newValue, $this->remainingTtl($row)));
 
         return true;
     }
@@ -275,7 +310,7 @@ final class WorkermanTable implements TableInterface
         return match ((int) ($row['f'] ?? self::FLAG_SERIALIZED)) {
             self::FLAG_INT => (int) ($row['n'] ?? 0),
             self::FLAG_FLOAT => (float) ($row['n'] ?? 0),
-            default => unserialize((string) ($row['v'] ?? '')),
+            default => SafeUnserialize::value((string) ($row['v'] ?? ''), $this->allowedClasses),
         };
     }
 
@@ -304,5 +339,15 @@ final class WorkermanTable implements TableInterface
         if ($this->closed) {
             throw GlobalDataException::closed();
         }
+    }
+
+    private function acquire(): void
+    {
+        $this->lock?->lock();
+    }
+
+    private function release(): void
+    {
+        $this->lock?->unlock();
     }
 }

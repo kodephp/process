@@ -109,6 +109,12 @@ $table->set('ticket', 'abc', ttl: 60);
 > 结果 `get('alpha')` 可能读出 `beta` 的值。现在 `clear()` 不再倒回游标，
 > 缓存条目在读取时按代际校验，不匹配即重新查目录。
 
+> **对象注入防护（v5.2.13）**：`SwooleTable` / `WorkermanTable` 的反序列化从「无限制 `unserialize()`」
+> 收紧为受控反序列化（共享工具 `GlobalData\SafeUnserialize`）：默认 `allowed_classes=false`，
+> 只还原标量 / 数组，任何对象一律降级为 `__PHP_Incomplete_Class` 或 `null`，杜绝 `__wakeup` / `__destruct`
+> 对象注入——共享表内存可被同机其他进程写入。构造函数新增第三参 `$allowedClasses`
+> （默认 `false`，向后兼容），确需存对象时显式传类名白名单。此前裸 `unserialize()` 会被投毒载荷触发对象注入。
+
 ## 1.3 典型场景：跨进程计数器 / 限流
 
 ```php
