@@ -159,4 +159,40 @@ final class SelectLoopTest extends TestCase
             \fclose($b);
         }
     }
+
+    /**
+     * FD_SETSIZE 告警契约守卫：warnFdSetSize() 通过 fdSetSizeWarned 标志保证
+     * 全生命周期只记录一次，无论注册期 guardFdLimit 还是运行期 select 失败先触发。
+     * 该契约是「健壮暴露 fd >= 1024 状态而不刷屏」的核心，用 error_log 重定向到临时文件断言。
+     */
+    public function testFdSetSizeWarningFiresExactlyOnce(): void
+    {
+        $loop = new SelectLoop();
+        $warn = new \ReflectionMethod($loop, 'warnFdSetSize');
+        $warn->setAccessible(true);
+
+        $logFile = \sys_get_temp_dir() . '/selectloop_fdtest_' . \uniqid() . '.log';
+        $prev = \ini_set('error_log', $logFile);
+
+        try {
+            $warn->invoke($loop);
+            $warn->invoke($loop); // 第二次必须被标志抑制
+            $warn->invoke($loop); // 第三次同样
+        } finally {
+            if ($prev !== false) {
+                \ini_set('error_log', $prev);
+            }
+        }
+
+        $content = \is_file($logFile) ? \file_get_contents($logFile) : '';
+        @\unlink($logFile);
+
+        $lines = \array_values(\array_filter(
+            \explode("\n", \rtrim($content)),
+            static fn(string $l): bool => $l !== ''
+        ));
+
+        $this->assertCount(1, $lines, 'FD_SETSIZE 告警必须全生命周期只记录一次');
+        $this->assertStringContainsString('FD_SETSIZE', $content);
+    }
 }

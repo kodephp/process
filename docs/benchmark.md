@@ -544,6 +544,19 @@ v5.2.28 改为**惰性 prune**（与 ReactPHP `StreamSelectLoop` 同思路）：
 
 `SelectLoopTest::testSelectLazilyPrunesExternallyClosedStream`（反射驱动私有 `select()`，断言「不抛 + 失效流被惰性剔除」）、`testSelectKeepsValidStreamsAcrossManyTicks`（200 次 tick 后有效流完整保留，反向守卫零扫描路径不误伤）。既有 `testPrunesClosedStreamInsteadOfSpinning` 仍通过。
 
+### 8.4 FD_SETSIZE 状态的健壮暴露（v5.2.29 增补）
+
+`stream_select` 底层 bitset 受 `FD_SETSIZE`（通常 1024）限制：一旦连接数把 fd 推到 ≥1024，select 会失败并退化为每 tick 空转。这是**平台限制，不是代码缺陷**（早期的基准也曾因 fd 爬过 1024 而测不到「正常有效流」路径，故基准改用「纯算法成本对比 + fd<1024 守卫」以保证可移植）。
+
+v5.2.29 起该状态在**注册期**（`guardFdLimit`）与**运行期 select 失败**两处都会暴露，并经统一 `fdSetSizeWarned` 标志保证**全生命周期只告警一次**：
+
+```
+SelectLoop: 检测到 fd >= 1024 (FD_SETSIZE)，stream_select 无法安全监听该流，
+多路复用将退化为每 tick 空转。请安装 ext-event / ext-ev 切换到 C 层多路复用以解除连接数上限。
+```
+
+运行期用 `hasFdAtOrAboveSetSize()` 精准判定「集合里确含 ≥1024 的 fd」才告警，避免 EINTR 等误报。仅告警、不抛、不刷屏；若要真正解除连接数上限，仍须切到 ext-event/ext-ev 的 C 层多路复用。契约由 `SelectLoopTest::testFdSetSizeWarningFiresExactlyOnce` 守护。
+
 ## 优劣势对比
 
 | 维度 | native（自研） | swoole | workerman |

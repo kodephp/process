@@ -215,6 +215,11 @@ final class SelectLoop implements LoopInterface
             try {
                 $count = @\stream_select($read, $write, $except, $sec, $usec);
             } catch (\Throwable $e2) {
+                // 重试仍抛错：若集合里仍含高 fd（>= FD_SETSIZE），给出明确告警一次，
+                // 否则静默退避，避免无谓刷屏。
+                if ($this->hasFdAtOrAboveSetSize()) {
+                    $this->warnFdSetSize();
+                }
                 \usleep(1000);
                 return;
             }
@@ -223,6 +228,9 @@ final class SelectLoop implements LoopInterface
         if ($count === false) {
             // 其余失败（如高 fd 超 FD_SETSIZE 等平台限制）：剔除失效流并短暂退避再重试。
             $this->pruneInvalidStreams();
+            if ($this->hasFdAtOrAboveSetSize()) {
+                $this->warnFdSetSize();
+            }
             \usleep(1000);
             return;
         }
@@ -297,21 +305,51 @@ final class SelectLoop implements LoopInterface
 
     /**
      * stream_select 底层 bitset 受系统 FD_SETSIZE 限制（通常 1024），
-     * 任何 fd 编号 >= 上限都会导致 select 直接失败并空转。超过时仅告警一次，
-     * 提示切换到 ext-event / ext-ev 的 C 层多路复用。
+     * 任何 fd 编号 >= 上限都会让 select 直接失败并退化为每 tick 空转。
+     * 该状态在「注册期」与「运行期 stream_select 失败」两处都可能暴露，
+     * 用统一标志保证全生命周期只告警一次，避免刷屏、也避免用户无感知地空转。
      */
     private bool $fdSetSizeWarned = false;
 
+    /**
+     * FD_SETSIZE（fd >= 1024）告警统一出口：注册期 guardFdLimit 与运行期 select 失败检测
+     * 共用同一标志，保证无论哪条路径先触发，都只记录一次。
+     */
+    private function warnFdSetSize(): void
+    {
+        if ($this->fdSetSizeWarned) {
+            return;
+        }
+        $this->fdSetSizeWarned = true;
+        \error_log(
+            'SelectLoop: 检测到 fd >= 1024 (FD_SETSIZE)，stream_select 无法安全监听该流，'
+            . '多路复用将退化为每 tick 空转。请安装 ext-event / ext-ev 切换到 C 层多路复用以解除连接数上限。'
+        );
+    }
+
+    /**
+     * 当前读写流中是否存在 fd 编号 >= 1024 的连接。仅在 select 失败 / 重试失败的分支调用，
+     * 不进入正常 tick 热路径。
+     */
+    private function hasFdAtOrAboveSetSize(): bool
+    {
+        foreach ($this->readStreams as $id => $_) {
+            if ($id >= 1024) {
+                return true;
+            }
+        }
+        foreach ($this->writeStreams as $id => $_) {
+            if ($id >= 1024) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private function guardFdLimit(int $fd): void
     {
-        if ($fd >= 1024 && !$this->fdSetSizeWarned) {
-            $this->fdSetSizeWarned = true;
-            // 非抛出：高 fd 在某些平台（如 macOS）是常态，避免打断运行；
-            // 仅记录一次，提示切换到 C 层多路复用。
-            \error_log(
-                "SelectLoop: fd #{$fd} >= 1024 (FD_SETSIZE)，stream_select 将无法监听该流；"
-                . '请安装 ext-event / ext-ev 切换到 C 层多路复用以避免连接数受限。'
-            );
+        if ($fd >= 1024) {
+            $this->warnFdSetSize();
         }
     }
 
