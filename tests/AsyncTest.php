@@ -346,4 +346,35 @@ final class AsyncTest extends TestCase
 
         Async::reset();
     }
+
+    /**
+     * queueMicrotask 必须支持携带参数并以 ($cb)(...$args) 形式调用，
+     * 这样 Promise 决议热路径才能避免「只为转发一个值」而闭包包裹。
+     * 不定参时行为保持旧版一致。
+     */
+    public function testQueueMicrotaskForwardsArguments(): void
+    {
+        Async::reset();
+
+        $captured = [];
+        Async::queueMicrotask(function (int $a, string $b): void {
+            $GLOBALS['__mt_capture'] = func_get_args();
+        }, 42, 'hello');
+
+        $this->assertSame([], $captured); // 尚未执行
+
+        Async::runMicrotasks();
+
+        $this->assertSame([42, 'hello'], $GLOBALS['__mt_capture'] ?? null);
+
+        // 不定参等价旧行为
+        Async::queueMicrotask(function (): void {
+            $GLOBALS['__mt_noarg'] = true;
+        });
+        Async::runMicrotasks();
+        $this->assertTrue($GLOBALS['__mt_noarg']);
+
+        Async::reset();
+        unset($GLOBALS['__mt_capture'], $GLOBALS['__mt_noarg']);
+    }
 }

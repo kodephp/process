@@ -381,6 +381,9 @@ if ($rt->supports(Capability::Coroutine)) {
 | **Promise::subscribe 消除链路多余分配（v5.2.26）** | `doResolve` / `resolvePromise` 内部曾用 `$value->then(...)` 仅为登记回调，却多造一个立即丢弃的 Promise（连同 executor + 2 个 handler 闭包）。新增私有 `subscribe()` 只做登记分支，深链（每步返回新 Promise）的 Promise 分配由 **3K → 2K（减少 33.3%）**，降低长链 / `await` / `all` / `allSettled` 的内存与 GC 压力 |
 | **Async::each/map 并发上限生效（v5.2.26）** | `each()` 的 `$process` 闭包漏把 `$concurrency` 纳入 `use` 列表、循环写死 `10`，导致 `Async::map($items, $cb, 64)` 实际只有 10 路并发——用户请求的高并行度被静默吞掉。已把 `$concurrency` 加入 use 并改用 `max(1, $concurrency)`，实测峰值并发 == 请求值 |
 | **Crontab 字段位掩码匹配（v5.2.26）** | `searchNext` / `matchesDayOfMonthOrWeek` 的 `in_array` 线性扫描改为 64 位位掩码 `(($mask >> $v) & 1)`，每轮匹配降为几次位运算、且不再为每个字段分配/检索数组。正确性由「位掩码 vs 暴力逐秒扫描」等价测试守护（`CrontabTest::testBitmaskMatchesBruteForceOverHorizon`，覆盖 POSIX 并集、2 月 30 日等语义）|
+| **Timer::parseCronNext 字段映射修正 + 位掩码缓存（v5.2.27）** | 旧实现把 5 段 cron 表达式整体偏移一位：`$parts[4]/[3]/[2]/[1]` 依次匹配 `wday/mday/hours/minutes`，**分钟字段 `$parts[0]` 被完全忽略、月份字段被当作日使用**（`15 10 5 * *` 旧版在「每天 05:10」触发而非「每月 5 号 10:15」）。现已按标准 cron 语义正确映射到 `(minute, hour, mday, month, wday)` 并对五段做 AND 匹配；同时为每条表达式首次计算时一次性构建并集位掩码并缓存，消除每轮 ~23 万次 `matchCronPart` 字符串解析，复杂罕见表达式解析 ≈ **2.1×** 提速。等价性由 `TimerTest::testParseCronNextMatchesReferenceImplementation` 守护 |
+| **Async::queueMicrotask 元组参数（v5.2.27）** | `queueMicrotask(callable $cb, ...$args)` 改为 `[$cb, $args]` 元组入队、`runMicrotasks` 以 `$cb(...$args)` 调用；`Promise` 决议热路径 6 处 `fn() => $cb($v)` 闭包包裹改为直接传参，消除每轮闭包分配（与 v5.2.26 的 `Promise::subscribe` 互补）。20 万次微任务分发由 166ms / +192MB 闭包 → 55ms / ≈0（**≈3.0×**、闭包分配几乎归零），不定参时向后兼容。语义由 `AsyncTest::testQueueMicrotaskForwardsArguments` 守护 |
+| **ProcessMonitor 进程级常量缓存（v5.2.27）** | `getCpuCount()`（核数）与 `getClockTicks()`（时钟滴答）在进程生命周期内恒定，旧实现每次 `getProcessCpu()` 都重新 `shell_exec('nproc')` / `posix_sysconf`，`checkAll()` 多 pid 轮询下产生大量冗余系统调用。现改为懒初始化静态缓存，命中后零系统调用。返回值契约与幂等性由 `ProcessMonitorTest::testCpuConstantsAreStableAndCached` 守护 |
 | **PID 文件由 master 写** | 见下方 CLI 小节 |
 
 ## 环境自检

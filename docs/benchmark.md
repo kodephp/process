@@ -452,6 +452,71 @@ Promise）分配由 **3K → 2K**（K=2000 实测 6001 → 4001），**减少 33
 > 位掩码的主价值是**零线性扫描 + 无数组分配**，且正确性由「位掩码 vs 暴力逐秒扫描」等价测试守护
 > （`CrontabTest::testBitmaskMatchesBruteForceOverHorizon`，覆盖 POSIX 并集、2 月 30 日等语义）。
 
+## 七、调度 / 异步子系统微基准（v5.2.27）
+
+本轮聚焦「调度与异步热路径上仍可被安全消除的冗余工作」，并修正了一处 `Timer::parseCronNext`
+的字段映射 bug。全部数值由 `benchmarks/timer-cron-bench.php` 与 `benchmarks/async-microtask-bench.php`
+在本机（PHP 8.3.33 / Darwin）实测。
+
+### 7.1 Timer::parseCronNext：字段映射修正 + 位掩码缓存
+
+**正确性修复（重要）**：旧实现把 5 段表达式整体偏移了一位 —— 以 `$parts[4]/[3]/[2]/[1]`
+依次匹配 `wday / mday / hours / minutes`，**分钟字段 `$parts[0]` 被完全忽略、月份字段被当作日使用**。
+例如 `15 10 5 * *`（分钟 15 / 小时 10 / 每月 5 号）旧版实际在「每天 05:10」触发，而非
+「每月 5 号 10:15」。现按标准 cron 语义正确映射到 `(minute, hour, mday, month, wday)`，
+并对全部五段做 AND 匹配。等价性由 `TimerTest::testParseCronNextMatchesReferenceImplementation`
+（新实现 vs 正确映射的逐轮字符串解析参考实现，覆盖逗号/区间/步长/永不命中退化）守护。
+
+**性能优化**：旧实现每轮扫描都对 5 段重新做字符串解析（`matchCronPart` 内含 `explode` /
+`str_contains` / 递归）；现于每条表达式首次计算时用 `matchCronPart` 枚举各字段定义域一次性
+求并集位掩码并缓存（`self::$cronMaskCache`，上限 256 条），之后每个候选时间只需 5 次位运算。
+
+正确性校验：以下表达式新/旧（参考实现）命中时刻逐字段一致，全部 OK：
+
+| 表达式 | 命中 | 表达式 | 命中 |
+|--------|------|--------|------|
+| `* * * * *` | 下一分钟 | `*/15 * * * *` | 下一刻钟 |
+| `0 9 * * 1` | 周一 09:00 | `30 14 28 2 *` | 02-28 14:30 |
+| `0 0 1 1 *` | 元旦 00:00 | `0 0 30 2 *` | 永不命中→退化为 now+3600 |
+| `1-30/5 1-12/2 1,15 * 1-5` | 09-01 01:01 | | |
+
+性能（复杂且罕见的表达式 `1-30/5 1-12/2 1,15 * 1-5`，2000 次解析、掩码缓存热路径）：
+
+| 实现 | 耗时 |
+|------|-----:|
+| 新（位掩码缓存热路径） | 15191 ms |
+| 旧（逐轮字符串解析） | 31825 ms |
+| **加速比** | **≈ 2.1×** |
+
+> 说明：该表达式扫描会跑满 `CRON_MAX_ITER` 上限，主导成本是 `getdate()` 而非解析本身，
+> 因此 2.1× 反映的是「消除每轮 ~23 万次 `matchCronPart` 字符串解析」的收益。进一步的
+> `getdate` 扫描次数削减需引入 Crontab 式的「字段感知跳跃」（mktime 跳到下一可能边界），
+> 属下一轮候选，且需谨慎保持语义等价。
+
+### 7.2 Async::queueMicrotask：元组参数消除闭包分配
+
+`Async::queueMicrotask(callable $cb, ...$args)` 现以 `[$cb, $args]` 元组入队、`runMicrotasks`
+以 `$cb(...$args)` 调用；`Promise` 决议热路径上 6 处 `fn() => $cb($v)` 闭包包裹改为直接
+`queueMicrotask($cb, $v)`，与 v5.2.26 的 `Promise::subscribe` 优化互补。不定参时行为不变（向后兼容）。
+
+20 万次微任务分发（本机实测）：
+
+| 风格 | 耗时 | 峰值内存增量 |
+|------|-----:|-------------:|
+| 旧（`fn() => $cb($v)` 闭包包裹） | 166.5 ms | +192 MB（闭包分配） |
+| 新（`queueMicrotask($cb, $v)` 元组） | 54.9 ms | ≈ 0 |
+| **加速比** | **≈ 3.0×** | **闭包分配几乎归零** |
+
+> 闭包分配减少直接转化为 GC 压力下降；长 `Promise` 链、高并发异步、以及 `await` 密集场景下收益放大。
+> 由 `AsyncTest::testQueueMicrotaskForwardsArguments` 守护元组参数转发语义。
+
+### 7.3 ProcessMonitor：进程级常量缓存
+
+`getCpuCount()`（核数）与 `getClockTicks()`（时钟滴答）在进程生命周期内恒定，旧实现每次
+`getProcessCpu()` 都重新 `shell_exec('nproc')` / `posix_sysconf`，在 `checkAll()` 多 pid 轮询下
+产生大量冗余系统调用。现改为懒初始化静态缓存，命中后零系统调用。由
+`ProcessMonitorTest::testCpuConstantsAreStableAndCached` 守护返回值契约与幂等性。
+
 ## 优劣势对比
 
 | 维度 | native（自研） | swoole | workerman |

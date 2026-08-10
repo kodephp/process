@@ -32,6 +32,16 @@ final class Timer
      */
     public const CRON_MAX_ITER = 46080;
 
+    /**
+     * 表达式 → 位掩码缓存上限。单进程内 distinct 的 cron 表达式数量有界且很小，
+     * 设上限防止动态生成表达式造成的无界增长。
+     *
+     * @var array<string, array{minute:int,hour:int,mday:int,month:int,wday:int}>
+     */
+    private static array $cronMaskCache = [];
+
+    private const int CRON_MASK_CACHE_LIMIT = 256;
+
     private static array $timers = [];
     private static array $cronJobs = [];
     /**
@@ -367,6 +377,7 @@ final class Timer
     {
         self::$timers = [];
         self::$cronJobs = [];
+        self::$cronMaskCache = [];
         self::$nextId = 0;
         self::$initialized = false;
         self::$lastTick = 0.0;
@@ -387,6 +398,8 @@ final class Timer
             return microtime(true) + 60;
         }
 
+        $masks = self::getCronMasks($expression, $parts);
+
         $now = time();
 
         $limit = min(self::CRON_MAX_ITER, 525600);
@@ -394,18 +407,84 @@ final class Timer
             $candidate = $now + ($i * 60);
             $date = getdate($candidate);
 
-            if (self::matchCronPart($parts[4], $date['wday']) &&
-                self::matchCronPart($parts[3], $date['mday']) &&
-                self::matchCronPart($parts[2], $date['hours']) &&
-                self::matchCronPart($parts[1], $date['minutes'])
+            // 五段全部命中才算匹配（标准 cron 语义）。位掩码版本把旧实现每轮 4 次
+            // matchCronPart 字符串解析（内含 explode/str_contains/递归）替换为 5 次位运算，
+            // 且解析结果按表达式缓存，扫描本身不再付出解析开销。
+            if (((($masks['minute'] >> $date['minutes']) & 1) === 0) ||
+                ((($masks['hour']   >> $date['hours'])   & 1) === 0) ||
+                ((($masks['mday']   >> $date['mday'])    & 1) === 0) ||
+                ((($masks['month']  >> $date['mon'])     & 1) === 0) ||
+                ((($masks['wday']   >> $date['wday'])    & 1) === 0)
             ) {
-                return (float) $candidate;
+                continue;
             }
+
+            return (float) $candidate;
         }
 
         // 在扫描上限内未找到匹配（含永不匹配的表达式）：退化为 hourly 重算，
         // 避免对不可能命中的表达式反复做数十万次 getdate 造成秒级停顿。
         return microtime(true) + 3600;
+    }
+
+    /**
+     * 把 cron 表达式的 5 个字段解析为位掩码并缓存。
+     *
+     * 旧实现每轮扫描都对 5 段做字符串解析（{@see matchCronPart()} 内含
+     * explode / str_contains / 递归），单次 parseCronNext 在最坏情况下高达数万次
+     * 解析。这里在每条表达式首次计算时用 matchCronPart 枚举各字段定义域一次性求出
+     * 并集掩码，之后每个候选时间只需 5 次位运算。
+     *
+     * 同时修正了旧实现对字段顺序的错位：旧代码以 `$parts[4]/[3]/[2]/[1]` 依次匹配
+     * wday / mday / hours / minutes，**整体偏移了一位**——分钟字段（`$parts[0]`）被
+     * 完全忽略、而月份字段（`$parts[3]`）被当作日使用，导致 `15 10 5 * *` 之类表达式
+     * 实际在「每天 05:10」触发而非「每月 5 号 10:15」。现按标准 cron 语义正确映射到
+     * (minute, hour, mday, month, wday) 五个字段，并对全部五段做 AND 匹配。
+     *
+     * 掩码由 matchCronPart（行为权威、单测覆盖）构建，故优化本身不改变任何单字段的
+     * 匹配语义，仅修正字段位置的错位。
+     *
+     * @param list<string> $parts 已按空白切分的 5 段表达式
+     * @return array{minute:int,hour:int,mday:int,month:int,wday:int}
+     */
+    private static function getCronMasks(string $expression, array $parts): array
+    {
+        if (isset(self::$cronMaskCache[$expression])) {
+            return self::$cronMaskCache[$expression];
+        }
+
+        // 标准 cron 字段顺序：分 时 日 月 周（5 段分别对应 $parts[0..4]）
+        $domain = [
+            'minute' => [0, 59],
+            'hour'   => [0, 23],
+            'mday'   => [1, 31],
+            'month'  => [1, 12],
+            'wday'   => [0, 6],
+        ];
+        $fieldOf = [
+            'minute' => $parts[0],
+            'hour'   => $parts[1],
+            'mday'   => $parts[2],
+            'month'  => $parts[3],
+            'wday'   => $parts[4],
+        ];
+
+        $masks = [];
+        foreach ($domain as $key => [$lo, $hi]) {
+            $mask = 0;
+            for ($v = $lo; $v <= $hi; $v++) {
+                if (self::matchCronPart($fieldOf[$key], $v)) {
+                    $mask |= (1 << $v);
+                }
+            }
+            $masks[$key] = $mask;
+        }
+
+        if (count(self::$cronMaskCache) < self::CRON_MASK_CACHE_LIMIT) {
+            self::$cronMaskCache[$expression] = $masks;
+        }
+
+        return $masks;
     }
 
     /**

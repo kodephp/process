@@ -158,9 +158,9 @@ final class Promise
             };
 
             if ($this->state === self::FULFILLED) {
-                Async::queueMicrotask(fn() => $fulfilledHandler($this->value));
+                Async::queueMicrotask($fulfilledHandler, $this->value);
             } elseif ($this->state === self::REJECTED) {
-                Async::queueMicrotask(fn() => $rejectedHandler($this->reason));
+                Async::queueMicrotask($rejectedHandler, $this->reason);
             } else {
                 $this->onFulfilled[] = $fulfilledHandler;
                 $this->onRejected[] = $rejectedHandler;
@@ -182,9 +182,9 @@ final class Promise
     private function subscribe(callable $onFulfilled, callable $onRejected): void
     {
         if ($this->state === self::FULFILLED) {
-            Async::queueMicrotask(fn() => $onFulfilled($this->value));
+            Async::queueMicrotask($onFulfilled, $this->value);
         } elseif ($this->state === self::REJECTED) {
-            Async::queueMicrotask(fn() => $onRejected($this->reason));
+            Async::queueMicrotask($onRejected, $this->reason);
         } else {
             $this->onFulfilled[] = $onFulfilled;
             $this->onRejected[] = $onRejected;
@@ -292,7 +292,7 @@ final class Promise
         $this->value = $value;
 
         foreach ($this->onFulfilled as $callback) {
-            Async::queueMicrotask(fn() => $callback($value));
+            Async::queueMicrotask($callback, $value);
         }
 
         $this->onFulfilled = [];
@@ -309,7 +309,7 @@ final class Promise
         $this->reason = $reason;
 
         foreach ($this->onRejected as $callback) {
-            Async::queueMicrotask(fn() => $callback($reason));
+            Async::queueMicrotask($callback, $reason);
         }
 
         $this->onFulfilled = [];

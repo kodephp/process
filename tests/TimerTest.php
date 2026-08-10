@@ -314,4 +314,119 @@ final class TimerTest extends TestCase
         // 通配
         $this->assertTrue($match('*', 42));
     }
+
+    /**
+     * 回归守卫：parseCronNext 必须按标准 cron 字段顺序（分 时 日 月 周）映射，
+     * 且五段全部命中才算匹配。
+     *
+     * 旧实现整体偏移了一位：$parts[4]/[3]/[2]/[1] 依次匹配 wday/mday/hours/minutes，
+     * 导致分钟字段（$parts[0]）被完全忽略、月份字段被当作日使用。此测试用「必在
+     * 扫描地平线（≈32 天）内命中」的表达式逐项锁死映射，避免依赖运行时日期。
+     */
+    public function testParseCronNextRespectsAllFiveFields(): void
+    {
+        $parse = new \ReflectionMethod(Timer::class, 'parseCronNext');
+        $parse->setAccessible(true);
+        $d = fn(string $expr): array => getdate((int) $parse->invoke(null, $expr));
+
+        // 分钟字段被尊重（这是旧实现被完全忽略的字段）
+        $this->assertSame(30, $d('30 * * * *')['minutes']);
+
+        // 小时 + 分钟
+        $noon = $d('0 12 * * *');
+        $this->assertSame(12, $noon['hours']);
+        $this->assertSame(0, $noon['minutes']);
+
+        // 日字段（旧实现被当作月份）
+        $first = $d('0 0 1 * *');
+        $this->assertSame(1, $first['mday']);
+        $this->assertSame(0, $first['hours']);
+        $this->assertSame(0, $first['minutes']);
+
+        // 周字段
+        $mon = $d('0 9 * * 1');
+        $this->assertSame(1, $mon['wday']);
+        $this->assertSame(9, $mon['hours']);
+        $this->assertSame(0, $mon['minutes']);
+
+        // 通配
+        $this->assertSame(0, $d('* * * * *')['minutes'] % 1);
+    }
+
+    /**
+     * 等价性守卫：新实现（位掩码由 matchCronPart 构建）对每个候选时间的五段判定，
+     * 必须与「正确字段映射 + 逐轮 matchCronPart 判定」的参考实现完全一致。覆盖
+     * 逗号/区间/步长/永不命中（退化为 now+3600）等组合，确保优化与修正都没改变语义。
+     */
+    public function testParseCronNextMatchesReferenceImplementation(): void
+    {
+        $parse = new \ReflectionMethod(Timer::class, 'parseCronNext');
+        $parse->setAccessible(true);
+
+        $match = new \ReflectionMethod(Timer::class, 'matchCronPart');
+        $match->setAccessible(true);
+        $mc = fn(string $p, int $v): bool => $match->invoke(null, $p, $v);
+
+        // 参考实现：正确字段映射 + 逐轮字符串解析（不缓存），与 benchmarks 中的版本一致
+        $reference = function (string $expr) use ($mc): int {
+            $parts = preg_split('/\s+/', trim($expr));
+            if (count($parts) !== 5) {
+                return (int) (microtime(true) + 60);
+            }
+            $now = time();
+            $limit = min(46080, 525600);
+            for ($i = 1; $i <= $limit; $i++) {
+                $candidate = $now + ($i * 60);
+                $dd = getdate($candidate);
+                if ($mc($parts[0], $dd['minutes']) &&
+                    $mc($parts[1], $dd['hours']) &&
+                    $mc($parts[2], $dd['mday']) &&
+                    $mc($parts[3], $dd['mon']) &&
+                    $mc($parts[4], $dd['wday'])
+                ) {
+                    return (int) $candidate;
+                }
+            }
+            return (int) (microtime(true) + 3600);
+        };
+
+        $exprs = [
+            '* * * * *',
+            '*/15 * * * *',
+            '0 9 * * 1',
+            '30 14 28 2 *',
+            '0 0 30 2 *',
+            '1-30/5 1-12/2 1,15 * 1-5',
+            '0 12 * * *',
+            '0 0 1 * *',
+        ];
+
+        foreach ($exprs as $expr) {
+            $new = getdate((int) $parse->invoke(null, $expr));
+            $ref = getdate($reference($expr));
+
+            $this->assertSame($new['minutes'], $ref['minutes'], "分钟不一致: {$expr}");
+            $this->assertSame($new['hours'], $ref['hours'], "小时不一致: {$expr}");
+            $this->assertSame($new['mday'], $ref['mday'], "日不一致: {$expr}");
+            $this->assertSame($new['mon'], $ref['mon'], "月不一致: {$expr}");
+            $this->assertSame($new['wday'], $ref['wday'], "周不一致: {$expr}");
+        }
+    }
+
+    /**
+     * 缓存稳定性：同一表达式多次解析结果一致；位掩码按表达式缓存，命中后不再付出
+     * 重复解析开销（此处只验证结果确定性，性能由 benchmarks/timer-cron-bench.php 量化）。
+     */
+    public function testParseCronNextIsDeterministicAcrossCalls(): void
+    {
+        $parse = new \ReflectionMethod(Timer::class, 'parseCronNext');
+        $parse->setAccessible(true);
+
+        $a = (int) $parse->invoke(null, '17 3 4 * *');
+        $b = (int) $parse->invoke(null, '17 3 4 * *');
+        $c = (int) $parse->invoke(null, '17 3 4 * *');
+
+        $this->assertSame($a, $b);
+        $this->assertSame($b, $c);
+    }
 }

@@ -50,9 +50,17 @@ final class Async
         self::$deferred[] = $callback;
     }
 
-    public static function queueMicrotask(callable $callback): void
+    /**
+     * 入队一个微任务。
+     *
+     * 支持携带参数：`queueMicrotask($callable, ...$args)` 会以 `$callable(...$args)`
+     * 形式调用，从而避免调用方为了「只传一个值」而闭包包裹（如
+     * `queueMicrotask(fn() => $cb($v))`）。Promise 决议热路径借此消除每轮闭包分配，
+     * 与 {@see Promise} 的 subscribe 优化互补。不定参时行为与旧版完全一致。
+     */
+    public static function queueMicrotask(callable $callback, ...$args): void
     {
-        self::$microtasks[] = $callback;
+        self::$microtasks[] = [$callback, $args];
     }
 
     public static function runDeferred(): void
@@ -77,9 +85,9 @@ final class Async
             $callbacks = self::$microtasks;
             self::$microtasks = [];
 
-            foreach ($callbacks as $callback) {
+            foreach ($callbacks as [$callback, $args]) {
                 try {
-                    $callback();
+                    $callback(...$args);
                 } catch (\Throwable $e) {
                     self::emit('error', $e);
                 }

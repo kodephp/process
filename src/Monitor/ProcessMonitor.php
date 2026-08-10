@@ -45,6 +45,15 @@ class ProcessMonitor implements MonitorInterface
     /** 每个 pid 的最近一次 CPU 采样（累计滴答数 + 采样时刻），用于求占用率而非累计值 */
     private array $cpuSamples = [];
 
+    /**
+     * 进程级常量缓存：CPU 核数与时钟滴答数在进程生命周期内不变，
+     * 但旧实现每次 getProcessCpu() 都重新 shell_exec('nproc') / posix_sysconf，
+     * 在多 pid 轮询下产生大量冗余系统调用。懒初始化一次后复用。
+     */
+    private static ?int $cachedCpuCount = null;
+
+    private static ?int $cachedClockTicks = null;
+
     private float $lastCheck = 0.0;
 
     private int $checkCount = 0;
@@ -451,10 +460,10 @@ class ProcessMonitor implements MonitorInterface
             return 0.0;
         }
 
-        $ticksPerSec = $this->getClockTicks();
+        $ticksPerSec = self::getClockTicks();
         $cpuSeconds = $deltaTicks / $ticksPerSec;
         $usage = ($cpuSeconds / $elapsed) * 100.0;
-        $cores = $this->getCpuCount();
+        $cores = self::getCpuCount();
 
         return $cores > 0 ? min(100.0, $usage / $cores) : min(100.0, $usage);
     }
@@ -488,34 +497,49 @@ class ProcessMonitor implements MonitorInterface
         return $utime + $stime;
     }
 
-    private function getClockTicks(): int
+    private static function getClockTicks(): int
     {
+        if (self::$cachedClockTicks !== null) {
+            return self::$cachedClockTicks;
+        }
+
+        $ticks = 100;
+
         if (function_exists('posix_sysconf') && defined('POSIX_SC_CLK_TCK')) {
-            $ticks = @posix_sysconf(POSIX_SC_CLK_TCK);
-            if (is_int($ticks) && $ticks > 0) {
-                return $ticks;
+            $value = @posix_sysconf(POSIX_SC_CLK_TCK);
+            if (is_int($value) && $value > 0) {
+                $ticks = $value;
             }
         }
 
-        return 100;
+        self::$cachedClockTicks = $ticks;
+
+        return $ticks;
     }
 
-    private function getCpuCount(): int
+    private static function getCpuCount(): int
     {
+        if (self::$cachedCpuCount !== null) {
+            return self::$cachedCpuCount;
+        }
+
+        $cores = 1;
+
         if (function_exists('posix_sysconf') && defined('POSIX_SC_NPROCESSORS_ONLN')) {
             $n = @posix_sysconf(POSIX_SC_NPROCESSORS_ONLN);
             if (is_int($n) && $n > 0) {
-                return $n;
+                $cores = $n;
+            }
+        } else {
+            $out = @shell_exec('nproc 2>/dev/null');
+            if ($out !== null && ($n = (int) trim($out)) > 0) {
+                $cores = $n;
             }
         }
 
-        $out = @shell_exec('nproc 2>/dev/null');
+        self::$cachedCpuCount = $cores;
 
-        if ($out !== null && ($n = (int) trim($out)) > 0) {
-            return $n;
-        }
-
-        return 1;
+        return $cores;
     }
 
     /**

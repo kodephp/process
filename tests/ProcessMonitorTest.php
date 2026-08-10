@@ -174,4 +174,28 @@ final class ProcessMonitorTest extends TestCase
         $this->monitor->checkAll();
         $this->assertSame(3, $attempts, 'reset 之后应允许重新尝试');
     }
+
+    /**
+     * 回归守卫：CPU 核数与时钟滴答数改为进程级静态缓存（v5.2.27），
+     * 多次取值必须一致且为正整型——既防回归，也确认缓存未破坏返回值契约。
+     */
+    public function testCpuConstantsAreStableAndCached(): void
+    {
+        $cpu = new \ReflectionMethod(ProcessMonitor::class, 'getCpuCount');
+        $cpu->setAccessible(true);
+        $ticks = new \ReflectionMethod(ProcessMonitor::class, 'getClockTicks');
+        $ticks->setAccessible(true);
+
+        $cores1 = $cpu->invoke($this->monitor);
+        $cores2 = $cpu->invoke($this->monitor);
+        $this->assertIsInt($cores1);
+        $this->assertGreaterThanOrEqual(1, $cores1);
+        $this->assertSame($cores1, $cores2, 'CPU 核数应被缓存且幂等');
+
+        $t1 = $ticks->invoke($this->monitor);
+        $t2 = $ticks->invoke($this->monitor);
+        $this->assertIsInt($t1);
+        $this->assertGreaterThanOrEqual(1, $t1);
+        $this->assertSame($t1, $t2, '时钟滴答数应被缓存且幂等');
+    }
 }
