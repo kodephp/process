@@ -179,7 +179,18 @@ final class Process
 
     public static function isProcessAlive(int $pid): bool
     {
-        return posix_kill($pid, 0) && posix_get_last_error() !== 3;
+        if ($pid <= 0) {
+            return false;
+        }
+
+        if (posix_kill($pid, 0)) {
+            return true;
+        }
+
+        // errno 只在调用失败时写入、成功时不清零。原实现无条件读取它，
+        // 只要此前任意一次 posix 调用留下过 ESRCH(3)，所有存活进程都会被判死。
+        // 失败后再读才有意义：ESRCH(3)=进程不存在；EPERM(1)=存在但无权发信号。
+        return posix_get_last_error() !== 3;
     }
 
     public static function getPid(): int

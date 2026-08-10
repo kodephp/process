@@ -249,4 +249,53 @@ final class AsyncTest extends TestCase
         $this->assertSame(0, $status['microtask_count']);
         $this->assertSame(0, $status['deferred_count']);
     }
+
+    public function testTickDrivesTimers(): void
+    {
+        $called = false;
+
+        Async::setTimeout(function () use (&$called): void {
+            $called = true;
+        }, 0.0);
+
+        // tick() 是事件循环的唯一推进点，必须自己驱动定时器，
+        // 否则 setTimeout 只有在调用方额外手动调 processTimers() 时才会触发
+        Async::tick();
+
+        $this->assertTrue($called);
+    }
+
+    public function testRunExecutesTimeoutAndInterval(): void
+    {
+        $timeoutFired = false;
+        $intervalCount = 0;
+
+        $intervalId = Async::setInterval(function () use (&$intervalCount): void {
+            $intervalCount++;
+        }, 0.01);
+
+        Async::setTimeout(function () use (&$timeoutFired): void {
+            $timeoutFired = true;
+            Async::stop();
+        }, 0.05);
+
+        Async::run();
+        Async::clearInterval($intervalId);
+
+        $this->assertTrue($timeoutFired, 'setTimeout 必须能在 Async::run() 下触发');
+        $this->assertGreaterThan(0, $intervalCount, 'setInterval 必须能在 Async::run() 下触发');
+    }
+
+    public function testSetImmediateFiresOnNextTick(): void
+    {
+        $called = false;
+
+        Async::setImmediate(function () use (&$called): void {
+            $called = true;
+        });
+
+        Async::tick();
+
+        $this->assertTrue($called);
+    }
 }

@@ -265,4 +265,75 @@ final class PromiseTest extends TestCase
     {
         $this->assertSame('done', Promise::resolve('done')->await());
     }
+
+    public function testAwaitDrainsPendingMicrotasksInsteadOfDeadlocking(): void
+    {
+        // then() 的回调经 Async::queueMicrotask 入队。非 Fiber 上下文下若 await()
+        // 只 usleep 空转，就没有任何人执行这些微任务，整条链永久挂起。
+        $promise = Promise::resolve(1)
+            ->then(fn ($value) => $value + 1)
+            ->then(fn ($value) => $value * 10);
+
+        $this->assertSame(20, $promise->await());
+    }
+
+    public function testAwaitResolvesPromiseCompletedByTimer(): void
+    {
+        $promise = new Promise(function ($resolve): void {
+            Async::setTimeout(fn () => $resolve('late'), 0.02);
+        });
+
+        $this->assertSame('late', $promise->await());
+    }
+
+    public function testFinallyKeepsNonThrowableRejectionReason(): void
+    {
+        $caught = null;
+
+        Promise::reject('原始失败原因')
+            ->finally(fn () => null)
+            ->catch(function ($reason) use (&$caught): void {
+                $caught = $reason;
+            });
+
+        Async::runMicrotasks();
+
+        // 原实现 throw 字符串触发 "Can only throw objects"，
+        // 该 Error 会取代原始拒因传给下游
+        $this->assertInstanceOf(\RuntimeException::class, $caught);
+        $this->assertSame('原始失败原因', $caught->getMessage());
+    }
+
+    public function testFinallyPreservesThrowableRejectionIdentity(): void
+    {
+        $original = new \LogicException('boom');
+        $caught = null;
+
+        Promise::reject($original)
+            ->finally(fn () => null)
+            ->catch(function ($reason) use (&$caught): void {
+                $caught = $reason;
+            });
+
+        Async::runMicrotasks();
+
+        $this->assertSame($original, $caught);
+    }
+
+    public function testFinallyRunsOnBothPaths(): void
+    {
+        $calls = 0;
+
+        Promise::resolve('ok')->finally(function () use (&$calls): void {
+            $calls++;
+        });
+
+        Promise::reject('bad')->finally(function () use (&$calls): void {
+            $calls++;
+        })->catch(fn () => null);
+
+        Async::runMicrotasks();
+
+        $this->assertSame(2, $calls);
+    }
 }

@@ -57,7 +57,7 @@ function get_parent_pid(): int
  */
 function is_process_alive(int $pid): bool
 {
-    return posix_kill($pid, 0) && posix_get_last_error() !== 3;
+    return \Kode\Process\Process::isProcessAlive($pid);
 }
 
 /**

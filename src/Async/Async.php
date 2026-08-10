@@ -101,6 +101,9 @@ final class Async
     public static function tick(): void
     {
         self::runMicrotasks();
+        // 定时器必须由事件循环驱动：此前 tick() 从不调用 processTimers()，
+        // 导致 setTimeout/setInterval/setImmediate/delay 在 Async::run() 下永不触发。
+        self::processTimers();
         self::runDeferred();
     }
 

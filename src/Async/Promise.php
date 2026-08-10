@@ -179,7 +179,13 @@ final class Promise
             },
             function ($reason) use ($onFinally) {
                 $onFinally();
-                throw $reason;
+
+                // reason 允许是任意值。对非 Throwable 直接 throw 会触发
+                // "Can only throw objects"，该 Error 被 then() 捕获后取代原始拒因，
+                // 调用方拿到的将是无关的语言层错误。按 await() 的既有约定包装。
+                throw $reason instanceof \Throwable
+                    ? $reason
+                    : new \RuntimeException((string) $reason);
             }
         );
     }
@@ -219,7 +225,16 @@ final class Promise
         while ($this->state === self::PENDING) {
             if (\Fiber::getCurrent() !== null) {
                 \Fiber::suspend();
-            } else {
+                continue;
+            }
+
+            // 非 Fiber 上下文下没有外层事件循环替我们推进：then() 的回调是经
+            // Async::queueMicrotask 入队的，只 usleep 空转会让微任务永远没人执行，
+            // 于是 Promise::resolve(1)->then(...)->await() 直接死锁。这里由 await
+            // 自身充当事件循环，排空微任务/定时器/延迟任务后再让出 CPU。
+            Async::tick();
+
+            if ($this->state === self::PENDING) {
                 usleep(1000);
             }
         }
