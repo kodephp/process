@@ -138,7 +138,7 @@ final class Crontab
         while ($t < $limit) {
             $d = getdate($t);
 
-            if (!in_array($d['mon'], $f['month'], true)) {
+            if ((($f['month_mask'] >> $d['mon']) & 1) === 0) {
                 $t = $this->advance($t, mktime(0, 0, 0, $d['mon'] + 1, 1, $d['year']));
                 continue;
             }
@@ -148,17 +148,17 @@ final class Crontab
                 continue;
             }
 
-            if (!in_array($d['hours'], $f['hour'], true)) {
+            if ((($f['hour_mask'] >> $d['hours']) & 1) === 0) {
                 $t = $this->advance($t, mktime($d['hours'] + 1, 0, 0, $d['mon'], $d['mday'], $d['year']));
                 continue;
             }
 
-            if (!in_array($d['minutes'], $f['minute'], true)) {
+            if ((($f['minute_mask'] >> $d['minutes']) & 1) === 0) {
                 $t = $this->advance($t, mktime($d['hours'], $d['minutes'] + 1, 0, $d['mon'], $d['mday'], $d['year']));
                 continue;
             }
 
-            if (!in_array($d['seconds'], $f['second'], true)) {
+            if ((($f['second_mask'] >> $d['seconds']) & 1) === 0) {
                 $t++;
                 continue;
             }
@@ -190,8 +190,8 @@ final class Crontab
      */
     private function matchesDayOfMonthOrWeek(array $date, array $f): bool
     {
-        $dayOk = in_array($date['mday'], $f['day'], true);
-        $weekdayOk = in_array($date['wday'], $f['weekday'], true);
+        $dayOk = (($f['day_mask'] >> $date['mday']) & 1) === 1;
+        $weekdayOk = (($f['weekday_mask'] >> $date['wday']) & 1) === 1;
 
         if ($f['day_restricted'] && $f['weekday_restricted']) {
             return $dayOk || $weekdayOk;
@@ -225,16 +225,45 @@ final class Crontab
             );
         }
 
+        $second  = $this->parsePart($parts[0], 0, 59, 'second');
+        $minute  = $this->parsePart($parts[1], 0, 59, 'minute');
+        $hour    = $this->parsePart($parts[2], 0, 23, 'hour');
+        $day     = $this->parsePart($parts[3], 1, 31, 'day');
+        $month   = $this->parsePart($parts[4], 1, 12, 'month');
+        $weekday = $this->parsePart($parts[5], 0, 7, 'weekday');
+
         return [
-            'second'             => $this->parsePart($parts[0], 0, 59, 'second'),
-            'minute'             => $this->parsePart($parts[1], 0, 59, 'minute'),
-            'hour'               => $this->parsePart($parts[2], 0, 23, 'hour'),
-            'day'                => $this->parsePart($parts[3], 1, 31, 'day'),
-            'month'              => $this->parsePart($parts[4], 1, 12, 'month'),
-            'weekday'            => $this->parsePart($parts[5], 0, 7, 'weekday'),
+            'second'             => $second,
+            'minute'             => $minute,
+            'hour'               => $hour,
+            'day'                => $day,
+            'month'              => $month,
+            'weekday'            => $weekday,
+            // 各字段的 64 位位掩码：bit i 表示取值 i 被允许。匹配时以
+            // (($mask >> $v) & 1) 替代 in_array 线性扫描，配合 getdate 的分层跳跃
+            // 把每轮匹配降到几次位运算。
+            'second_mask'        => $this->maskFrom($second),
+            'minute_mask'        => $this->maskFrom($minute),
+            'hour_mask'          => $this->maskFrom($hour),
+            'day_mask'           => $this->maskFrom($day),
+            'month_mask'         => $this->maskFrom($month),
+            'weekday_mask'       => $this->maskFrom($weekday),
             'day_restricted'     => $parts[3] !== '*',
             'weekday_restricted' => $parts[5] !== '*',
         ];
+    }
+
+    /** 把取值集合压成位掩码；值域上限 0-63，超界值被忽略（理论上不会发生）。 */
+    private function maskFrom(array $values): int
+    {
+        $mask = 0;
+        foreach ($values as $v) {
+            if ($v >= 0 && $v < 64) {
+                $mask |= (1 << $v);
+            }
+        }
+
+        return $mask;
     }
 
     /**

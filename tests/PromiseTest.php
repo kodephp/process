@@ -336,4 +336,23 @@ final class PromiseTest extends TestCase
 
         $this->assertSame(2, $calls);
     }
+
+    public function testSubscribeAvoidsThrowawayPromiseAllocation(): void
+    {
+        // #206：深链里每一步 then 回调返回一个新 Promise。当前实现经 subscribe 转发，
+        // 内部不再多造一次性 Promise；若回退为 $value->then(...) 则会多造 K 个。
+        // K 步 → K 个 then + K 个内部 new Promise = 2K。作为回归护栏，断言精确等于 2K。
+        $k = 500;
+        $before = Promise::$instances;
+
+        $p = Promise::resolve(0);
+        for ($i = 0; $i < $k; $i++) {
+            $p = $p->then(fn($v) => new Promise(fn($r) => $r($v + 1)));
+        }
+        $p->await();
+
+        // K 个 then + K 个内部 new Promise + 1 个种子 Promise::resolve(0) = 2K + 1。
+        // 若 subscribe 回退为 ->then()，会多造 K 个一次性 Promise（变成 3K + 1）。
+        $this->assertSame(2 * $k + 1, Promise::$instances - $before);
+    }
 }

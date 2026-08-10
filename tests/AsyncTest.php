@@ -298,4 +298,52 @@ final class AsyncTest extends TestCase
 
         $this->assertTrue($called);
     }
+
+    public function testMapRespectsConfiguredConcurrency(): void
+    {
+        Async::reset();
+
+        $concurrency = 4;
+        $items = range(1, 12);
+        $maxConcurrent = 0;
+        $running = 0;
+
+        // 回调返回 Promise 才会真正占用并发名额（同步返回值会被立即结算，不走限流）。
+        $promise = Async::map($items, function ($item) use (&$maxConcurrent, &$running) {
+            $running++;
+            $maxConcurrent = max($maxConcurrent, $running);
+
+            return new Promise(function ($resolve) use (&$running, $item) {
+                Async::defer(function () use (&$running, $resolve, $item) {
+                    $running--;
+                    $resolve($item);
+                });
+            });
+        }, $concurrency);
+
+        $promise->await();
+
+        // #204：此前 use 列表漏掉 $concurrency，循环写死 10，map(…, 4) 实际峰值=10。
+        $this->assertSame($concurrency, $maxConcurrent);
+
+        Async::reset();
+    }
+
+    public function testProcessTimersSkipsFutureTimers(): void
+    {
+        Async::reset();
+
+        $fired = 0;
+        Async::setTimeout(function () use (&$fired): void {
+            $fired++;
+        }, 3600.0);
+
+        // 远未来定时器不应触发；processTimers 在 O(1) 提前返回路径下保持语义正确。
+        Async::processTimers();
+
+        $this->assertSame(0, $fired);
+        $this->assertSame(1, Async::getStatus()['timer_count']);
+
+        Async::reset();
+    }
 }

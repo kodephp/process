@@ -13,6 +13,8 @@ final class Async
     private static array $intervals = [];
     private static int $timerId = 0;
     private static bool $running = false;
+    /** 最近一次到期的绝对时刻（含 timers 与 intervals）；null 表示需要惰性重算。 */
+    private static ?float $nextTimerDue = null;
 
     public static function getEmitter(): EventEmitter
     {
@@ -93,7 +95,19 @@ final class Async
             self::tick();
 
             if (empty(self::$deferred) && empty(self::$microtasks)) {
-                usleep(1000);
+                $sleepMs = 1000;
+
+                // 自适应休眠：若存在最近的定时器到期点，把空转压缩到「刚好够到它」，
+                // 而不是恒定 1ms 盲等——既降低空闲 CPU，又把亚秒级定时器的延迟
+                // 从 1ms 粒度降到到期点精度。
+                if (self::$nextTimerDue !== null) {
+                    $remainingUs = (self::$nextTimerDue - microtime(true)) * 1e6;
+                    if ($remainingUs > 0 && $remainingUs < $sleepMs) {
+                        $sleepMs = (int) $remainingUs;
+                    }
+                }
+
+                usleep($sleepMs);
             }
         }
     }
@@ -123,6 +137,10 @@ final class Async
             'delay' => $delay,
         ];
 
+        self::$nextTimerDue = self::$nextTimerDue === null
+            ? $startTime
+            : min(self::$nextTimerDue, $startTime);
+
         return $id;
     }
 
@@ -137,17 +155,23 @@ final class Async
             'interval' => $interval,
         ];
 
+        self::$nextTimerDue = self::$nextTimerDue === null
+            ? $nextTime
+            : min(self::$nextTimerDue, $nextTime);
+
         return $id;
     }
 
     public static function clearTimeout(int $id): void
     {
         unset(self::$timers[$id]);
+        self::$nextTimerDue = null;
     }
 
     public static function clearInterval(int $id): void
     {
         unset(self::$intervals[$id]);
+        self::$nextTimerDue = null;
     }
 
     public static function setImmediate(callable $callback): int
@@ -169,6 +193,12 @@ final class Async
     {
         $now = microtime(true);
 
+        // 无定时器到期时直接返回：此前每 tick 都全量扫描 timers+intervals，
+        // 空闲事件循环因此恒定付出 O(N) 比较成本。缓存最近到期点后改为 O(1) 判定。
+        if (self::$nextTimerDue !== null && $now < self::$nextTimerDue) {
+            return;
+        }
+
         foreach (self::$timers as $id => $timer) {
             if ($now >= $timer['start_time']) {
                 unset(self::$timers[$id]);
@@ -182,6 +212,28 @@ final class Async
                 self::defer($interval['callback']);
             }
         }
+
+        // 触发后重新计算最近到期点；若都已清空则置 null（下一轮 add 会恢复）。
+        self::$nextTimerDue = self::computeNextDue();
+    }
+
+    /**
+     * 计算 timers 与 intervals 中最早的到期绝对时刻；两者皆空返回 null。
+     * 仅在所有定时器都已处理完毕后调用，故本身不参与每 tick 的热路径。
+     */
+    private static function computeNextDue(): ?float
+    {
+        $due = null;
+
+        foreach (self::$timers as $timer) {
+            $due = $due === null ? $timer['start_time'] : min($due, $timer['start_time']);
+        }
+
+        foreach (self::$intervals as $interval) {
+            $due = $due === null ? $interval['next_time'] : min($due, $interval['next_time']);
+        }
+
+        return $due;
     }
 
     public static function promisify(callable $callback): callable
@@ -410,8 +462,9 @@ final class Async
                 return;
             }
 
-            $process = function () use (&$index, &$pending, &$results, $items, $keys, $callback, $total, $resolve, $reject, &$process) {
-                while ($index < $total && $pending < 10) {
+            $process = function () use (&$index, &$pending, &$results, $items, $keys, $callback, $total, $resolve, $reject, $concurrency, &$process) {
+                $limit = max(1, $concurrency);
+                while ($index < $total && $pending < $limit) {
                     $key = $keys[$index];
                     $item = $items[$key];
                     $currentIndex = $index;
@@ -527,6 +580,7 @@ final class Async
         self::$microtasks = [];
         self::$timers = [];
         self::$intervals = [];
+        self::$nextTimerDue = null;
         self::$running = false;
     }
 }

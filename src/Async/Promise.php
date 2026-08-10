@@ -10,6 +10,9 @@ final class Promise
     public const FULFILLED = 'fulfilled';
     public const REJECTED = 'rejected';
 
+    /** 累计构造实例数，仅用于压测与诊断（单次整数自增，热路径开销可忽略）。 */
+    public static int $instances = 0;
+
     private string $state = self::PENDING;
     private mixed $value = null;
     private mixed $reason = null;
@@ -18,6 +21,8 @@ final class Promise
 
     public function __construct(callable $executor)
     {
+        self::$instances++;
+
         try {
             $executor(
                 fn($value) => $this->doResolve($value),
@@ -165,6 +170,27 @@ final class Promise
         return $promise;
     }
 
+    /**
+     * 仅登记回调、不派生新 Promise。
+     *
+     * `doResolve`/`resolvePromise` 在链式传导时曾调用 `$value->then(...)`，仅为把
+     * 内部转发回调挂到目标 Promise 上，却会额外构造一个立即丢弃的 Promise（连同其
+     * executor 闭包与两个 handler 闭包）。长链、嵌套、await、all/allSettled 场景下
+     * 这些一次性对象占可观的分配与 GC 压力。`subscribe` 只做 `then()` 中 PENDING 分支
+     * 的登记动作，调用方拿到的是目标 Promise 自身的状态机，零派生。
+     */
+    private function subscribe(callable $onFulfilled, callable $onRejected): void
+    {
+        if ($this->state === self::FULFILLED) {
+            Async::queueMicrotask(fn() => $onFulfilled($this->value));
+        } elseif ($this->state === self::REJECTED) {
+            Async::queueMicrotask(fn() => $onRejected($this->reason));
+        } else {
+            $this->onFulfilled[] = $onFulfilled;
+            $this->onRejected[] = $onRejected;
+        }
+    }
+
     public function catch(callable $onRejected): self
     {
         return $this->then(null, $onRejected);
@@ -255,7 +281,7 @@ final class Promise
         }
 
         if ($value instanceof self) {
-            $value->then(
+            $value->subscribe(
                 fn($v) => $this->doResolve($v),
                 fn($r) => $this->doReject($r)
             );
@@ -293,7 +319,7 @@ final class Promise
     private function resolvePromise(mixed $result, callable $resolve, callable $reject): void
     {
         if ($result instanceof self) {
-            $result->then($resolve, $reject);
+            $result->subscribe($resolve, $reject);
         } else {
             $resolve($result);
         }

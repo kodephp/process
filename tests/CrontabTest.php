@@ -256,4 +256,72 @@ final class CrontabTest extends TestCase
 
         $this->assertGreaterThan(time() + 300 * 86400, $crontab->getNextRunTime());
     }
+
+    public function testBitmaskMatchesBruteForceOverHorizon(): void
+    {
+        // #207：位掩码匹配必须与「in_array 暴力逐秒扫描」在搜索地平线内完全一致，
+        // 否则位运算优化会悄悄改变调度语义。用一个独立复刻的 in_array 参考实现对照。
+        $expressions = [
+            '* * * * * *', '*/5 * * * * *', '0 * * * * *', '*/15 * * * *',
+            '0 0 * * 1-5', '0 0 13 * 5', '0 0 30 2 *',
+        ];
+
+        foreach ($expressions as $expr) {
+            $crontab = new Crontab($expr, function () {});
+            $masked = $crontab->getNextRunTime();
+            $brute = $this->bruteForceNext($crontab, time() + 1);
+
+            $this->assertSame($brute, $masked, "表达式 {$expr} 位掩码结果与暴力扫描不一致");
+        }
+    }
+
+    private function bruteForceNext(Crontab $crontab, int $from): int
+    {
+        $ref = new \ReflectionProperty(Crontab::class, 'fields');
+        $ref->setAccessible(true);
+        $f = $ref->getValue($crontab);
+
+        $limit = $from + 367 * 86400;
+        $t = $from;
+
+        $advance = function (int $current, int|false $target): int {
+            return ($target !== false && $target > $current) ? $target : $current + 1;
+        };
+
+        while ($t < $limit) {
+            $d = getdate($t);
+
+            if (!in_array($d['mon'], $f['month'], true)) {
+                $t = $advance($t, mktime(0, 0, 0, $d['mon'] + 1, 1, $d['year']));
+                continue;
+            }
+
+            $dayOk = in_array($d['mday'], $f['day'], true);
+            $weekdayOk = in_array($d['wday'], $f['weekday'], true);
+            $dwOk = ($f['day_restricted'] && $f['weekday_restricted'])
+                ? ($dayOk || $weekdayOk)
+                : ($dayOk && $weekdayOk);
+
+            if (!$dwOk) {
+                $t = $advance($t, mktime(0, 0, 0, $d['mon'], $d['mday'] + 1, $d['year']));
+                continue;
+            }
+            if (!in_array($d['hours'], $f['hour'], true)) {
+                $t = $advance($t, mktime($d['hours'] + 1, 0, 0, $d['mon'], $d['mday'], $d['year']));
+                continue;
+            }
+            if (!in_array($d['minutes'], $f['minute'], true)) {
+                $t = $advance($t, mktime($d['hours'], $d['minutes'] + 1, 0, $d['mon'], $d['mday'], $d['year']));
+                continue;
+            }
+            if (!in_array($d['seconds'], $f['second'], true)) {
+                $t++;
+                continue;
+            }
+
+            return $t;
+        }
+
+        return $limit;
+    }
 }
