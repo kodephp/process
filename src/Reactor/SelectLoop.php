@@ -8,8 +8,10 @@ namespace Kode\Process\Reactor;
  * 零扩展兜底事件循环，基于 stream_select()。
  *
  * 不依赖任何 PHP 扩展，任何 PHP 8.3+ 环境都可运行。
- * 代价是 fd 数量受 FD_SETSIZE 限制、且随连接数增长为 O(n) 扫描；
- * 连接数较多时应安装 ext-event 或 ext-ev 以自动切换到 C 层多路复用。
+ * 失效流采用「惰性 prune」：正常 tick 不做任何额外扫描（用户态 O(1)），仅当流被外部
+ * fclose 却未调用 off* 导致 stream_select 抛 ValueError 时才剔除失效流并重试一次。
+ * fd 数量仍受 FD_SETSIZE 限制；连接数较多时应安装 ext-event 或 ext-ev 以自动切换到
+ * C 层多路复用。
  */
 final class SelectLoop implements LoopInterface
 {
@@ -181,31 +183,45 @@ final class SelectLoop implements LoopInterface
      */
     private function select(?float $timeout): void
     {
-        // 先剔除已失效的流：把非资源传给 stream_select 会直接抛 TypeError（@ 不抑制 Throwable），
-        // 导致每轮空转 100% CPU；提前剔除可避免。
-        $this->pruneInvalidStreams();
-
         $read   = $this->readStreams;
         $write  = $this->writeStreams;
         $except = [];
 
+        // 空集合：仅定时器在跑，直接睡到最近到期，避免无意义的 stream_select 调用。
         if ($read === [] && $write === []) {
-            // 只有定时器：睡到最近一个到期
             if ($timeout !== null && $timeout > 0) {
-                usleep((int)($timeout * 1_000_000));
+                \usleep((int)($timeout * 1_000_000));
             }
             return;
         }
 
         // 上限 1 秒，保证信号与定时器能被及时处理
-        $wait = $timeout === null ? 1.0 : min($timeout, 1.0);
+        $wait = $timeout === null ? 1.0 : \min($timeout, 1.0);
         $sec  = (int)$wait;
         $usec = (int)(($wait - $sec) * 1_000_000);
 
-        $count = @\stream_select($read, $write, $except, $sec, $usec);
+        // 惰性 prune：正常情形（流均有效）直接 select，每 tick 零额外扫描（O(1) 用户态开销）。
+        // 仅当流被外部 fclose 却未调用 off* 时，stream_select 会对失效资源抛 ValueError
+        //（@ 无法抑制），此时才剔除失效流并重试一次，避免每轮空转 100% CPU。
+        try {
+            $count = @\stream_select($read, $write, $except, $sec, $usec);
+        } catch (\Throwable $e) {
+            $this->pruneInvalidStreams();
+            $read  = $this->readStreams;
+            $write = $this->writeStreams;
+            if ($read === [] && $write === []) {
+                return;
+            }
+            try {
+                $count = @\stream_select($read, $write, $except, $sec, $usec);
+            } catch (\Throwable $e2) {
+                \usleep(1000);
+                return;
+            }
+        }
+
         if ($count === false) {
-            // stream_select 失败通常是集合里混入了高 fd（>= FD_SETSIZE）等平台限制。
-            // 若不处理会每轮空转 100% CPU：剔除失效流并短暂退避再重试。
+            // 其余失败（如高 fd 超 FD_SETSIZE 等平台限制）：剔除失效流并短暂退避再重试。
             $this->pruneInvalidStreams();
             \usleep(1000);
             return;

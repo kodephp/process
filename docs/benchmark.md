@@ -517,6 +517,33 @@ Promise）分配由 **3K → 2K**（K=2000 实测 6001 → 4001），**减少 33
 产生大量冗余系统调用。现改为懒初始化静态缓存，命中后零系统调用。由
 `ProcessMonitorTest::testCpuConstantsAreStableAndCached` 守护返回值契约与幂等性。
 
+## 八、默认事件循环 SelectLoop 惰性 prune（v5.2.28）
+
+SelectLoop 是未安装 ext-event / ext-ev 平台（非常多环境）的兜底多路复用器，其每 tick 效率直接决定兜底 QPS。
+
+### 8.1 改动
+
+旧实现在**每次 `select()` 前**都全量 `pruneInvalidStreams()`（遍历所有读写流做 `is_resource` 检查），即每 tick 一次 O(N) 扫描。实测 `stream_select` 传入已关闭资源会抛 `ValueError`（`@` 无法抑制），因此旧实现用 proactive prune 兜底。
+
+v5.2.28 改为**惰性 prune**（与 ReactPHP `StreamSelectLoop` 同思路）：正常 tick 零扫描直接 `stream_select`；仅当流被外部 `fclose` 却未调用 `off*` 导致抛 `ValueError` 时，才 `catch` 一次、剔除失效流、重建集合并重试一次。稳态每 tick 用户态开销从 O(N) 降为 O(1)。
+
+### 8.2 微基准（benchmarks/selectloop-bench.php）
+
+模拟 N=2000 并发连接、每轮 K=100000 tick：
+
+| 路径 | 每 tick 用户态扫描 | 每 10万 tick 累计 |
+|------|-------------------|------------------|
+| 旧（每 tick 全量 O(N) 扫描）参考 | ≈ 0.01416 ms | ≈ 1416.3 ms |
+| 新（惰性 prune，零扫描） | 0 ms | 0 ms |
+
+新实现在 4 个真实低 fd 流上实跑 K 次 `select(0)`：流集合完整保留（4/4）、零异常穿透。
+
+**结论**：稳态每 tick 省掉一次 N 元 `is_resource` 扫描——连接越多该扫描越贵，兜底事件循环在无效流不出现的常态下尾延迟与 CPU 占用双降；仅在「外部关闭未 off」这一异常路径上多付出一次 prune，符合 fail-soft 设计。
+
+### 8.3 回归守卫
+
+`SelectLoopTest::testSelectLazilyPrunesExternallyClosedStream`（反射驱动私有 `select()`，断言「不抛 + 失效流被惰性剔除」）、`testSelectKeepsValidStreamsAcrossManyTicks`（200 次 tick 后有效流完整保留，反向守卫零扫描路径不误伤）。既有 `testPrunesClosedStreamInsteadOfSpinning` 仍通过。
+
 ## 优劣势对比
 
 | 维度 | native（自研） | swoole | workerman |

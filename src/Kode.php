@@ -13,6 +13,7 @@ use Kode\Process\Reactor\LoopFactory;
 use Kode\Process\Reactor\LoopInterface;
 use Kode\Process\Async\Async;
 use Kode\Process\Async\EventEmitter;
+use Kode\Process\Crontab\ClusterCron;
 use Kode\Process\Debug\StatusMonitor;
 use Kode\Process\Queue\QueueManager;
 use Kode\Process\Runtime\RuntimeInterface;
@@ -380,6 +381,32 @@ final class Kode
     public static function cron(string $expression, callable $callback, array $args = []): int
     {
         return Timer::cron($expression, $callback, $args);
+    }
+
+    /**
+     * 多进程安全的 cron：集群内每调度时刻至多执行一次。
+     *
+     * 进程内 {@see self::cron()} 是「每 worker 一份」，master-worker 多进程下会每个 worker 各触发一次
+     * （N 倍重复）。本方法改用 {@see ClusterCron::create()} —— 用分布式锁保证只有抢到锁的 worker 执行，
+     * 多进程不会重复。前提：已通过 {@see Cluster::make('redis'|'file'|...)} 配置协调存储
+     * （同机可零依赖自动择优 file 后端）。若需强 exactly-once（长任务），改用 {@see self::tickCronOnLeader()}。
+     *
+     * @param array<int, mixed> $args    透传给回调的位置参数
+     * @param float             $lockTtl 锁 TTL（秒），应 >= 单轮任务耗时
+     */
+    public static function cronCluster(string $expression, callable $callback, array $args = [], float $lockTtl = 30.0): int
+    {
+        return ClusterCron::create($expression, $callback, $args, $lockTtl)->getId();
+    }
+
+    /**
+     * 仅由 Leader 选举胜出者推进全部 cron（强 exactly-once）。
+     *
+     * 放在主循环里周期调用即可：非 Leader 进程自动跳过。需 {@see Cluster} 已配置协调存储。
+     */
+    public static function tickCronOnLeader(string $name = 'scheduler', float $electionTtl = 15.0): void
+    {
+        ClusterCron::tickOnLeader($name, $electionTtl);
     }
 
     /**

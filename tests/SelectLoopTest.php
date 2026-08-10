@@ -91,4 +91,72 @@ final class SelectLoopTest extends TestCase
         $this->assertFalse($loop->isRunning(), '抛出异常后循环应仍正常退出');
         $this->assertGreaterThan(0, $ok, '异常隔离后循环应继续处理其他定时器');
     }
+
+    /**
+     * 惰性 prune 行为守卫：流被外部 fclose 却未调用 off* 时，stream_select 会对失效资源
+     * 抛 ValueError。新实现应在 select() 内部 catch 并剔除失效流，而非把异常穿透出来、
+     * 也不是每轮空转 100% CPU。本测试用反射直接驱动私有 select()，断言「不抛 + 被剔除」。
+     */
+    public function testSelectLazilyPrunesExternallyClosedStream(): void
+    {
+        $loop = new SelectLoop();
+        [$a, $b] = \stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+
+        if ((int) $a >= 1024) {
+            \fclose($a);
+            \fclose($b);
+            $this->markTestSkipped('本平台 fd 编号 >= FD_SETSIZE，SelectLoop 需 ext-event');
+        }
+
+        $loop->onReadable($a, static fn() => null);
+        \fclose($a); // 外部关闭，未 offReadable
+
+        $select = new \ReflectionMethod($loop, 'select');
+        $select->setAccessible(true);
+
+        // 不应抛异常（内部 catch ValueError + prune 一次）
+        $select->invoke($loop, 0.0);
+        $this->assertSame(0, $loop->stats()['read'], '失效流应被惰性剔除');
+
+        // 再 tick 一次：此时集合已空，应走快速返回路径，不抛、不残留
+        $select->invoke($loop, 0.0);
+        $this->assertSame(0, $loop->stats()['read']);
+
+        \fclose($b);
+    }
+
+    /**
+     * 惰性 prune 的反向守卫：流均有效时，select() 不得误伤任何有效流（零扫描路径必须
+     * 保持流集合不变）。这是与「每 tick 全量 prune」最易被混淆的回归点——新实现在稳态下
+     * 完全不扫描，因此不会因扫描逻辑改动而误删有效连接。
+     */
+    public function testSelectKeepsValidStreamsAcrossManyTicks(): void
+    {
+        $loop = new SelectLoop();
+        $pairs = [];
+        for ($i = 0; $i < 4; $i++) {
+            [$a, $b] = \stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+            if ((int) $a >= 1024) {
+                \fclose($a);
+                \fclose($b);
+                $this->markTestSkipped('本平台 fd 编号 >= FD_SETSIZE，SelectLoop 需 ext-event');
+            }
+            $pairs[] = [$a, $b];
+            $loop->onReadable($a, static fn() => null);
+        }
+
+        $select = new \ReflectionMethod($loop, 'select');
+        $select->setAccessible(true);
+
+        for ($i = 0; $i < 200; $i++) {
+            $select->invoke($loop, 0.0);
+        }
+
+        $this->assertSame(4, $loop->stats()['read'], '有效流在多次 tick 后必须完整保留');
+
+        foreach ($pairs as [$a, $b]) {
+            \fclose($a);
+            \fclose($b);
+        }
+    }
 }

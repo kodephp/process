@@ -130,6 +130,14 @@ final class Timer
         return self::once($delay, $callback, $args);
     }
 
+    /**
+     * 注册 cron 表达式定时器（进程内）。
+     *
+     * ⚠️ 多进程语义：cron 任务是**按进程**隔离的，master-worker 下每个 worker 各自触发同一表达式，
+     * 会导致每个调度时刻**重复执行 N 次**、且 worker 崩溃即丢失。需要集群内「至多执行一次」时，
+     * 改用 {@see \Kode\Process\Crontab\ClusterCron}（每任务分布式锁 / Leader 选举），或把执行交给
+     * `Kode::queue()`（Redis 队列）。单进程 / 单 worker 场景无此问题，可放心使用本方法。
+     */
     public static function cron(string $expression, callable $callback, array $args = []): int
     {
         self::init();

@@ -283,6 +283,72 @@ Kode::tickTimers();      // 在自定义主循环中周期推进
 也支持 `setTimeout` / `setInterval`（JS 风格别名）与 `pause` / `resume` / `getStatus` 等，
 详见 [docs/timer.md](docs/timer.md)。
 
+## 多进程定时任务的重复执行问题与选型
+
+> ⚠️ **关键认知**：进程内的 `Kode::cron()` / `Timer::cron()` / `Crontab` 是**「每进程一份」的静态注册表**。
+> 在 master-worker 多进程（或水平扩展多机）下，每个 worker 都会独立注册并触发同一表达式 ——
+> **每个调度时刻会被 N 个 worker 重复执行 N 次**，且某个 worker 崩溃即丢失其定时器。
+> **多进程本身并不能解决这个问题，反而把它放大了**：要让定时任务在集群内「至多执行一次」，
+> 必须引入协调权威（分布式锁 / Leader 选举），或把活儿交给持久队列。
+
+### 解法一：每任务分布式锁（推荐起步，零改造）
+
+`Kode::cronCluster()` / `ClusterCron::create()` 用 `Cluster::lock()` 给每个表达式加一把互斥锁，
+只有抢到锁的 worker 才执行 —— 多进程不再重复。存储后端自动择优（同机 file、跨机 redis），
+**同机多进程开箱即可协调，无需任何外部依赖**；跨主机先 `Cluster::make('redis', ...)` 即可。
+
+```php
+use Kode\Process\Kode;
+
+// 同机多进程：每个调度时刻全集群只执行一次（file 后端自动协调）
+Kode::cronCluster('0 0 * * *', fn() => nightlyReport());
+
+// 跨机集群：先配置 Redis 协调后端
+Kode::cluster()->make('redis', ['host' => '127.0.0.1', 'port' => 6379]);
+Kode::cronCluster('*/5 * * * *', fn() => syncOrders(), lockTtl: 60.0);
+```
+
+协调存储不可用时守卫 fail-soft 退化为本地执行并告警（极端情况可能重复，与无协调同款行为）。
+每次触发多出一次锁往返（file 后端约 0.07ms，见 `benchmarks/cluster-cron-bench.php`）。
+
+### 解法二：Leader 选举（长任务 / 强 exactly-once）
+
+任务耗时可能超过锁 TTL、或要求强一致时，用 `Kode::tickCronOnLeader()` 让**整套 cron 只在选举胜出的
+Leader 进程**推进，天然 exactly-once：
+
+```php
+use Kode\Process\Kode;
+
+Kode::cron('0 2 * * *', fn() => heavyRebuild());   // 照常注册
+// 主循环里改用：
+Kode::tickCronOnLeader('scheduler', electionTtl: 15.0);   // 仅 Leader 推进
+```
+
+### 解法三：用 Redis 队列承接「持久 / 可重试」的活儿
+
+若任务是**持久、可重试、崩溃不丢、需要背压/限速/失败重放**的（发邮件、对账、下发），
+**不要**依赖进程内 cron/timer —— 它既不持久、崩溃即丢、多进程还重复。正确做法是让 cron 只负责
+「产生消息」，真正的执行交给 `Kode::queue()`（Redis 后端），由队列保证投递语义：
+
+```php
+use Kode\Process\Kode;
+
+// cron 只生产
+Kode::cronCluster('*/1 * * * *', function () {
+    foreach (fetchDueJobs() as $job) {
+        Kode::queue()->dispatch('send_email', $job);   // 入队，交给队列保证至少一次 + 重试
+    }
+});
+
+// 消费侧（可多 worker 并发消费，天然去重由队列 ack 保证）
+Kode::queue()->register('send_email', function (array $data) {
+    mail($data['to'], $data['subject'], $data['body']);
+    return ['status' => 'sent'];
+});
+```
+
+> 一句话：**定时「触发」用集群锁/选举去重；业务「执行」用 Redis 队列保持久。** 两者互补，而非替代。
+
 ## 队列系统
 
 ```php

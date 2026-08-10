@@ -6,6 +6,13 @@ namespace Kode\Process\Crontab;
 
 final class Crontab
 {
+    /**
+     * ⚠️ 多进程语义：本类是按**进程**隔离的静态注册表。在 master-worker 多进程（或水平扩展多机）
+     * 下，每个 worker 都会各自注册并触发同一表达式，导致每个调度时刻**重复执行 N 次**、且 worker
+     * 崩溃即丢失。多进程本身不解决这个问题。需要集群内「至多执行一次」时，改用
+     * {@see ClusterCron::create()}（每任务分布式锁）或 {@see ClusterCron::tickOnLeader()}
+     * （Leader 选举）；持久/可重试的活儿应交给 `Kode::queue()`（Redis 队列）。
+     */
     /** 月份名 → 序号，cron 通用扩展。 */
     private const MONTH_NAMES = [
         'jan' => 1, 'feb' => 2, 'mar' => 3, 'apr' => 4, 'may' => 5, 'jun' => 6,
