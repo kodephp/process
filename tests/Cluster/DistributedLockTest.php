@@ -194,6 +194,20 @@ final class DistributedLockTest extends TestCase
         $this->assertSame($lock->token(), $this->store->get('lock/job'));
     }
 
+    public function testRemainingReflectsRefreshTtl(): void
+    {
+        $lock = $this->lock('job', 0.05);
+        $lock->tryAcquire();
+
+        usleep(30_000);
+        $this->assertTrue($lock->refresh(30.0));
+
+        // 续期后 remaining 必须反映新 TTL，而不是回到构造期的 0.05 立即归零
+        $this->assertGreaterThan(1.0, $lock->remaining());
+
+        $lock->forceRelease();
+    }
+
     public function testRefreshFailsWhenNotHeld(): void
     {
         $this->assertFalse($this->lock()->refresh());

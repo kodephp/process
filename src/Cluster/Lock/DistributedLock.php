@@ -47,6 +47,12 @@ final class DistributedLock
     private float $acquiredAt = 0.0;
 
     /**
+     * 当前生效的 TTL（秒）。构造期等于 $ttl；refresh() 传入自定义 TTL 后会更新。
+     * remaining() 必须基于它计算，否则续期后续航时间被算成构造期的旧 TTL。
+     */
+    private float $currentTtl = 0.0;
+
+    /**
      * @param string     $key   锁名（会自动加 `lock/` 前缀落库）
      * @param float      $ttl   锁存活时间（秒）。必须大于临界区预期耗时，或配合 refresh() 续期。
      * @param string|null $owner 持有者标识，便于排查是谁拿着锁；默认取 主机名:PID
@@ -61,6 +67,7 @@ final class DistributedLock
 
         // 令牌 = 可读的持有者 + 随机串，既能排查又能保证唯一
         $this->token = $owner . ':' . bin2hex(random_bytes(8));
+        $this->currentTtl = $ttl;
     }
 
     private function storeKey(): string
@@ -133,7 +140,7 @@ final class DistributedLock
             return 0.0;
         }
 
-        return max(0.0, $this->ttl - (microtime(true) - $this->acquiredAt));
+        return max(0.0, $this->currentTtl - (microtime(true) - $this->acquiredAt));
     }
 
     /**
@@ -149,7 +156,9 @@ final class DistributedLock
                 return true;
             }
 
-            // 本地视角已过期：清掉残留状态，当作全新一次获取去抢
+            // 本地视角已过期：清掉残留状态，当作全新一次获取去抢。过期即视为锁已丢失，
+            // 重抢是「全新获取」（depth 重置为 1）而非延续旧嵌套——这是有意的安全设计：
+            // 绝不能凭本地计数把锁悄悄续到别人已接管或已自动释放的临界区上。
             $this->depth      = 0;
             $this->acquiredAt = 0.0;
         }
@@ -228,6 +237,7 @@ final class DistributedLock
 
         if ($ok) {
             $this->acquiredAt = microtime(true);
+            $this->currentTtl = $ttl ?? $this->ttl;
         } else {
             // 锁已易主，本实例不再持有
             $this->depth = 0;

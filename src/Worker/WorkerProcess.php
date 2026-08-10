@@ -103,9 +103,7 @@ class WorkerProcess implements WorkerInterface
 
     private function runWorkerProcess(): void
     {
-        $this->pid = posix_getpid();
-        $this->state = ProcessInterface::STATE_RUNNING;
-        $this->running = true;
+        $this->prepareWorker();
 
         $this->setupWorkerSignals();
 
@@ -115,6 +113,24 @@ class WorkerProcess implements WorkerInterface
         ]);
 
         $this->runEventLoop();
+    }
+
+    /**
+     * 在子进程（fork 之后）内初始化进程身份。
+     *
+     * 关键：必须在 fork 之后、进入事件循环之前把 parentPid 重置为「真正父进程」
+     * （master）的 pid。构造函数在 master 上下文运行，记录的 parentPid 是 master 的
+     * 父进程（如启动 shell）；若不在此重设，checkParent() 每轮都会误判父进程已退出，
+     * 子进程立即自杀并以退出码 0 触发无限重生（fork bomb）。
+     *
+     * 抽成方法便于在不实际 fork 的情况下用反射做单元测试。
+     */
+    protected function prepareWorker(): void
+    {
+        $this->pid = posix_getpid();
+        $this->parentPid = posix_getppid();
+        $this->state = ProcessInterface::STATE_RUNNING;
+        $this->running = true;
     }
 
     private function setupWorkerSignals(): void
@@ -423,18 +439,11 @@ class WorkerProcess implements WorkerInterface
             return false;
         }
 
-        $result = pcntl_waitpid($this->pid, $status, WNOHANG);
-
-        if ($result === -1) {
-            return false;
-        }
-
-        if ($result === 0) {
-            return true;
-        }
-
-        $this->state = ProcessInterface::STATE_STOPPED;
-        return false;
+        // 仅做存活探测，不得回收退出状态：子进程回收是 MasterProcess::reapChildren
+        // 的唯一出口。若此处用 pcntl_waitpid(WNOHANG) 抢收，checkWorkers() 每 tick 调用
+        // 后会架空 SIGCHLD 驱动的回收与自动重生，handleWorkerExit 永不触发；且 pid 复用
+        // 时可能误杀无关进程。posix_kill(pid, 0) 只探测是否存活、不回收。
+        return @posix_kill($this->pid, 0);
     }
 
     public function isMaster(): bool

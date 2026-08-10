@@ -34,8 +34,14 @@ final class Timer
 
     private static array $timers = [];
     private static array $cronJobs = [];
-    private static int $timerId = 0;
-    private static int $cronId = 0;
+    /**
+     * 定时器与 cron 任务共用同一自增 ID 序列。
+     *
+     * 二者原先各有一条独立序列（timerId / cronId），但 del/pause/resume/getTimer
+     * 都是「先查 timers 再查 cronJobs」，编号一旦数值相撞（如 timer#3 与 cron#3
+     * 共存）就会删/暂停错对象。共用单一序列可从根本上杜绝 ID 冲突。
+     */
+    private static int $nextId = 0;
     private static bool $initialized = false;
     private static float $lastTick = 0.0;
     private static array $stats = [
@@ -60,7 +66,7 @@ final class Timer
     {
         self::init();
 
-        $timerId = ++self::$timerId;
+        $timerId = ++self::$nextId;
 
         self::$timers[$timerId] = [
             'delay' => $delay,
@@ -118,7 +124,7 @@ final class Timer
     {
         self::init();
 
-        $cronId = ++self::$cronId;
+        $cronId = ++self::$nextId;
 
         self::$cronJobs[$cronId] = [
             'expression' => $expression,
@@ -246,11 +252,19 @@ final class Timer
             if ($now >= $cron['next_run']) {
                 try {
                     ($cron['callback'])(...$cron['args']);
-                    self::$stats['total_executed']++;
-                    self::$cronJobs[$id]['executed']++;
                 } catch (\Throwable $e) {
                     self::$emitter?->emit('timer.error', $id, $e);
                 }
+
+                // 回调可能在执行期间 del/delAll 本 cron 任务：复检避免把已删条目复活成
+                // 残缺数组（缺 expression/callback 键，下一 tick 访问即崩溃）。复检必须
+                // 早于任何写入（含 executed 计数），与上方 timers 路径完全一致。
+                if (!isset(self::$cronJobs[$id])) {
+                    continue;
+                }
+
+                self::$stats['total_executed']++;
+                self::$cronJobs[$id]['executed']++;
 
                 self::$cronJobs[$id]['next_run'] = self::parseCronNext($cron['expression']);
             }
@@ -353,8 +367,7 @@ final class Timer
     {
         self::$timers = [];
         self::$cronJobs = [];
-        self::$timerId = 0;
-        self::$cronId = 0;
+        self::$nextId = 0;
         self::$initialized = false;
         self::$lastTick = 0.0;
         self::$emitter = null;

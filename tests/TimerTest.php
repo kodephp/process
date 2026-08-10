@@ -194,6 +194,51 @@ final class TimerTest extends TestCase
         $this->assertEquals(0, Timer::count());
     }
 
+    public function testCronCallbackCanDeleteItselfWithoutResurrection(): void
+    {
+        $holder = new \stdClass();
+        $holder->id = null;
+
+        $cronId = Timer::cron('* * * * *', function () use ($holder) {
+            Timer::del($holder->id);
+        });
+        $holder->id = $cronId;
+
+        // parseCronNext 默认返回未来时刻，单测不便等待整分钟；把 next_run 拨到过去
+        // 使下一 tick 立即触发回调，真实复现「回调内 del 自身」的崩溃路径。
+        $ref = new \ReflectionProperty(Timer::class, 'cronJobs');
+        $ref->setAccessible(true);
+        $jobs = $ref->getValue();
+        $jobs[$cronId]['next_run'] = microtime(true) - 1.0;
+        $ref->setValue(null, $jobs);
+
+        Timer::tick();   // 触发回调（回调内 del 自身）
+        Timer::tick();   // 再触发不应崩溃（残缺数组不再被写出）
+
+        $this->assertEquals(0, Timer::countCronJobs());
+    }
+
+    public function testTimerAndCronIdsNeverCollide(): void
+    {
+        $timerId = Timer::forever(0.05, fn () => null);
+        $cronId  = Timer::cron('* * * * *', fn () => null);
+
+        $this->assertNotEquals(
+            $timerId,
+            $cronId,
+            'timer 与 cron 必须来自同一 ID 序列，不得数值相撞（否则 del/pause 会删错对象）'
+        );
+
+        // del(timerId) 只删对应的 timer，不误伤 cron
+        $this->assertTrue(Timer::del($timerId));
+        $this->assertSame(0, Timer::countTimers());
+        $this->assertSame(1, Timer::countCronJobs());
+
+        // del(cronId) 只删 cron
+        $this->assertTrue(Timer::del($cronId));
+        $this->assertSame(0, Timer::countCronJobs());
+    }
+
     public function testCallbackExceptionDeliveredToErrorListener(): void
     {
         $captured = null;
