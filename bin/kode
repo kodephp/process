@@ -127,6 +127,10 @@ switch ($command) {
         }
         break;
 
+    case 'process':
+        runProcessCommand($argv);
+        break;
+
     case 'check':
         printRequirements();
         break;
@@ -152,6 +156,7 @@ Kode Process - 高性能 PHP 进程管理器
     restart <file>  平滑重启（停止旧进程并以新进程 detached 启动；不传 file 时沿用上次启动文件）
     reload          平滑重载
     status          查看状态
+    process         常驻进程运行器（start/stop/restart/status，见 `kode process help`）
     check           运行时依赖自检（各运行时所需扩展 / 缺失提示）
     info            版本信息
     help            显示帮助
@@ -173,6 +178,242 @@ Kode Process - 高性能 PHP 进程管理器
 
 HELP;
         break;
+}
+
+/**
+ * 常驻进程运行器命令：start / stop / restart / status。
+ *
+ * <file> 必须 `return` 一个 Kode\Process\Daemon\Daemon 实例（通过 Kode::daemon() 构造）。
+ * 命令行选项可覆盖 workers / every / cron / daemonize。
+ */
+function runProcessCommand(array $argv): void
+{
+    $sub = $argv[2] ?? 'help';
+
+    $pidFile = getenv('KODE_DAEMON_PID_FILE') ?: (sys_get_temp_dir() . '/kode-daemon.pid');
+    $cmdFile = getenv('KODE_DAEMON_CMD_FILE') ?: (sys_get_temp_dir() . '/kode-daemon.cmd');
+
+    switch ($sub) {
+        case 'start':
+            $file = $argv[3] ?? 'daemon.php';
+            $opts = parseProcessFlags(array_slice($argv, 4));
+
+            if (!file_exists($file)) {
+                echo "Error: Daemon file '{$file}' not found.\n";
+                echo "Usage: kode process start <file> [--daemon] [--workers=N] [--every=N] [--cron=expr]\n";
+                exit(1);
+            }
+
+            if (file_exists($pidFile) && isKodeMaster((int) file_get_contents($pidFile))) {
+                echo 'Daemon already running (PID: ' . file_get_contents($pidFile) . ")\n";
+                exit(1);
+            }
+
+            putenv('KODE_DAEMON_PID_FILE=' . $pidFile);
+            file_put_contents($cmdFile, $file);
+
+            echo "Starting daemon from {$file}...\n";
+            $daemon = require $file;
+
+            if (!$daemon instanceof \Kode\Process\Daemon\Daemon) {
+                echo "Error: daemon file must `return` a Kode\\Process\\Daemon\\Daemon instance.\n";
+                @unlink($cmdFile);
+                exit(1);
+            }
+
+            if (isset($opts['workers'])) {
+                $daemon->workers((int) $opts['workers']);
+            }
+            if (isset($opts['every'])) {
+                $daemon->every((float) $opts['every']);
+            }
+            if (isset($opts['cron'])) {
+                $daemon->cron($opts['cron']);
+            }
+            if (isset($opts['daemon'])) {
+                $daemon->daemonize(true);
+            }
+
+            $daemon->pidFile($pidFile)->run();
+            break;
+
+        case 'stop':
+            if (!file_exists($pidFile)) {
+                echo "No daemon PID file found. Is it running?\n";
+                exit(1);
+            }
+
+            $pid = (int) file_get_contents($pidFile);
+
+            if (!isKodeMaster($pid)) {
+                echo "Stale PID file (process not a running kode daemon). Cleaning up.\n";
+                unlink($pidFile);
+                @unlink($cmdFile);
+                exit(1);
+            }
+
+            posix_kill($pid, Signal::TERM);
+            for ($i = 0; $i < 50; $i++) {
+                if (!@posix_kill($pid, 0)) {
+                    break;
+                }
+                usleep(100_000);
+            }
+            if (@posix_kill($pid, 0)) {
+                @posix_kill($pid, SIGKILL);
+            }
+            unlink($pidFile);
+            @unlink($cmdFile);
+            echo "Daemon stopped (PID: {$pid})\n";
+            break;
+
+        case 'restart':
+            $file = $argv[3] ?? null;
+            restartDaemon($file);
+            break;
+
+        case 'status':
+            if (!file_exists($pidFile)) {
+                echo "Daemon is not running.\n";
+                exit(0);
+            }
+
+            $pid = (int) file_get_contents($pidFile);
+
+            if (isKodeMaster($pid)) {
+                echo "Daemon is running (PID: {$pid})\n";
+            } else {
+                echo "Daemon is not running (stale PID file).\n";
+                unlink($pidFile);
+                @unlink($cmdFile);
+                exit(1);
+            }
+            break;
+
+        case 'help':
+        default:
+            echo <<<'HELP'
+Kode Process - 常驻进程运行器 (Daemon)
+
+用法:
+    kode process start <file> [options]   启动常驻运行器（<file> 须 return 一个 Daemon 实例）
+    kode process stop                     停止运行器
+    kode process restart [file]           平滑重启（detached 重启；不传 file 沿用上次文件）
+    kode process status                   查看运行状态
+
+选项 (start):
+    --daemon          脱离终端常驻
+    --workers=N       覆盖 worker 子进程数
+    --every=N         覆盖周期间隔（秒）
+    --cron=expr       覆盖为 cron 表达式（如 '0 * * * *'）
+
+示例:
+    kode process start daemon.php --workers=4 --every=5
+    kode process start daemon.php --daemon --cron='0 0 * * *'
+    kode process stop
+    kode process status
+
+HELP;
+            break;
+    }
+}
+
+/**
+ * 解析 process start 的 CLI 选项（--key=value 或 --flag）。
+ *
+ * @return array<string, mixed>
+ */
+function parseProcessFlags(array $args): array
+{
+    $opts = [];
+
+    foreach ($args as $arg) {
+        if (!str_starts_with($arg, '--')) {
+            continue;
+        }
+
+        $kv = substr($arg, 2);
+
+        if (str_contains($kv, '=')) {
+            [$k, $v] = explode('=', $kv, 2);
+            $opts[$k] = $v;
+        } else {
+            $opts[$kv] = true;
+        }
+    }
+
+    return $opts;
+}
+
+/**
+ * 平滑重启 daemon：停止旧进程，再以 detached 方式启动新进程。
+ */
+function restartDaemon(?string $file): void
+{
+    $pidFile = getenv('KODE_DAEMON_PID_FILE') ?: (sys_get_temp_dir() . '/kode-daemon.pid');
+    $cmdFile = getenv('KODE_DAEMON_CMD_FILE') ?: (sys_get_temp_dir() . '/kode-daemon.cmd');
+
+    if ($file === null && file_exists($cmdFile)) {
+        $file = file_get_contents($cmdFile);
+    }
+    $file = $file ?: 'daemon.php';
+
+    if (!file_exists($file)) {
+        echo "Error: Daemon file '{$file}' not found.\n";
+        echo "Usage: kode process restart <file>\n";
+        exit(1);
+    }
+
+    if (file_exists($pidFile)) {
+        $pid = (int) file_get_contents($pidFile);
+        if (isKodeMaster($pid)) {
+            echo "Stopping old daemon (PID: {$pid})...\n";
+            @posix_kill($pid, Signal::TERM);
+            for ($i = 0; $i < 50; $i++) {
+                if (!@posix_kill($pid, 0)) {
+                    break;
+                }
+                usleep(100_000);
+            }
+            if (@posix_kill($pid, 0)) {
+                @posix_kill($pid, SIGKILL);
+                for ($i = 0; $i < 20; $i++) {
+                    if (!@posix_kill($pid, 0)) {
+                        break;
+                    }
+                    usleep(100_000);
+                }
+            }
+        }
+        if (!@posix_kill($pid, 0)) {
+            @unlink($pidFile);
+            @unlink($cmdFile);
+        }
+    }
+
+    $php = escapeshellarg(PHP_BINARY);
+    $bin = escapeshellarg(__DIR__ . '/kode');
+    $arg = escapeshellarg($file);
+    exec("nohup {$php} {$bin} process start {$arg} >/dev/null 2>&1 &");
+
+    $newPid = 0;
+    for ($i = 0; $i < 50; $i++) {
+        if (file_exists($pidFile)) {
+            $candidate = (int) file_get_contents($pidFile);
+            if ($candidate > 0 && @posix_kill($candidate, 0)) {
+                $newPid = $candidate;
+                break;
+            }
+        }
+        usleep(100_000);
+    }
+
+    if ($newPid > 0) {
+        echo "Daemon restarted (PID: {$newPid}, file: {$file})\n";
+    } else {
+        echo "Restart launched but new daemon did not become ready. Check logs.\n";
+        exit(1);
+    }
 }
 
 /**

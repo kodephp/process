@@ -40,6 +40,7 @@ Kode Process 是一个「进程编排内核 + 多运行时兼容层」：你只�
 | 🧵 **多线程并行** | 真正的 CPU 多线程（需 ZTS + ext-parallel），与协程桥接 |
 | 🪶 **协程** | 委托 `kode/fibers`，单线程 I/O 并发 |
 | ⏱️ **定时器** | 一次性、周期、Cron |
+| 🏃 **常驻进程运行器 (Daemon)** | 基于 `Process::fork()` + `Timer` 的轻量多进程周期任务运行器，自带监督 / 异常重生 / 优雅退出，避开官方 worker 池回调空转陷阱 |
 | 📨 **队列** | 委托 `kode/queue`，内存 / 同步 / Redis / 数据库多后端 |
 | 🔒 **SSL/TLS** | 通过监听选项配置，随宿主运行时生效 |
 | 🩺 **部署自检** | `Kode::diagnose()` 一键列出可用运行时 / 事件循环 / 共享表后端 / 并行(ZTS) / 集群后端 能力 |
@@ -349,6 +350,46 @@ Kode::queue()->register('send_email', function (array $data) {
 
 > 一句话：**定时「触发」用集群锁/选举去重；业务「执行」用 Redis 队列保持久。** 两者互补，而非替代。
 
+## 常驻进程运行器 (Daemon)
+
+> ⚠️ **为什么不直接用 `Kode\Process::start($config, $cb)` 跑周期任务？**
+> 官方 worker 池（`WorkerProcess`）的事件循环里 `processTasks()` **从不调用用户回调**——
+> 回调只在外部 `assignTask()` 推任务时触发。所以 `Process::start($config, fn()=>...)` 传入的回调在
+> worker 里实际是**空转**，并不适合「每进程周期执行自定义任务」。要可靠地常驻跑任务，请用本运行器。
+
+`Kode::daemon()` 只依赖两个原语——**`Process::fork()`（多进程）+ `Timer`（周期/定时调度）**——
+自建「监督进程 + N 个 worker 子进程」：worker 在独立事件循环里真正执行你的任务，监督进程负责
+信号、回收僵尸、异常退出重生（带上限防 fork bomb）、优雅退出。完全不碰 Master/Worker 池。
+
+```php
+<?php
+require __DIR__ . '/vendor/autoload.php';
+
+use Kode\Process\Kode;
+
+Kode::daemon()
+    ->task(fn () => file_put_contents('/tmp/tick', date('c') . "\n", FILE_APPEND))
+    ->every(5)                 // 每 5 秒；或 ->cron('0 * * * *')
+    ->workers(4)              // 4 个 worker 子进程并行跑
+    ->daemonize()             // 脱离终端常驻（可选）
+    ->pidFile('/var/run/app.pid')
+    ->run();
+```
+
+daemon 文件（`return` 一个 `Daemon` 实例）配合 CLI 子命令管理生命周期：
+
+```bash
+kode process start daemon.php --workers=4 --every=5     # 启动（前台）
+kode process start daemon.php --daemon --cron='0 0 * * *' # 脱离终端常驻
+kode process status                                     # 查看状态
+kode process stop                                       # 优雅停止（TERM → 回收 worker → 清理 PID）
+kode process restart daemon.php                         # 平滑重启（detached）
+```
+
+> 与「多进程定时任务重复执行」的关系：Daemon 解决的是**单机上 N 个 worker 各自可靠地周期跑任务**；
+> 若还要跨进程/跨机「同一时刻只跑一次」，仍用 `Kode::cronCluster()`（集群锁）或
+> `Kode::tickCronOnLeader()`（Leader 选举）去重，二者可叠加。详见 [docs/daemon.md](docs/daemon.md)。
+
 ## 队列系统
 
 ```php
@@ -440,6 +481,7 @@ kode info              # 版本信息
 - [共享数据](docs/global-data.md)
 - [并行（多线程）](docs/parallel.md)
 - [定时器](docs/timer.md)
+- [常驻进程运行器 (Daemon)](docs/daemon.md)
 - [队列系统](docs/queue.md)
 - [信号管理](docs/signal.md)
 - [监控（进程 / 心跳 / 文件）](docs/monitor.md)

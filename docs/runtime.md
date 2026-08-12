@@ -387,6 +387,7 @@ if ($rt->supports(Capability::Coroutine)) {
 | **SelectLoop 惰性 prune（v5.2.28）** | 默认兜底事件循环（未装 ext-event/ev 的环境走它）旧实现**每次 `select()` 前**都全量 `pruneInvalidStreams()`，即每 tick 一次 O(N) `is_resource` 扫描。实测 `stream_select` 传入已关闭资源会抛 `ValueError`（`@` 无法抑制），故改为**惰性 prune**：正常 tick 零扫描直接 `stream_select`；仅当流被外部 `fclose` 未调 `off*` 抛 `ValueError` 时，才 `catch` 一次、剔除失效流、重建集合并重试。稳态每 tick 用户态开销 O(N)→O(1)；异常路径仍 fail-soft。N=2000、每 10万 tick 省约 **1416ms** 用户态扫描。行为由 `SelectLoopTest::testSelectLazilyPrunesExternallyClosedStream`（不抛 + 失效流被惰性剔除）与 `testSelectKeepsValidStreamsAcrossManyTicks`（多 tick 有效流不误伤）守护 |
 | **SelectLoop FD_SETSIZE 状态健壮暴露（v5.2.29）** | `stream_select` 底层 bitset 受 `FD_SETSIZE`（通常 1024）限制，fd≥1024 的流会让 select 失败并退化为每 tick 空转——这是平台限制而非代码缺陷。v5.2.29 起，FD_SETSIZE 状态在**注册期**（`guardFdLimit`）与**运行期 select 失败**两处都能暴露，且经统一 `fdSetSizeWarned` 标志保证全生命周期**只告警一次**，既不让用户无感知地空转，也不刷屏。运行期检测用 `hasFdAtOrAboveSetSize()` 精准判定（集合里确含 ≥1024 的 fd 才告警，避免 EINTR 等误报）。契约由 `SelectLoopTest::testFdSetSizeWarningFiresExactlyOnce` 守护 |
 | **PID 文件由 master 写** | 见下方 CLI 小节 |
+| **常驻进程运行器 Daemon（v5.2.30）** | 官方 worker 池 `WorkerProcess::processTasks()` 在事件循环里**从不调用用户回调**（仅响应外部 `assignTask()`），导致 `Process::start($config, $cb)` 传入的周期任务实际空转（见 [daemon.md](./daemon.md) 的「为什么不用 `Process::start`」）。v5.2.30 新增 `Kode::daemon()`：只依赖 `Process::fork()` + `Timer` 两个原语，自建「监督进程 + N 个 worker 子进程」——worker 在独立事件循环里真正执行任务，监督进程负责信号、回收僵尸、异常退出重生（带 `maxRestarts` 上限防 fork bomb）、优雅退出；并提供 `kode process start/stop/restart/status` 子命令管理生命周期。契约由 `DaemonTest`（worker 经 fork 由 Timer 执行任务、`stopAllWorkers` 杀子进程、重生预算）与 `BinKodeTest::testProcessStartStopSmoke`（端到端 start→status→stop）守护 |
 
 ## 环境自检
 
@@ -442,6 +443,10 @@ php bin/kode check
 | `kode status` | 查看运行状态 |
 | `kode check` | 运行时依赖自检（各运行时所需扩展 / 缺失提示） |
 | `kode info` | 版本信息 |
+| `kode process start <file>` | 启动常驻运行器（`<file>` 须 `return` 一个 `Daemon` 实例），支持 `--daemon` / `--workers=N` / `--every=N` / `--cron=expr` |
+| `kode process stop` | 优雅停止常驻运行器（TERM → 回收 worker → 清理 PID） |
+| `kode process restart <file>` | 平滑重启（detached 重启；不传 `file` 沿用上次启动文件） |
+| `kode process status` | 查看常驻运行器运行状态 |
 
 > `restart` 内部先向旧 master 发 `SIGTERM` 并等待其退出，再用 `nohup ... &` 以脱离当前进程组的方式
 > 启动新进程，因此可在 CI / 部署脚本中安全调用，不会因调用方退出而连累新服务。

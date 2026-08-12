@@ -14,6 +14,7 @@ use Kode\Process\Reactor\LoopInterface;
 use Kode\Process\Async\Async;
 use Kode\Process\Async\EventEmitter;
 use Kode\Process\Crontab\ClusterCron;
+use Kode\Process\Daemon\Daemon;
 use Kode\Process\Debug\StatusMonitor;
 use Kode\Process\Queue\QueueManager;
 use Kode\Process\Runtime\RuntimeInterface;
@@ -407,6 +408,27 @@ final class Kode
     public static function tickCronOnLeader(string $name = 'scheduler', float $electionTtl = 15.0): void
     {
         ClusterCron::tickOnLeader($name, $electionTtl);
+    }
+
+    /**
+     * 轻量常驻进程运行器（基于 Process::fork + Timer，不依赖 Master/Worker 池）。
+     *
+     * 官方 worker 池（{@see \Kode\Process\Process::start()}）的回调在事件循环里从不主动执行，
+     * 仅响应外部 {@see \Kode\Process\Worker\WorkerProcess::assignTask()}，不适合「每进程周期跑自定义任务」。
+     * 本运行器只用两个原语自建监督进程 + N 个 worker 子进程，由 {@see Timer} 真正周期执行任务：
+     *
+     * ```php
+     * Kode::daemon()
+     *     ->task(fn () => /* ... *\/)
+     *     ->every(5)->workers(4)->daemonize()
+     *     ->run();
+     * ```
+     *
+     * @param LoggerInterface|null $logger 传入则 worker 日志走它；null 用 NullLogger
+     */
+    public static function daemon(?LoggerInterface $logger = null): Daemon
+    {
+        return Daemon::define($logger);
     }
 
     /**
