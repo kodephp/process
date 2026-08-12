@@ -169,4 +169,29 @@ final class DaemonTest extends TestCase
         $prop->setValue($daemon, [0 => 3]);
         $this->assertTrue($method->invoke($daemon, 0), '超过上限应判定超限');
     }
+
+    public function testHealthyWindowResetsStaleRestartCount(): void
+    {
+        $daemon = Daemon::define()->task(fn () => null)->healthyWindow(60);
+
+        $rc = new \ReflectionClass($daemon);
+        $spawnAt = $rc->getProperty('childSpawnAt');
+        $spawnAt->setAccessible(true);
+        $restart = $rc->getProperty('restartCount');
+        $restart->setAccessible(true);
+        $bump = $rc->getMethod('bumpRestartCount');
+        $bump->setAccessible(true);
+
+        // 槽位已健康存活 100 秒（远超 60 秒窗口）→ 旧计数清零后 +1
+        $restart->setValue($daemon, [0 => 5]);
+        $spawnAt->setValue($daemon, [0 => microtime(true) - 100]);
+        $bump->invoke($daemon, 0);
+        $this->assertSame(1, $restart->getValue($daemon)[0], '健康存活超窗口后应从 0 重新累计');
+
+        // 槽位刚派生 1 秒（未达窗口）→ 不清零，直接 +1
+        $restart->setValue($daemon, [0 => 2]);
+        $spawnAt->setValue($daemon, [0 => microtime(true) - 1]);
+        $bump->invoke($daemon, 0);
+        $this->assertSame(3, $restart->getValue($daemon)[0], '未达健康窗口不应清零');
+    }
 }

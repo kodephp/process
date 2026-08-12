@@ -66,6 +66,9 @@ final class Daemon
     /** 重生前的退避延迟（秒） */
     private float $restartDelay = 0.1;
 
+    /** worker 健康存活达到该秒数后，累计重生计数清零（视为已稳定） */
+    private float $healthyWindow = 60.0;
+
     private LoggerInterface $logger;
 
     // ---------------------------------------------------------- 运行时状态
@@ -73,8 +76,11 @@ final class Daemon
     /** slot => 子进程 pid */
     private array $childPids = [];
 
-    /** slot => 累计重生次数 */
+    /** slot => 累计重生次数（worker 健康存活超过窗口后清零，避免长期运行缓慢逼近上限） */
     private array $restartCount = [];
+
+    /** slot => 本次派生时刻（microtime），用于判定是否达到「健康窗口」 */
+    private array $childSpawnAt = [];
 
     /** 监督进程是否正在退出 */
     private bool $stopping = false;
@@ -154,6 +160,21 @@ final class Daemon
     public function maxRestarts(int $n): self
     {
         $this->maxRestarts = max(0, $n);
+
+        return $this;
+    }
+
+    /**
+     * 设置健康窗口（秒）：worker 连续存活超过该时长后，累计重生计数清零。
+     * 防止长期运行下历史偶发崩溃缓慢逼近 maxRestarts 上限。
+     */
+    public function healthyWindow(float $seconds): self
+    {
+        if ($seconds < 0) {
+            throw new \InvalidArgumentException('healthyWindow() 必须 >= 0');
+        }
+
+        $this->healthyWindow = $seconds;
 
         return $this;
     }
@@ -278,8 +299,8 @@ final class Daemon
                     continue;
                 }
 
-                // 异常退出 → 带上限重生
-                $this->restartCount[$slot] = ($this->restartCount[$slot] ?? 0) + 1;
+                // 异常退出 → 带上限重生（含健康窗口重置逻辑）
+                $this->bumpRestartCount($slot);
 
                 if ($this->exceedsRestartBudget($slot)) {
                     $this->logger->error('Daemon worker 重生次数超限，放弃该槽位', [
@@ -314,6 +335,19 @@ final class Daemon
         return ($this->restartCount[$slot] ?? 0) > $this->maxRestarts;
     }
 
+    /**
+     * 递增单槽重生计数；若该槽位已健康存活超过 healthyWindow，先清零旧计数再 +1。
+     */
+    private function bumpRestartCount(int $slot): void
+    {
+        if (($this->childSpawnAt[$slot] ?? 0) > 0
+            && (microtime(true) - $this->childSpawnAt[$slot]) >= $this->healthyWindow) {
+            $this->restartCount[$slot] = 0;
+        }
+
+        $this->restartCount[$slot] = ($this->restartCount[$slot] ?? 0) + 1;
+    }
+
     private function spawnWorker(int $slot): void
     {
         $pid = Process::fork(function () use ($slot): void {
@@ -322,6 +356,7 @@ final class Daemon
 
         $this->childPids[$slot] = $pid;
         $this->restartCount[$slot] ??= 0;
+        $this->childSpawnAt[$slot] = microtime(true);
 
         $this->logger->info('Daemon worker 已启动', [
             'slot' => $slot,

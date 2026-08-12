@@ -388,6 +388,7 @@ if ($rt->supports(Capability::Coroutine)) {
 | **SelectLoop FD_SETSIZE 状态健壮暴露（v5.2.29）** | `stream_select` 底层 bitset 受 `FD_SETSIZE`（通常 1024）限制，fd≥1024 的流会让 select 失败并退化为每 tick 空转——这是平台限制而非代码缺陷。v5.2.29 起，FD_SETSIZE 状态在**注册期**（`guardFdLimit`）与**运行期 select 失败**两处都能暴露，且经统一 `fdSetSizeWarned` 标志保证全生命周期**只告警一次**，既不让用户无感知地空转，也不刷屏。运行期检测用 `hasFdAtOrAboveSetSize()` 精准判定（集合里确含 ≥1024 的 fd 才告警，避免 EINTR 等误报）。契约由 `SelectLoopTest::testFdSetSizeWarningFiresExactlyOnce` 守护 |
 | **PID 文件由 master 写** | 见下方 CLI 小节 |
 | **常驻进程运行器 Daemon（v5.2.30）** | 官方 worker 池 `WorkerProcess::processTasks()` 在事件循环里**从不调用用户回调**（仅响应外部 `assignTask()`），导致 `Process::start($config, $cb)` 传入的周期任务实际空转（见 [daemon.md](./daemon.md) 的「为什么不用 `Process::start`」）。v5.2.30 新增 `Kode::daemon()`：只依赖 `Process::fork()` + `Timer` 两个原语，自建「监督进程 + N 个 worker 子进程」——worker 在独立事件循环里真正执行任务，监督进程负责信号、回收僵尸、异常退出重生（带 `maxRestarts` 上限防 fork bomb）、优雅退出；并提供 `kode process start/stop/restart/status` 子命令管理生命周期。契约由 `DaemonTest`（worker 经 fork 由 Timer 执行任务、`stopAllWorkers` 杀子进程、重生预算）与 `BinKodeTest::testProcessStartStopSmoke`（端到端 start→status→stop）守护 |
+| **Daemon 重生计数健康窗口（v5.2.31）** | v5.2.30 的重生计数 `restartCount` 是**按槽位永久累计**的，长期运行下历史偶发崩溃会缓慢逼近 `maxRestarts` 上限。v5.2.31 引入 `healthyWindow`（默认 60s）：worker 连续健康存活超过该窗口后，下次异常退出时累计计数**先清零再 +1**，即旧崩溃不再计入。这避免长生命周期下「偶发崩溃 → 逼近上限 → 槽位被放弃」的缓慢退坡。可用 `->healthyWindow(秒)` 调整；契约由 `DaemonTest::testHealthyWindowResetsStaleRestartCount` 守护 |
 
 ## 环境自检
 
