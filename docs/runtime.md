@@ -228,6 +228,9 @@ $conn->beginChunked(int $status = 200, array $headers = []): bool
 $conn->chunk(string $data): bool
 $conn->endChunk(): bool
 $conn->isChunkStarted(): bool
+
+// 发送 PSR-7 响应对象（Psr\Http\Message\ResponseInterface），应用层与传输层桥接
+$conn->sendResponse(\Psr\Http\Message\ResponseInterface $response, bool $autoGzip = true): bool
 ```
 
 ### HTTP 流式响应（Transfer-Encoding: chunked）
@@ -275,6 +278,37 @@ $conn->gzip($bigJson, 200, ['Content-Type' => 'application/json']);
 - **非 HTTP 连接**（`tcp` / `websocket` / `text`）调用 `gzip()` 等价 `send()`，语义自动降级。
 - 实现差异被隐藏：Native / Workerman 拼完整压缩响应报文；Swoole HTTP 模式经 `gzencode` 后由 `Swoole\Http\Response` 发出——统一抽象掩盖了差异。
 - 兼容 `Accept-Encoding: gzip, deflate`；`gzip;q=0` 视为拒绝，不压缩。
+
+### 发送 PSR-7 响应（应用层桥接）
+
+若你在上层使用 `kode/http` 等提供 `Psr\Message\ResponseInterface` 的实现（路由、中间件产出
+的 HTTP 响应），可直接把它桥接回当前连接，无需手动拆状态码 / 头 / 体：
+
+```php
+use Psr\Http\Message\ResponseInterface;
+
+Kode::serve('http://0.0.0.0:8080', ['workers' => 4])
+    ->on('message', function ($conn, $req) use ($app): void {
+        $psr = $app->handle($req);          // 任意 Psr\Http\Message\ResponseInterface
+        $conn->sendResponse($psr);          // 序列化为 HTTP 报文并写回，三运行时零改动
+    })
+    ->start();
+```
+
+要点：
+
+- **零改动跨运行时**：`sendResponse()` 把 PSR-7 响应统一序列化为完整 HTTP 报文——Native /
+  Workerman 走裸字节写出，Swoole HTTP 模式走原生 `status/header/end`，HTTP/2 走 HEADERS + DATA
+  帧。业务代码在三种运行时下写法完全一致。
+- **头部清洗（防响应拆分）**：底层复用 `HttpProtocol::headerLine()`，剔除头名 / 头值中的
+  CR / LF / NUL；PSR-7 未提供原因短语时回退到标准原因文本（与 `HttpProtocol::getStatusText` 一致）。
+- **同名多值头**：多个 `Set-Cookie` 等逐条输出（HTTP/1.1 多条头行；HTTP/2 多个同名头对），不塌缩。
+- **Content-Length 自动补 / 保留**：响应缺失时自动补 `Content-Length`，已显式声明则原样保留。
+- **自动 gzip**：`$autoGzip = true`（默认）时，若连接已声明接受 gzip（`isGzipAuto()`）且响应体
+  ≥ `GZIP_MIN_SIZE`(1 KB)，自动以 `Content-Encoding: gzip` 返回；响应已带 `Content-Encoding`
+  时不二次压缩。传 `false` 可强制原样输出。
+- **Swoole 限制**：HTTP 模式响应一次性写出（`responded` 置位后再次 `sendResponse` 返回 `false`），
+  且 Swoole 原生 API 不暴露自定义原因短语（使用对应状态码的默认原因短语）。
 
 ## 异步任务（Task）
 

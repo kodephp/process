@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace Kode\Process\Runtime\Driver;
 
+use Kode\Process\Http\Psr7Response;
 use Kode\Process\Protocol\HttpProtocol;
 use Kode\Process\Runtime\ConnectionInterface;
+use Psr\Http\Message\ResponseInterface;
 
 /**
  * Swoole 连接适配。
@@ -73,6 +75,55 @@ final class SwooleConnection implements ConnectionInterface
         }
 
         return (bool)$this->server->send($this->fd, $data);
+    }
+
+    public function sendResponse(ResponseInterface $response, bool $autoGzip = true): bool
+    {
+        if ($this->response !== null) {
+            if ($this->responded) {
+                return false; // HTTP 响应只能写一次
+            }
+
+            $this->response->status($response->getStatusCode());
+
+            $gzip = $autoGzip && $this->gzipAuto && !$response->hasHeader('Content-Encoding');
+            $body = (string) $response->getBody();
+
+            foreach ($response->getHeaders() as $name => $values) {
+                $lower = strtolower((string) $name);
+                // gzip 下这两个头由本方法重写，原始声明跳过
+                if ($gzip && ($lower === 'content-length' || $lower === 'content-encoding')) {
+                    continue;
+                }
+                // 同名多值头（如多个 Set-Cookie）逐条写出：首个 replace=true 设值，后续 append
+                foreach ($values as $i => $value) {
+                    $this->response->header((string) $name, (string) $value, $i === 0);
+                }
+            }
+
+            if ($gzip && strlen($body) >= HttpProtocol::GZIP_MIN_SIZE) {
+                $gz = @gzencode($body, -1);
+                if ($gz !== false && $gz !== '') {
+                    $this->response->header('Content-Encoding', 'gzip');
+                    $this->response->header('Content-Length', (string) strlen($gz));
+                    $this->responded = true;
+                    $this->response->end($gz);
+                    return true;
+                }
+            }
+
+            // 显式补 Content-Length，便于下游（如 gzip 探测）依赖确定长度
+            if (!$response->hasHeader('Content-Length') && !$response->hasHeader('content-length')) {
+                $this->response->header('Content-Length', (string) strlen($body));
+            }
+
+            $this->responded = true;
+            $this->response->end($body);
+            return true;
+        }
+
+        // 非 HTTP 模式（裸 TCP / WebSocket）：降级为序列化裸字节发送
+        return $this->send(Psr7Response::toHttp11($response), true);
     }
 
     public function isGzipAuto(): bool

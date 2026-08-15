@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace Kode\Process\Runtime\Driver;
 
+use Kode\Process\Http\Psr7Response;
 use Kode\Process\Protocol\HttpProtocol;
 use Kode\Process\Runtime\ConnectionInterface;
+use Psr\Http\Message\ResponseInterface;
 
 /**
  * Workerman TcpConnection 的统一连接适配。
@@ -68,6 +70,18 @@ final class WorkermanConnection implements ConnectionInterface
             return false;
         }
         return (bool)$this->conn->send($compressed, true);
+    }
+
+    public function sendResponse(ResponseInterface $response, bool $autoGzip = true): bool
+    {
+        $doGzip = $autoGzip
+            && $this->gzipAuto
+            && !$this->chunkStarted
+            && Psr7Response::bodySize($response) >= HttpProtocol::GZIP_MIN_SIZE;
+
+        $bytes = Psr7Response::toHttp11($response, $doGzip);
+
+        return (bool)$this->conn->send($bytes, true);
     }
 
     public function isChunkStarted(): bool

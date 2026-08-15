@@ -300,4 +300,11 @@ final class RecordingConnection implements ConnectionInterface
     {
         return false;
     }
+
+    public function sendResponse(\Psr\Http\Message\ResponseInterface $response, bool $autoGzip = true): bool
+    {
+        $this->sent[] = (string) $response->getBody();
+
+        return true;
+    }
 }

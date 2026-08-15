@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace Kode\Process\Runtime\Driver;
 
+use Kode\Process\Http\Psr7Response;
 use Kode\Process\Protocol\Http2\Frame;
 use Kode\Process\Protocol\Http2\Http2Session;
 use Kode\Process\Protocol\HttpProtocol;
 use Kode\Process\Reactor\LoopInterface;
 use Kode\Process\Runtime\ConnectionInterface;
+use Psr\Http\Message\ResponseInterface;
 
 /**
  * 自研（Native）运行时的连接对象。
@@ -201,6 +203,21 @@ final class NativeConnection implements ConnectionInterface
         return $this->write(
             HttpProtocol::encodeCompressed(['status' => $status, 'headers' => $headers, 'body' => $data])
         );
+    }
+
+    public function sendResponse(ResponseInterface $response, bool $autoGzip = true): bool
+    {
+        if ($this->closed) {
+            return false;
+        }
+
+        // 已开启 chunked 流式时不再叠加完整 PSR-7 响应，二者语义互斥
+        $doGzip = $autoGzip
+            && $this->gzipAuto
+            && !$this->httpChunkStarted
+            && Psr7Response::bodySize($response) >= HttpProtocol::GZIP_MIN_SIZE;
+
+        return $this->write(Psr7Response::toHttp11($response, $doGzip));
     }
 
     /** 写裸字节，跳过协议编码（WebSocket 握手响应、SSL 前置等场景） */

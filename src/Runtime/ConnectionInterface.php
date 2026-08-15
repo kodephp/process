@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Kode\Process\Runtime;
 
+use Psr\Http\Message\ResponseInterface;
+
 /**
  * 跨运行时统一的连接抽象。
  *
@@ -25,6 +27,20 @@ interface ConnectionInterface
      * @return bool 是否成功写入（或已进入发送缓冲）
      */
     public function send(string $data, bool $raw = false): bool;
+
+    /**
+     * 发送一个 PSR-7 响应对象（Psr\Http\Message\ResponseInterface）。
+     *
+     * 把应用层 PSR-7 响应桥接回当前连接：Native / Workerman 模式下序列化为完整
+     * HTTP/1.1 报文裸字节写出；Swoole HTTP 模式走原生 `status/header/end`。
+     * 复用 HttpProtocol 的头部清洗（防响应拆分）与原因短语回退，与包内其它
+     * 响应路径保持一致。同名多值头（如多个 `Set-Cookie`）逐条输出。
+     *
+     * @param bool $autoGzip true 时依据连接是否已声明接受 gzip（{@see isGzipAuto}）
+     *                       且响应体达压缩阈值自动压缩；false 则原样输出。
+     * @return bool 是否成功写入（或已进入发送缓冲）
+     */
+    public function sendResponse(ResponseInterface $response, bool $autoGzip = true): bool;
 
     /**
      * 关闭连接。

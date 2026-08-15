@@ -9,6 +9,7 @@
 | `Kode\Process\Response` | 业务/进程内核 | 通用 API 结果**信封值对象** | 否 |
 | `Kode\Process\Async\HttpResponse` | 传输（出站客户端） | 进程作为 HTTP 客户端拿到的**响应** | 否 |
 | `Kode\Process\Protocol\HttpProtocol::encode()` | 传输（服务端线级） | 直接对外提供 HTTP 时生成的**原始报文** | 否 |
+| `Kode\Process\Http\Psr7Response` + `ConnectionInterface::sendResponse()` | 传输（服务端线级桥接） | 把 PSR-7 响应**桥接**回当前连接写出的**序列化器 + 连接方法** | 否 |
 | `kode/http` 的 `Psr\Http\Message\ResponseInterface` | 应用层（HTTP 服务） | 路由/中间件产出的**HTTP 响应** | 是 |
 
 ## 1. `Kode\Process\Response` —— 通用 API 信封
@@ -38,6 +39,25 @@
 - 同家族 `kode/http` 提供路由 + 中间件 + PSR-7 实现，其 `Response` 实现 `Psr\Http\Message\ResponseInterface`（status code / headers / body / stream）。
 - 在 Swoole / 协程非阻塞服务器中，PSR-7 响应由 handler 产出并在事件循环内 flush，**不阻塞 worker**。
 - process 的传输层位于其下方：process 不替代 kode/http，二者通过"信封 vs 报文"协作。
+
+## 5. `Psr7Response` + `sendResponse` —— PSR-7 桥接
+
+- 路径：`src/Http/Psr7Response.php`（`final class`），`ConnectionInterface::sendResponse()` 是其连接侧入口。
+- 用途：**把应用层 PSR-7 响应（来自 kode/http 等实现）桥接回 process 的连接写出去**，让同一份
+  handler 在 Native / Swoole / Workerman / HTTP/2 四种运行时下写法完全一致。
+- 它**不是** PSR-7 实现，而是"PSR-7 对象 → 线级字节"的**序列化器**（与 `HttpProtocol::encode` 同层）。
+  复用后者的两处硬化点：头部 CR/LF/NUL 清洗（防响应拆分）、原因短语回退。
+
+序列化语义：
+
+- 状态行 `HTTP/{protocol} {code} {reason}`；PSR-7 未给原因短语时回退 `HttpProtocol::getStatusText()`。
+- 头：同名多值头（如多个 `Set-Cookie`）逐条输出为独立头行。
+- `Content-Length`：响应缺失时自动补，已显式声明则原样保留。
+- gzip（`toHttp11($resp, true)`）：压缩响应体并设 `Content-Encoding: gzip` + 压缩后 `Content-Length`；
+  跳过原始 `Content-Length` / `Content-Encoding`；压缩失败安全回退；响应已带 `Content-Encoding` 不二次压缩。
+- 连接层 `sendResponse($response, $autoGzip = true)`：Native / Workerman 序列化为字节 raw 写出；
+  Swoole HTTP 模式走原生 `status/header/end`；HTTP/2 走 HEADERS + DATA。自动 gzip 由连接的
+  `isGzipAuto()` 与体量阈值共同决定。详见 `docs/runtime.md` 的「发送 PSR-7 响应」一节。
 
 ## 如何桥接
 

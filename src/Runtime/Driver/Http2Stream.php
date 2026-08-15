@@ -7,6 +7,7 @@ namespace Kode\Process\Runtime\Driver;
 use Kode\Process\Protocol\Http2\Http2Session;
 use Kode\Process\Protocol\HttpProtocol;
 use Kode\Process\Runtime\ConnectionInterface;
+use Psr\Http\Message\ResponseInterface;
 
 /**
  * HTTP/2 单条流的连接视图。
@@ -215,6 +216,40 @@ final class Http2Stream implements ConnectionInterface
     public function isGzipAuto(): bool
     {
         return $this->gzipAuto;
+    }
+
+    public function sendResponse(ResponseInterface $response, bool $autoGzip = true): bool
+    {
+        if ($this->closed || $this->responded) {
+            return false;
+        }
+
+        $status = $response->getStatusCode();
+        $body   = (string) $response->getBody();
+
+        // PSR-7 getHeaders() 返回 name => list<string>，normalizeHeaders 保留同名多值（如多个 Set-Cookie）
+        $pairs = Http2Session::normalizeHeaders($response->getHeaders());
+
+        $doGzip = $autoGzip
+            && $this->gzipAuto
+            && !$response->hasHeader('Content-Encoding')
+            && strlen($body) >= HttpProtocol::GZIP_MIN_SIZE;
+
+        if ($doGzip) {
+            $encoded = @gzencode($body, -1);
+            if ($encoded !== false && $encoded !== '') {
+                $body    = $encoded;
+                $pairs[] = ['content-encoding', 'gzip'];
+            }
+        }
+
+        $pairs[] = ['content-length', (string) strlen($body)];
+
+        $this->responded   = true;
+        $this->headersSent = true;
+        $this->session->respond($this->streamId, $status, $pairs, $body);
+
+        return $this->parent->flushHttp2();
     }
 
     // ---------------------------------------------------------------- 生命周期
