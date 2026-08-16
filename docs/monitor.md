@@ -112,7 +112,7 @@ use Kode\Process\Monitor\FileMonitor;
 
 $monitor = FileMonitor::watch([__DIR__ . '/src'], function (array $changes): void {
     // $changes = ['added' => [...], 'modified' => [...], 'deleted' => [...]]
-    Kode::reload();
+    Kode::runtime()->reload();
 });
 
 $monitor->setExtensions(['.php', '.env'])

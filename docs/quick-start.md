@@ -113,3 +113,16 @@ Kode::emitter()->on('task.done', fn($id) => echo "任务 $id 完成\n");
 ```
 
 `Kode::diagnose()` 可在部署前一键自检运行时、事件循环、共享表后端与并行（ZTS）能力。
+
+---
+
+## 相关文档
+
+- [运行时（Runtime）](runtime.md)：统一 API、三运行时（Native/Swoole/Workerman）、连接抽象、发送 PSR-7 响应
+- [异步（Async）](async.md)：Promise / 定时器 / 并发原语 / EventEmitter / 异步 HTTP 客户端
+- [并行（Parallel）](parallel.md)：CPU 并行与协程的结合
+- [集群（Cluster）](cluster.md)：分布式锁 / 选举 / 限流 / Snowflake / RPC
+- [HTTP 请求对象](request.md) · [响应对象边界](response.md)
+- [定时器](timer.md) · [队列](queue.md) · [协议](protocol.md) · [HTTP/2](http2.md)
+- [常驻进程（Daemon）](daemon.md) · [监控](monitor.md) · [信号处理](signal.md) · [生产部署](deployment.md)
+
