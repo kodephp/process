@@ -281,7 +281,7 @@ $conn->gzip($bigJson, 200, ['Content-Type' => 'application/json']);
 
 ### 发送 PSR-7 响应（应用层桥接）
 
-若你在上层使用 `kode/http` 等提供 `Psr\Message\ResponseInterface` 的实现（路由、中间件产出
+若你在上层使用 `kode/http` 等提供 `Psr\Http\Message\ResponseInterface` 的实现（路由、中间件产出
 的 HTTP 响应），可直接把它桥接回当前连接，无需手动拆状态码 / 头 / 体：
 
 ```php
@@ -386,7 +386,9 @@ if ($rt->supports(Capability::Coroutine)) {
   `maxRequest` 请求数回收、`heartbeat` 空闲连接回收。
 - **协议复用**：HTTP / WebSocket / Text / LengthPrefix / TCP 全部走本包 `Protocol` 协议栈。
 
-### 进程健壮性（v5.2.12）
+### 进程健壮性（运行时 / 进程级加固）
+
+下表聚焦 **Native 运行时的进程级容错与运维加固**（部分能力在 Swoole / Workerman 后端由对应引擎原生提供，业务代码零改动即可享受）。定时器 / 异步 / 协程 / 集群 / 监控等子系统的加固沿革见各自文档（[timer.md](./timer.md)、[parallel.md](./parallel.md)、[cluster.md](./cluster.md)、[monitor.md](./monitor.md)）。
 
 | 项 | 说明 |
 |----|------|
@@ -404,20 +406,6 @@ if ($rt->supports(Capability::Coroutine)) {
 | **Master 主循环错误边界（v5.2.21）** | `runEventLoop()` 单次迭代抽成 `tick()`，对 `pcntl_signal_dispatch` / `checkHeartbeat` / `checkMemory` / `checkWorkers` / 自动重启**每一步分别做 try/catch 隔离**——用户 heartbeat 回调或任一检查抛异常只记日志、绝不穿透外层循环崩掉 master（连带杀死所有 worker）。信号回调层此前已由 `SignalHandler::dispatch` 隔离 |
 | **子进程回收 / 僵尸处理（v5.2.22）** | `reapChildren()` 退出状态解读修正：先 `pcntl_wifsignaled` 再取 `pcntl_wtermsig`，避免被信号杀死的 worker 误用 `pcntl_wexitstatus` 得到垃圾退出码并触发 PHP warning（原实现缺陷）；结构化记录「正常退出 / 被信号终止(signal 名)」。并新增 **worker 自动重生**：worker 退出时若处于运行中且注入了 spawner（ProcessManager 默认注入 `WorkerPool::addWorker`），按稳定 slot 重生以维持池容量；连续异常退出超过上限（`maxRestartAttempts=5`）则停止重生并告警，防 fork bomb。干净退出（如达 max_requests）直接重生不计入崩溃上限。停止/重启阶段不重生（否则关不掉） |
 | **热重载边界（v5.2.23）** | `reload()`（HUP 触发）向 worker 发 USR1 前做边界隔离：仅向 `getState()===RUNNING` 的 worker 投递（`getState()` 是无副作用判活，不调用 `pcntl_waitpid` 干扰 CHLD 回收协议）；并跳过 `pid<=0` 或命中 master 自身 pid 的情况——原实现直接向所有 worker 的 pid 调 `posix_kill`，对已退出未重生的 stale pid 会命中内核回收的其它进程，且 `getPid()` 在 pid 为 0 时回退到 master 自身 pid、会误触发 master 的 USR1 日志轮转。失败记 warning 而非忽略。`posix_kill` 抽成 `deliverReloadSignal()` 便于测试 |
-| **Timer cron 自删崩溃 / ID 冲突（v5.2.24）** | `Timer::tick()` 的 cron 循环在回调内调用 `del/delAll` 自身后未复检，会写出缺键的残缺数组、下一 tick 访问 `expression/callback` 即崩溃——已对齐 timers 路径，在回调后 `isset` 复检再写入。另：timer 与 cron 原先各用独立自增 ID 序列，编号一旦数值相撞（如 timer#3 与 cron#3 共存）会使 `del/pause/resume/getTimer` 删/暂停错对象；现合并为单一 ID 序列从根本杜绝冲突 |
-| **Worker parentPid 误判自杀 / isRunning 抢收（v5.2.24）** | `WorkerProcess` 在 master 上下文构造时记录的 `parentPid` 是 master 的父进程（如启动 shell），fork 后子进程 `runWorkerProcess()` 未重设，导致 `checkParent()` 必误判父进程已退出而立即自杀并以退出码 0 触发无限重生（fork bomb）——已在子进程内把 `parentPid` 重置为真正父进程（master）的 pid。另：`isRunning()` 原用 `pcntl_waitpid(WNOHANG)` 探活会顺带回收退出状态，被 `MasterProcess::checkWorkers` 每 tick 调用后架空 SIGCHLD 驱动的回收与自动重生、且 pid 复用可能误杀无关进程——改为 `posix_kill(pid, 0)` 仅做存活探测，回收唯一出口保留在 `reapChildren()` |
-| **分布式锁 remaining() 续期 TTL（v5.2.24）** | `DistributedLock::remaining()` 只用只读构造属性 `$ttl` 计算剩余时间，`refresh($ttl)` 续期自定义 TTL 后不更新，导致续期后续航被误算成构造期的旧 TTL 立即归零（与存储层实际 TTL 不一致）。新增可变 `$currentTtl`，构造与 `refresh()` 成功时更新，`remaining()` 改用之 |
-| **Crontab 调度正确性（v5.2.25）** | `Crontab` 的下次执行时刻计算整体重写，修掉五处缺陷：① 重算基准是 `now` 而非 `now+1`，算出的 `nextRunTime === now`，事件循环 100ms 一跳会让同一秒内**重复执行 10 次**；② 扫描步进为 60 秒，`seconds` 恒等于构造时刻的 `now%60`，6 段秒级表达式（`0 * * * * *`）永不命中、5 段表达式落在随机秒上（5 段现补秒为 `0` 而非 `*`）；③ 周字段上限写死 6，POSIX 允许的 `7`（周日）被静默过滤成空集合；④ 日与周字段用 AND，POSIX 规定两者均非 `*` 时取**并集**；⑤ `*/0` 使 `for` 步进为 0 造成**无限循环 + 内存耗尽**。同时把「非法字段静默过滤 → 兜底 `now+86400` 变成每天乱跑的幽灵任务」改为**构造期抛 `InvalidArgumentException`**，并支持 `JAN`/`MON` 名称。扫描算法由逐秒线性扫描改为**分层跳跃**（字段不匹配直接跳到下一个边界），并对 mktime 在夏令时切换点可能不前进的情况兜底 +1 秒防死循环 |
-| **Async 定时器从不触发（v5.2.25）** | `Async::tick()` 只跑 microtasks 与 deferred，**从不调用 `processTimers()`**，而 `tick()` 是 `Async::run()` 的唯一推进点——导致 `setTimeout` / `setInterval` / `setImmediate` / `delay()` 在事件循环下永远不会被执行（此前只有测试代码手动调 `processTimers()` 才能触发）。`tick()` 现按 微任务 → 定时器 → 延迟任务 的顺序完整推进 |
-| **Promise::await 死锁 / finally 拒因（v5.2.25）** | `await()` 在**非 Fiber 上下文**只 `usleep` 空转，而 `then()` 的回调是经 `Async::queueMicrotask` 入队的，没有任何人执行它们——`Promise::resolve(1)->then(...)->await()` 直接永久挂起。现在非 Fiber 分支由 `await()` 自身驱动 `Async::tick()` 充当事件循环。另：`finally()` 的 rejected 分支裸 `throw $reason`，reason 为字符串等非对象时触发 `Error: Can only throw objects`，该语言层 Error 会**取代原始拒因**传给下游 `catch`——现按 `await()` 的既有约定包装为 `RuntimeException`，Throwable 拒因则原样保持同一实例 |
-| **isProcessAlive errno 粘滞（v5.2.25）** | `Process::isProcessAlive()` 与 `is_process_alive()` 写作 `posix_kill($pid,0) && posix_get_last_error() !== 3`：errno **只在调用失败时写入、成功时不清零**，因此只要此前任意一次 posix 调用留下过 `ESRCH(3)`（例如上一轮刚探测到一个已死进程），后续**所有存活进程都会被判死**，进而触发误重启。改为成功即返回 true、失败后再读 errno 区分 `ESRCH`（不存在）与 `EPERM`（存在但无权发信号），对齐 `ProcessMonitor` 的既有正确写法；`pid<=0` 直接判否（0 是进程组、-1 是所有进程，语义完全不同）|
-| **Async 定时器 O(1) 提前返回（v5.2.26）** | `processTimers()` 此前每 tick 全量扫描 `timers + intervals`（无论有无到期）。新增 `$nextTimerDue` 缓存最近到期点，`now < nextDue` 时 O(1) 直接返回（2000 定时器空转 2 万次由 276ms 降到 0.9ms，**≈305×**）；`run()` 的休眠改为自适应 `min(堆顶剩余, 1ms)`，亚秒级定时器延迟精度提升、空闲 CPU 下降。add/clear 时维护缓存、触发后惰性重算 |
-| **Promise::subscribe 消除链路多余分配（v5.2.26）** | `doResolve` / `resolvePromise` 内部曾用 `$value->then(...)` 仅为登记回调，却多造一个立即丢弃的 Promise（连同 executor + 2 个 handler 闭包）。新增私有 `subscribe()` 只做登记分支，深链（每步返回新 Promise）的 Promise 分配由 **3K → 2K（减少 33.3%）**，降低长链 / `await` / `all` / `allSettled` 的内存与 GC 压力 |
-| **Async::each/map 并发上限生效（v5.2.26）** | `each()` 的 `$process` 闭包漏把 `$concurrency` 纳入 `use` 列表、循环写死 `10`，导致 `Async::map($items, $cb, 64)` 实际只有 10 路并发——用户请求的高并行度被静默吞掉。已把 `$concurrency` 加入 use 并改用 `max(1, $concurrency)`，实测峰值并发 == 请求值 |
-| **Crontab 字段位掩码匹配（v5.2.26）** | `searchNext` / `matchesDayOfMonthOrWeek` 的 `in_array` 线性扫描改为 64 位位掩码 `(($mask >> $v) & 1)`，每轮匹配降为几次位运算、且不再为每个字段分配/检索数组。正确性由「位掩码 vs 暴力逐秒扫描」等价测试守护（`CrontabTest::testBitmaskMatchesBruteForceOverHorizon`，覆盖 POSIX 并集、2 月 30 日等语义）|
-| **Timer::parseCronNext 字段映射修正 + 位掩码缓存（v5.2.27）** | 旧实现把 5 段 cron 表达式整体偏移一位：`$parts[4]/[3]/[2]/[1]` 依次匹配 `wday/mday/hours/minutes`，**分钟字段 `$parts[0]` 被完全忽略、月份字段被当作日使用**（`15 10 5 * *` 旧版在「每天 05:10」触发而非「每月 5 号 10:15」）。现已按标准 cron 语义正确映射到 `(minute, hour, mday, month, wday)` 并对五段做 AND 匹配；同时为每条表达式首次计算时一次性构建并集位掩码并缓存，消除每轮 ~23 万次 `matchCronPart` 字符串解析，复杂罕见表达式解析 ≈ **2.1×** 提速。等价性由 `TimerTest::testParseCronNextMatchesReferenceImplementation` 守护 |
-| **Async::queueMicrotask 元组参数（v5.2.27）** | `queueMicrotask(callable $cb, ...$args)` 改为 `[$cb, $args]` 元组入队、`runMicrotasks` 以 `$cb(...$args)` 调用；`Promise` 决议热路径 6 处 `fn() => $cb($v)` 闭包包裹改为直接传参，消除每轮闭包分配（与 v5.2.26 的 `Promise::subscribe` 互补）。20 万次微任务分发由 166ms / +192MB 闭包 → 55ms / ≈0（**≈3.0×**、闭包分配几乎归零），不定参时向后兼容。语义由 `AsyncTest::testQueueMicrotaskForwardsArguments` 守护 |
-| **ProcessMonitor 进程级常量缓存（v5.2.27）** | `getCpuCount()`（核数）与 `getClockTicks()`（时钟滴答）在进程生命周期内恒定，旧实现每次 `getProcessCpu()` 都重新 `shell_exec('nproc')` / `posix_sysconf`，`checkAll()` 多 pid 轮询下产生大量冗余系统调用。现改为懒初始化静态缓存，命中后零系统调用。返回值契约与幂等性由 `ProcessMonitorTest::testCpuConstantsAreStableAndCached` 守护 |
 | **SelectLoop 惰性 prune（v5.2.28）** | 默认兜底事件循环（未装 ext-event/ev 的环境走它）旧实现**每次 `select()` 前**都全量 `pruneInvalidStreams()`，即每 tick 一次 O(N) `is_resource` 扫描。实测 `stream_select` 传入已关闭资源会抛 `ValueError`（`@` 无法抑制），故改为**惰性 prune**：正常 tick 零扫描直接 `stream_select`；仅当流被外部 `fclose` 未调 `off*` 抛 `ValueError` 时，才 `catch` 一次、剔除失效流、重建集合并重试。稳态每 tick 用户态开销 O(N)→O(1)；异常路径仍 fail-soft。N=2000、每 10万 tick 省约 **1416ms** 用户态扫描。行为由 `SelectLoopTest::testSelectLazilyPrunesExternallyClosedStream`（不抛 + 失效流被惰性剔除）与 `testSelectKeepsValidStreamsAcrossManyTicks`（多 tick 有效流不误伤）守护 |
 | **SelectLoop FD_SETSIZE 状态健壮暴露（v5.2.29）** | `stream_select` 底层 bitset 受 `FD_SETSIZE`（通常 1024）限制，fd≥1024 的流会让 select 失败并退化为每 tick 空转——这是平台限制而非代码缺陷。v5.2.29 起，FD_SETSIZE 状态在**注册期**（`guardFdLimit`）与**运行期 select 失败**两处都能暴露，且经统一 `fdSetSizeWarned` 标志保证全生命周期**只告警一次**，既不让用户无感知地空转，也不刷屏。运行期检测用 `hasFdAtOrAboveSetSize()` 精准判定（集合里确含 ≥1024 的 fd 才告警，避免 EINTR 等误报）。契约由 `SelectLoopTest::testFdSetSizeWarningFiresExactlyOnce` 守护 |
 | **PID 文件由 master 写** | 见下方 CLI 小节 |
@@ -435,7 +423,7 @@ print_r(Kode\Process\Runtime::diagnose());
     'preferred'      => 'native',
     'loop'           => ['event' => ['supported'=>true,'priority'=>100,'preferred'=>true], ...],
     'runtimes'       => [
-        'native'    => ['available'=>true,  'version'=>'5.2.5', 'priority'=>100, 'preferred'=>true],
+        'native'    => ['available'=>true,  'version'=>'5.2.32', 'priority'=>100, 'preferred'=>true],
         'swoole'    => ['available'=>true,  'version'=>'6.2.2', 'priority'=>90,  'preferred'=>false],
         'workerman' => ['available'=>true,  'version'=>'5.2.2', 'priority'=>80,  'preferred'=>false],
     ],
