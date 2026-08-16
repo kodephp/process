@@ -26,6 +26,36 @@ php http_server.php
 
 访问 `http://localhost:8080` 即可看到 "Hello World!"。
 
+## 运行时架构
+
+一行 `Kode::serve()` 背后是一套**统一抽象 + 三种实现**的运行时。业务代码只面向 `Kode` 门面与 `RuntimeInterface` / `ConnectionInterface` 契约编程，切换底层实现**零改动**。
+
+```
+业务代码（Kode 门面 / RuntimeInterface / ConnectionInterface）
+        │  零改动切换
+        ▼
+┌──────────────────────────────────────────────────────────┐
+│            运行时抽象层（统一契约）                          │
+│  RuntimeInterface · ConnectionInterface · Cluster 门面       │
+└──────────────────────────────────────────────────────────┘
+        │  Runtime::auto() 自动择优
+        │  （优先级 native 100 > swoole 90 > workerman 80）
+        ├───────────────┬────────────────┬─────────────────┐
+        ▼               ▼                ▼                 ▼
+   【Native】       【Swoole】       【Workerman】      【HTTP/2 流】
+   自研·零扩展       封装 ext-swoole  封装 workerman      h2c 明文多路复用
+   stream_select /   原生协程 +        事件循环            （Http2Stream）
+   event loop        AsyncIo
+        │
+        └─ 默认路径：不依赖 swoole / workerman 即可运行
+```
+
+- **自研的是核心**：整套运行时契约 + **Native 零扩展实现**（`ext-pcntl` / `ext-posix` / `ext-sockets`，无需 swoole/workerman）+ HTTP/2 子系统 + 集群 + 常驻进程（Daemon）等，都是框架自带、不依附第三方运行时。
+- **Swoole / Workerman 是可插拔后端**：当环境里装了对应扩展/包时，框架把它们**封装进同一套契约**，让业务写法完全统一。注意默认 `auto()` 优先选 Native，即默认路径根本不启用它们。
+- 切换示例：同一份 `Kode::serve(...)` 代码，把 `Runtime::auto()` 换成 `Runtime::swoole()` / `Runtime::workerman()` 即可整包迁移，业务回调一行不改。
+
+详细的统一 API、连接抽象与能力差异见 [运行时（Runtime）](runtime.md)。
+
 ## 信号控制
 
 ```bash
