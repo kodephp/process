@@ -138,6 +138,15 @@ final class NativeRuntime extends AbstractRuntime
 
     private int $heartbeat = 0;
 
+    /**
+     * 慢读超时（秒）。默认 0 = 关闭（零行为变更）。
+     * 打开后，任何「不完整请求滞留超过该时长」的连接会被回收——直接掐断滴流型 Slowloris
+     * （客户端以极低速率喂数据、始终凑不齐一条完整请求却能让心跳判定「活跃」而永不被回收）。
+     * 与 {@see self::MAX_HEADER_BUFFER}（头部累积体积上限）互补：体积上限挡「单连接缓冲撑爆」，
+     * 时间上限挡「极慢滴流长期占连接」。详见 {@see recycleSlowReaders()}。
+     */
+    private int $readTimeout = 0;
+
     private bool $keepAlive = true;
 
     private bool $gzipEnabled = true;
@@ -286,6 +295,7 @@ final class NativeRuntime extends AbstractRuntime
         $this->maxRequest      = max(0, (int)($opts['maxRequest'] ?? 0));
         $this->stopTimeout     = max(1, (int)($opts['stopTimeout'] ?? 5));
         $this->heartbeat       = max(0, (int)($opts['heartbeat'] ?? 0));
+        $this->readTimeout     = max(0, (int)($opts['readTimeout'] ?? 0));
         $this->keepAlive       = (bool)($opts['keepAlive'] ?? true);
         $this->gzipEnabled     = (bool)($opts['gzip'] ?? true);
 
@@ -725,6 +735,14 @@ final class NativeRuntime extends AbstractRuntime
             }, true);
         }
 
+        // 慢读回收（滴流型 Slowloris 防护）：readTimeout=0 时不创建定时器、零行为变更。
+        // 周期取「不超过 5s 且不超过超时本身的 1/2」，确保超时判定在合理粒度内及时触发。
+        if ($this->readTimeout > 0) {
+            $loop->addTimer(min(5.0, (float)$this->readTimeout / 2), function (): void {
+                $this->recycleSlowReaders();
+            }, true);
+        }
+
         $stop = function () use ($loop): void {
             if ($this->shuttingDown) {
                 return; // 避免重复触发（同一信号可能被多次投递）
@@ -826,6 +844,29 @@ final class NativeRuntime extends AbstractRuntime
         $deadline = $now - $this->heartbeat;
         foreach ($this->connections as $conn) {
             if ($conn->lastActiveAt() < $deadline) {
+                $this->closeConnection($conn);
+            }
+        }
+    }
+
+    /**
+     * 慢读回收：关闭「不完整请求滞留超过 readTimeout 秒」的连接（滴流型 Slowloris 防护）。
+     *
+     * 与 {@see recycleIdleConnections()}（心跳，回收完全无读写的空闲连接）正交：
+     * 滴流型攻击每几十秒发 1 字节即可让心跳判定「活跃」而永不被回收，但它始终无法
+     * 凑齐一条完整请求。本方法只看「不完整请求滞留时长」，直接掐断这种占着连接、缓慢喂数据的连接。
+     *
+     * 仅当 {@see $readTimeout} > 0 时才有定时器驱动本方法；关闭时永不触发，零行为变更。
+     * 标记点由连接在读循环里维护（见 {@see NativeConnection::markPartial()} /
+     * {@see NativeConnection::clearPartial()}）：缓冲里留有凑不齐完整请求的字节即标记滞留，
+     * 请求完成 / 缓冲清空即清除。
+     */
+    private function recycleSlowReaders(): void
+    {
+        $deadline = microtime(true) - $this->readTimeout;
+        foreach ($this->connections as $conn) {
+            $since = $conn->partialSince();
+            if ($since > 0.0 && $since < $deadline) {
                 $this->closeConnection($conn);
             }
         }
@@ -994,9 +1035,10 @@ final class NativeRuntime extends AbstractRuntime
             $buf  = $conn->getBuffer();
             $seen = min(strlen($buf), 4);
             if (strncmp($buf, 'PRI ', $seen) === 0) {
-                if ($seen < 4) {
-                    return; // 还分不清是 h2 前奏还是 1.1 请求，等更多字节
-                }
+            if ($seen < 4) {
+                $conn->markPartial(); // 不足 4 字节、请求头必不完整，标记慢读滞留
+                return; // 还分不清是 h2 前奏还是 1.1 请求，等更多字节
+            }
                 $this->startHttp2($conn);
                 $this->handleHttp2Read($conn);
                 return;
@@ -1013,6 +1055,7 @@ final class NativeRuntime extends AbstractRuntime
                 return;
             }
             if (!$conn->hasFullHttpRequest()) {
+                $conn->markPartial(); // 握手头未收齐，标记慢读滞留
                 return;
             }
             $buf        = $conn->getBuffer();
@@ -1168,6 +1211,14 @@ final class NativeRuntime extends AbstractRuntime
                 }
                 return;
             }
+        }
+
+        // 循环退出：缓冲已清空（请求完成 / keep-alive 等待下一请求）→ 清除慢读标记；
+        // 缓冲里还留着凑不齐完整请求的字节 → 标记滞留，交由 recycleSlowReaders() 计时回收。
+        if ($conn->getBuffer() === '') {
+            $conn->clearPartial();
+        } else {
+            $conn->markPartial();
         }
     }
 

@@ -93,6 +93,14 @@ final class NativeConnection implements ConnectionInterface
 
     private float $lastActiveAt;
 
+    /**
+     * 「不完整请求开始滞留」的时刻（microtime，带小数）。0.0 表示当前没有滞留的不完整请求。
+     * 服务于慢读回收（滴流型 Slowloris 防护）：连接缓冲里留有凑不齐一条完整请求的字节时落时间戳，
+     * 由运行时的周期定时器据此掐断长期占着连接、缓慢喂数据的连接。与 $lastActiveAt（心跳，看「有无读写」）
+     * 正交——滴流攻击每几十秒发 1 字节就能让心跳判定「活跃」，但始终凑不齐完整请求，本标记只看滞留时长。
+     */
+    private float $partialSince = 0.0;
+
     private int $bytesRead = 0;
 
     private int $bytesWritten = 0;
@@ -679,6 +687,30 @@ final class NativeConnection implements ConnectionInterface
     public function touch(): void
     {
         $this->lastActiveAt = self::$clock ?: microtime(true);
+    }
+
+    /**
+     * 记录「不完整请求开始滞留」的时刻（Slowloris 时间维度防护）。
+     * 只在第一次调用时落时间戳，后续滴流字节不会把它向前推——
+     * 否则客户端每 30s 发 1 字节就能永远重置计时，防护失效。
+     */
+    public function markPartial(): void
+    {
+        if ($this->partialSince === 0.0) {
+            $this->partialSince = microtime(true);
+        }
+    }
+
+    /** 请求完成 / 缓冲清空后清除滞留标记 */
+    public function clearPartial(): void
+    {
+        $this->partialSince = 0.0;
+    }
+
+    /** 不完整请求开始滞留的时刻；0.0 表示当前无滞留的不完整请求 */
+    public function partialSince(): float
+    {
+        return $this->partialSince;
     }
 
     public function pendingBytes(): int

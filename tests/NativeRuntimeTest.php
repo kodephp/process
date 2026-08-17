@@ -402,6 +402,66 @@ final class NativeRuntimeTest extends TestCase
         }
     }
 
+    /**
+     * 审计加固回归：慢读超时回收（滴流型 Slowloris 时间维度防护）。
+     *
+     * 客户端只发「不完整请求头」（缺最终的 \r\n\r\n）且此后不再发送任何字节。
+     * 默认 heartbeat=0 下这种连接不会被「空闲回收」（滴流字节可让心跳判定活跃），
+     * 但 readTimeout 只看「不完整请求滞留时长」，应在超时后主动断开，
+     * 而非任其永久占着连接、缓慢喂数据。
+     */
+    public function testNativeReadTimeoutRecyclesSlowReader(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port   = $this->findFreePort();
+        $handler = 'function ($conn, $data): void {'
+            . '$text = is_string($data) ? $data : json_encode($data);'
+            . '$conn->send("pong:" . $text);'
+            . '}';
+        // readTimeout=1：不完整请求滞留超过 1s 即回收
+        $script = $this->writeHttpServerScript($port, ['workers' => 1, 'readTimeout' => 1], $handler);
+        $proc   = proc_open([PHP_BINARY, $script], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native HTTP 服务器子进程');
+        $this->waitForPort($port, 4.0);
+
+        try {
+            $fp = @fsockopen('127.0.0.1', $port, $errno, $errstr, 2.0);
+            $this->assertNotFalse($fp, "HTTP 连接失败: {$errstr} ({$errno})");
+            stream_set_timeout($fp, 2);
+
+            // 只发半截请求头（无最终空行），且此后不再发送任何字节
+            fwrite($fp, "GET / HTTP/1.1\r\nHost: example.com\r\n");
+
+            $closed = false;
+            $buf    = '';
+            $deadline = microtime(true) + 5.0;
+            while (microtime(true) < $deadline) {
+                $chunk = @fread($fp, 1024);
+                if ($chunk === false) {
+                    break;
+                }
+                if ($chunk !== '') {
+                    $buf .= $chunk; // 收到了数据（异常：handler 不应被触发）
+                    break;
+                }
+                if (feof($fp)) {
+                    $closed = true;
+                    break;
+                }
+                usleep(100_000);
+            }
+
+            $this->assertTrue($closed, '服务器未在 readTimeout 内回收慢读连接（滴流型 Slowloris 防护失效）');
+            $this->assertStringNotContainsString('pong:', $buf, '不完整请求不应被派发到 handler');
+            fclose($fp);
+        } finally {
+            $this->stopProc($proc, $script);
+        }
+    }
+
     private function findFreePort(): int
     {
         $sock = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
