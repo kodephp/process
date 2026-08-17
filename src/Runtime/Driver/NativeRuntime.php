@@ -160,6 +160,9 @@ final class NativeRuntime extends AbstractRuntime
 
     private int $http2MaxHeaderListSize = 65536;
 
+    /** 单条 HTTP/2 流允许的最大请求体字节数（与 HTTP/1.1 MAX_LENGTH 对称的内存防护） */
+    private int $http2MaxRequestBody = 10485760;
+
     /** 优雅关闭宽限期（秒）：SIGTERM 后让在途请求/流完成的最长等待 */
     private int $gracefulShutdownTimeout = 3;
 
@@ -305,6 +308,7 @@ final class NativeRuntime extends AbstractRuntime
         $this->http2MaxConcurrentStreams = max(1, (int)($opts['http2MaxConcurrentStreams'] ?? 128));
         $this->http2InitialWindow        = max(Frame::DEFAULT_WINDOW_SIZE, (int)($opts['http2InitialWindow'] ?? 1048576));
         $this->http2MaxHeaderListSize    = max(0, (int)($opts['http2MaxHeaderListSize'] ?? Http2Session::DEFAULT_MAX_HEADER_LIST_SIZE));
+        $this->http2MaxRequestBody       = max(0, (int)($opts['http2MaxRequestBody'] ?? Http2Session::DEFAULT_MAX_REQUEST_BODY));
         $this->gracefulShutdownTimeout   = max(0, (int)($opts['gracefulShutdownTimeout'] ?? 3));
         // master 的停机总超时必须覆盖 worker 的优雅宽限期，否则会在宽限期内 SIGKILL
         // 在途请求（gracefulShutdownTimeout=30 而 stopTimeout=5 时必现）。取两者较大值。
@@ -1258,6 +1262,7 @@ final class NativeRuntime extends AbstractRuntime
             maxConcurrentStreams: $this->http2MaxConcurrentStreams,
             initialWindowSize: $this->http2InitialWindow,
             maxHeaderListSize: $this->http2MaxHeaderListSize,
+            maxRequestBodySize: $this->http2MaxRequestBody,
         );
         $conn->attachHttp2($session);
         $conn->setHandshakeDone();

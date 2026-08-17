@@ -159,6 +159,7 @@ $rt->listen('http://0.0.0.0:8080', [
     'http2MaxConcurrentStreams'   => 128,    // 单连接最大并发流数（防单连接占满）
     'http2InitialWindow'          => 1048576,// 流初始窗口字节数
     'http2MaxHeaderListSize'      => 65536,  // 请求头列表最大字节数（防超大头攻击）
+    'http2MaxRequestBody'         => 10485760,// 单条流请求体上限字节数（防请求体无限缓冲耗尽内存，与 HTTP/1.1 MAX_LENGTH 对称）
 
     // ---- Swoole 专有 ----
     'mode'       => 'process',  // 切到 SWOOLE_PROCESS（默认 BASE，吞吐高约 8%）
@@ -416,6 +417,7 @@ if ($rt->supports(Capability::Coroutine)) {
 | **HTTP 头部缓冲上限（v5.2.34）** | **Slowloris 防护**：HTTP 请求头累积阶段（未出现 `\r\n\r\n`），`recvBuffer` 一旦超过 `MAX_HEADER_BUFFER`（64KB）立即断开连接。此前该阶段仅受 `HttpProtocol::MAX_LENGTH`（整请求 10MB）约束，单连接可把缓冲撑到 10MB、千连接级联即内存耗尽——`NativeRuntime.php` 旧注释早已标记此隐患（「不含 `\r\n\r\n` 的数据即可无限增长 recvBuffer → 单连接打爆 worker」）。WebSocket 握手首包同源受其约束（原 16KB 内联判断统一收敛到该常量）。该上限**独立于**整请求 10MB：头块定型后由 `HttpProtocol::input()` 常规长度校验接管，合法大 body 不受影响。契约由 `NativeRuntimeTest::testNativeHttpHeaderBufferCap`（发送 70KB 不含完整头块的数据，断言服务器主动断开且未派发到 handler）守护 |
 | **WebSocket 升级首帧管道修复（v5.2.34）** | 修复 WebSocket 升级握手与首帧在**同一 TCP 包内合并发送**时的丢帧 bug：旧实现握手成功后整体 `clearBuffer()`，会丢弃紧随其后的首帧（部分客户端把 upgrade 与第一帧合并发送），表现为握手成功但首条消息石沉大海。改为仅截取握手请求部分（`\r\n\r\n` 之前），剩余字节落到帧处理循环立即消费；且握手后**不 `return`**，避免同一次 `fread` 已整段读入的数据因缺少新的可读事件而永久搁置。契约由 `NativeRuntimeTest::testNativeWebSocketHandshakePipelinedFrame`（合并发送握手+首帧，断言服务端正确回显）守护 |
 | **慢读超时回收（v5.2.35）** | **滴流型 Slowloris 时间维度防护**：与 `MAX_HEADER_BUFFER`（头部体积上限）互补——体积上限挡「单连接缓冲撑爆」，时间上限挡「极慢滴流长期占连接」。新增 `readTimeout`（秒，默认 0 关闭，零行为变更）：任何「不完整请求滞留超过该时长」的连接由周期定时器 `recycleSlowReaders()` 回收。其关键在标记语义——`NativeConnection::markPartial()` 只在**首次**进入不完整态时落时间戳，后续滴流字节不向前推（否则客户端每 30s 发 1 字节就能永远重置计时）；缓冲清空或请求完成即 `clearPartial()`。与 `heartbeat`（看「有无读写」）正交：滴流字节可让心跳判定「活跃」，但始终凑不齐完整请求，本机制只看滞留时长。适用于暴露在不可信网络的 native 服务，建议显式开启（如 `['readTimeout' => 5]`）。契约由 `NativeRuntimeTest::testNativeReadTimeoutRecyclesSlowReader`（发半截请求头后不再发送字节，断言服务器在超时内回收连接、未派发 handler）守护 |
+| **HTTP/2 请求体上限（v5.2.36）** | **请求体无限缓冲防护**：与 HTTP/1.1 `HttpProtocol::MAX_LENGTH`（整请求 10MB）对称——HTTP/2 接收窗口随字节到达而补发 `WINDOW_UPDATE`，对端可借此持续灌入请求体，若不设上限 `$stream['body'] 会被无限累积、单连接即耗尽内存。新增 `Http2Session` 的 `maxRequestBodySize`（默认 10MiB，运行时选项 `http2MaxRequestBody` 可调）：单个 DATA 帧后若 `strlen($stream['body'])` 超限即 `RST_STREAM(ENHANCE_YOUR_CALM)` 掐断该流（不影响连接与其他流），内存上界收敛为 `maxRequestBodySize × maxConcurrentStreams`。默认开启、零行为变更。契约由 `Http2SessionTest::testOversizedRequestBodyIsReset`（灌入 2KB 超过 1KB 上限，断言 RST_STREAM(0xb) 且新流仍可用）与 `testRequestBodyExactlyAtLimitIsAllowed`（恰好等于上限仍正常派发）守护 |
 
 ## 环境自检
 
@@ -428,7 +430,7 @@ print_r(Kode\Process\Runtime::diagnose());
     'preferred'      => 'native',
     'loop'           => ['event' => ['supported'=>true,'priority'=>100,'preferred'=>true], ...],
     'runtimes'       => [
-        'native'    => ['available'=>true,  'version'=>'5.2.35', 'priority'=>100, 'preferred'=>true],
+        'native'    => ['available'=>true,  'version'=>'5.2.36', 'priority'=>100, 'preferred'=>true],
         'swoole'    => ['available'=>true,  'version'=>'6.2.2', 'priority'=>90,  'preferred'=>false],
         'workerman' => ['available'=>true,  'version'=>'5.2.2', 'priority'=>80,  'preferred'=>false],
     ],

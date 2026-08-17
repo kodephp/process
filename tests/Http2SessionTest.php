@@ -272,6 +272,88 @@ final class Http2SessionTest extends TestCase
         $this->assertSame(['a' => 1, 'b' => [2, 3]], $requests[0]['request']['post']);
     }
 
+    /**
+     * 请求体超限防护（与 HTTP/1.1 MAX_LENGTH 对称）：对端借「服务器持续补发
+     * WINDOW_UPDATE」无限灌入请求体时，单条流超过 maxRequestBodySize 必须被
+     * RST_STREAM(ENHANCE_YOUR_CALM) 掐断，且请求不得被派发、连接与其他流不受影响。
+     */
+    public function testOversizedRequestBodyIsReset(): void
+    {
+        $session = new Http2Session(maxRequestBodySize: 1024);
+        $this->handshake($session);
+
+        $headers = [
+            [':method', 'POST'],
+            [':scheme', 'http'],
+            [':path', '/upload'],
+            [':authority', 'example.com'],
+        ];
+        // HEADERS 不带 END_STREAM：请求尚未完整
+        $this->assertSame([], $session->feed($this->headersFrame(1, $headers, Frame::FLAG_END_HEADERS)));
+
+        // 单帧灌入 2KB 请求体，超过 1KB 上限
+        $requests = $session->feed(
+            Frame::encode(Frame::TYPE_DATA, Frame::FLAG_END_STREAM, 1, str_repeat('x', 2048))
+        );
+        $this->assertSame([], $requests, '超限额请求体不得被派发');
+
+        $out = $session->drain();
+        $this->assertStringContainsString(
+            "\x0b",
+            $out,
+            '超限流必须收到 RST_STREAM(ENHANCE_YOUR_CALM=0xb)'
+        );
+
+        // 精确校验：RST 针对被超限的流、错误码为 ENHANCE_YOUR_CALM
+        $rst = null;
+        $off = 0;
+        while (($f = Frame::decode($out, $off)) !== null) {
+            if ($f['type'] === Frame::TYPE_RST_STREAM) {
+                $rst = $f;
+                break;
+            }
+            $off += $f['size'];
+        }
+        $this->assertNotNull($rst, '必须存在 RST_STREAM 帧');
+        $this->assertSame(1, $rst['stream']);
+        $this->assertSame(Frame::ERROR_ENHANCE_YOUR_CALM, unpack('N', $rst['payload'])[1]);
+
+        // 连接仍可用：新流应能正常处理
+        $again = $session->feed($this->headersFrame(
+            3,
+            self::getHeaders('/ok'),
+            Frame::FLAG_END_HEADERS | Frame::FLAG_END_STREAM
+        ));
+        $this->assertCount(1, $again, 'RST 单流不得影响连接与其他流');
+    }
+
+    /**
+     * 边界：请求体恰好等于上限时仍应正常派发，不触发 RST。
+     */
+    public function testRequestBodyExactlyAtLimitIsAllowed(): void
+    {
+        $session = new Http2Session(maxRequestBodySize: 1024);
+        $this->handshake($session);
+
+        $headers = [
+            [':method', 'POST'],
+            [':scheme', 'http'],
+            [':path', '/submit'],
+            [':authority', 'example.com'],
+            ['content-type', 'text/plain'],
+        ];
+        $this->assertSame([], $session->feed($this->headersFrame(1, $headers, Frame::FLAG_END_HEADERS)));
+
+        $body    = str_repeat('x', 1024); // 恰好等于上限
+        $requests = $session->feed(
+            Frame::encode(Frame::TYPE_DATA, Frame::FLAG_END_STREAM, 1, $body)
+        );
+
+        $this->assertCount(1, $requests, '恰好等于上限的请求体应被派发');
+        $this->assertSame(1024, strlen($requests[0]['request']['body']), 'body 必须完整保留');
+        $this->assertSame('', $session->drain(), '未超限不得产生 RST');
+    }
+
     public function testHeaderBlockSplitAcrossContinuation(): void
     {
         $session = new Http2Session();

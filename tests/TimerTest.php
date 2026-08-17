@@ -416,6 +416,10 @@ final class TimerTest extends TestCase
     /**
      * 缓存稳定性：同一表达式多次解析结果一致；位掩码按表达式缓存，命中后不再付出
      * 重复解析开销（此处只验证结果确定性，性能由 benchmarks/timer-cron-bench.php 量化）。
+     *
+     * 注意：parseCronNext 以 $now + i*60 生成候选，结果会继承「当前秒」，因此两次调用
+     * 若恰好跨秒，原始时间戳可能相差 1 秒——这是预期且无害的（cron 为分钟粒度）。
+     * 真正要验证的确定性是「命中的分钟」，故按分钟对齐比较。
      */
     public function testParseCronNextIsDeterministicAcrossCalls(): void
     {
@@ -426,7 +430,15 @@ final class TimerTest extends TestCase
         $b = (int) $parse->invoke(null, '17 3 4 * *');
         $c = (int) $parse->invoke(null, '17 3 4 * *');
 
-        $this->assertSame($a, $b);
-        $this->assertSame($b, $c);
+        // 命中分钟必须跨调用完全一致（秒级 1 秒抖动属预期，不在断言范围内）
+        $this->assertSame(intdiv($a, 60), intdiv($b, 60));
+        $this->assertSame(intdiv($b, 60), intdiv($c, 60));
+
+        // 且分钟组件本身正确（每月 4 日 03:17，当前 8 月 17 日之后最近为 9 月 4 日）
+        $d = getdate($a);
+        $this->assertSame(9, $d['mon']);
+        $this->assertSame(4, $d['mday']);
+        $this->assertSame(3, $d['hours']);
+        $this->assertSame(17, $d['minutes']);
     }
 }

@@ -35,6 +35,9 @@ final class Http2Session
     /** 本端接受的最大「未压缩」头列表字节数（SETTINGS_MAX_HEADER_LIST_SIZE），防御超大头 */
     private int $maxHeaderListSize;
 
+    /** 单条流允许的最大请求体字节数（防御请求体无限缓冲耗尽内存），见 DEFAULT_MAX_REQUEST_BODY */
+    private int $maxRequestBodySize;
+
     /** 流状态对象池：关闭的流回收于此，新建时复用，省去哈希桶反复分配 */
     private array $streamPool = [];
 
@@ -101,6 +104,16 @@ final class Http2Session
 
     /** 本端接受的最大「未压缩」头列表字节数（SETTINGS_MAX_HEADER_LIST_SIZE 默认值） */
     public const int DEFAULT_MAX_HEADER_LIST_SIZE = 65536;
+
+    /**
+     * 单条流允许的最大**请求体**字节数（默认 10MB，与 HTTP/1.1 {@see \Kode\Process\Protocol\HttpProtocol::MAX_LENGTH}
+     * 对称的整请求上限保持一致）。
+     *
+     * HTTP/2 接收窗口随字节到达而补发 WINDOW_UPDATE（见 {@see consumeRecvWindow}），对端因此可持续灌入
+     * 请求体；若不设上限，`$stream['body']` 会被无限累积，单连接即可耗尽内存。此处与 HTTP/1.1 一样
+     * 给出硬上限，超限即 RST_STREAM(ENHANCE_YOUR_CALM) 并丢弃该流（不影响连接与其他流）。
+     */
+    public const int DEFAULT_MAX_REQUEST_BODY = 10485760;
 
     /** 流状态对象池上限：超过即不再回收，避免长连接下池无限增长 */
     private const int STREAM_POOL_LIMIT = 64;
@@ -180,6 +193,7 @@ final class Http2Session
      * @param int $maxConcurrentStreams 本端允许的并发流上限
      * @param int $initialWindowSize    本端通告的初始接收窗口
      * @param int $maxFrameSize         本端可接收的最大帧长
+     * @param int $maxRequestBodySize   单条流允许的最大请求体字节数（0 表示不限制，仅用于测试）
      */
     public function __construct(
         int $maxConcurrentStreams = 128,
@@ -187,11 +201,13 @@ final class Http2Session
         int $maxFrameSize = Frame::MIN_MAX_FRAME_SIZE,
         int $headerTableSize = 4096,
         int $maxHeaderListSize = self::DEFAULT_MAX_HEADER_LIST_SIZE,
+        int $maxRequestBodySize = self::DEFAULT_MAX_REQUEST_BODY,
     ) {
         $this->maxConcurrentStreams = max(1, $maxConcurrentStreams);
         $this->initialWindowSize    = min(max(Frame::DEFAULT_WINDOW_SIZE, $initialWindowSize), Frame::MAX_WINDOW_SIZE);
         $this->maxFrameSize         = min(max(Frame::MIN_MAX_FRAME_SIZE, $maxFrameSize), Frame::MAX_MAX_FRAME_SIZE);
         $this->maxHeaderListSize    = max(0, $maxHeaderListSize);
+        $this->maxRequestBodySize   = max(0, $maxRequestBodySize);
         $this->recvWindow           = $this->initialWindowSize;
         $this->decoder              = new Hpack($headerTableSize);
         $this->encoder              = new Hpack($headerTableSize);
@@ -673,6 +689,13 @@ final class Http2Session
 
         $stream          = &$this->streams[$streamId];
         $stream['body'] .= $payload;
+
+        // 请求体体积上限（与 HTTP/1.1 MAX_LENGTH 对称）：接收窗口随字节到达而补发，
+        // 对端可持续灌入，必须在此截断，否则 $stream['body'] 无限增长耗尽内存。
+        if ($this->maxRequestBodySize > 0 && strlen($stream['body']) > $this->maxRequestBodySize) {
+            $this->resetStream($streamId, Frame::ERROR_ENHANCE_YOUR_CALM);
+            return null;
+        }
 
         if (($frame['flags'] & Frame::FLAG_END_STREAM) === 0) {
             return null;
@@ -1332,6 +1355,8 @@ final class Http2Session
             'reset_budget'   => $this->resetStreamBudget,
             'reset_limit'    => $this->maxResetStreamBudget(),
             'queued_control' => $this->queuedControlFrames,
+            // 请求体硬上限：与 HTTP/1.1 MAX_LENGTH 对称的资源防护
+            'max_request_body' => $this->maxRequestBodySize,
         ];
     }
 }
