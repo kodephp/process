@@ -235,6 +235,101 @@ final class NativeRuntimeTest extends TestCase
         }
     }
 
+    /**
+     * F1 回归：并发建立大量连接时，Native 必须把监听 socket 上排队的连接**全部** accept 掉，
+     * 而非每次可读事件只 accept 一个就返回（旧实现在边缘触发事件循环 / macOS SelectLoop 下
+     * 会导致其余排队连接被「搁置」→ 客户端 connect 被拒或挂起）。
+     *
+     * 用单 worker 最大化复现概率（无 SO_REUSEPORT 多 worker 抢接干扰），一次性异步建连 50 个，
+     * 断言每个连接都拿到正确回显。
+     */
+    public function testNativeConcurrentAcceptDrainsQueue(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port   = $this->findFreePort();
+        $script = $this->writeServerScript($port, 1); // 单 worker
+        $proc   = proc_open([PHP_BINARY, $script, (string)$port], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native 服务器子进程');
+        $this->waitForPort($port, 4.0);
+
+        try {
+            $n      = 50;
+            $conns  = [];
+            // 一次性并发建立 N 个连接（异步 connect，使其在监听队列里排队）
+            for ($i = 0; $i < $n; $i++) {
+                $fp = @stream_socket_client(
+                    "tcp://127.0.0.1:{$port}",
+                    $errno, $errstr,
+                    2.0,
+                    STREAM_CLIENT_ASYNC_CONNECT
+                );
+                if ($fp === false) {
+                    $this->fail("无法创建第 {$i} 个连接: {$errstr} ({$errno})");
+                }
+                stream_set_blocking($fp, false);
+                $conns[$i] = $fp;
+            }
+
+            // 全部写出请求（非阻塞，边可写边写）
+            $deadline = microtime(true) + 5.0;
+            $written  = array_fill(0, $n, false);
+            while (microtime(true) < $deadline && array_sum($written) < $n) {
+                foreach ($conns as $i => $fp) {
+                    if ($written[$i]) {
+                        continue;
+                    }
+                    if (@fwrite($fp, "c{$i}\n") !== false) {
+                        $written[$i] = true;
+                    }
+                }
+                usleep(10_000);
+            }
+
+            // 读取全部响应
+            $responses = array_fill(0, $n, null);
+            $got       = array_fill(0, $n, false);
+            while (microtime(true) < $deadline && array_sum($got) < $n) {
+                foreach ($conns as $i => $fp) {
+                    if ($got[$i]) {
+                        continue;
+                    }
+                    $line = @fgets($fp, 1024);
+                    if ($line !== false && $line !== '') {
+                        $responses[$i] = $line;
+                        $got[$i]       = true;
+                    }
+                }
+                usleep(10_000);
+            }
+
+            foreach ($conns as $fp) {
+                fclose($fp);
+            }
+
+            // 关键断言：每一个并发连接都必须拿到正确响应
+            for ($i = 0; $i < $n; $i++) {
+                $this->assertTrue($got[$i], "第 {$i} 个并发连接未拿到响应（F1 排空修复前典型失败）");
+                $this->assertStringContainsString("pong:c{$i}", (string)$responses[$i]);
+            }
+        } finally {
+            $status = proc_get_status($proc);
+            $pid = $status['pid'] ?? null;
+            if ($pid !== null && $pid > 0) {
+                @posix_kill($pid, SIGTERM);
+                usleep(300_000);
+                $still = proc_get_status($proc);
+                if ($still['running']) {
+                    @posix_kill($pid, SIGKILL);
+                }
+            }
+            proc_close($proc);
+            @unlink($script);
+        }
+    }
+
     private function findFreePort(): int
     {
         $sock = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
@@ -260,7 +355,7 @@ final class NativeRuntimeTest extends TestCase
         }
     }
 
-    private function writeServerScript(int $port): string
+    private function writeServerScript(int $port, int $workers = 2): string
     {
         $autoload = realpath(__DIR__ . '/../vendor/autoload.php');
         $code = <<<PHP
@@ -268,7 +363,7 @@ final class NativeRuntimeTest extends TestCase
 require '{$autoload}';
 use Kode\\Process\\Kode;
 
-Kode::serve('text://127.0.0.1:{$port}', ['workers' => 2], 'native')
+Kode::serve('text://127.0.0.1:{$port}', ['workers' => {$workers}], 'native')
     ->on('message', function (\$conn, \$data): void {
         \$text = is_string(\$data) ? \$data : json_encode(\$data);
         \$conn->send('pong:' . \$text);

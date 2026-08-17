@@ -162,6 +162,9 @@ final class SwooleRuntime extends AbstractRuntime
             $server->on('request', function (object $req, object $resp) use ($server): void {
                 $fd   = (int)($req->fd ?? 0);
                 $conn = new SwooleConnection($server, $fd, $resp);
+                // 防御性重置请求级响应状态（每请求本就是全新连接对象，此处为保险边界，
+                // 详见 SwooleConnection::reset() / F2 并发 keep-alive 静默崩溃修复）。
+                $conn->reset();
                 // 依据 Accept-Encoding 自动启用 gzip（响应体达阈值才压缩，send 时判定）
                 if ($this->gzipEnabled && HttpProtocol::acceptsGzip((string)($req->header['accept-encoding'] ?? ''))) {
                     $conn->setGzipAuto(true);

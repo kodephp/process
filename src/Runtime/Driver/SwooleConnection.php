@@ -47,6 +47,19 @@ final class SwooleConnection implements ConnectionInterface
         return $this->fd;
     }
 
+    /**
+     * 重置请求级响应状态。
+     *
+     * 每个 HTTP 请求由 SwooleRuntime 创建**全新** SwooleConnection，故严格说无需重置；
+     * 保留此方法作为防御性边界——若未来复用连接对象，可在请求入口调用，避免跨请求残留的
+     * $responded / $chunkStarted 守卫误判。（见 {@see SwooleRuntime::onRequest()}）
+     */
+    public function reset(): void
+    {
+        $this->responded    = false;
+        $this->chunkStarted = false;
+    }
+
     public function send(string $data, bool $raw = false): bool
     {
         if ($this->response !== null) {
@@ -60,12 +73,12 @@ final class SwooleConnection implements ConnectionInterface
                     $this->response->header('Content-Encoding', 'gzip');
                     $this->response->header('Content-Length', (string)strlen($gz));
                     $this->responded = true;
-                    $this->response->end($gz);
+                    $this->endResponse($gz);
                     return true;
                 }
             }
             $this->responded = true;
-            $this->response->end($data);
+            $this->endResponse($data);
             return true;
         }
 
@@ -107,7 +120,7 @@ final class SwooleConnection implements ConnectionInterface
                     $this->response->header('Content-Encoding', 'gzip');
                     $this->response->header('Content-Length', (string) strlen($gz));
                     $this->responded = true;
-                    $this->response->end($gz);
+                    $this->endResponse($gz);
                     return true;
                 }
             }
@@ -118,7 +131,7 @@ final class SwooleConnection implements ConnectionInterface
             }
 
             $this->responded = true;
-            $this->response->end($body);
+            $this->endResponse($body);
             return true;
         }
 
@@ -150,7 +163,7 @@ final class SwooleConnection implements ConnectionInterface
             $this->response->header('Content-Encoding', 'gzip');
             $this->response->header('Content-Length', (string)strlen($gz));
             $this->responded = true;
-            $this->response->end($gz);
+            $this->endResponse($gz);
             return true;
         }
 
@@ -216,7 +229,7 @@ final class SwooleConnection implements ConnectionInterface
             if (!$this->chunkStarted) {
                 return false;
             }
-            $this->response->end();
+            $this->endResponse();
             $this->responded   = true;
             $this->chunkStarted = false;
             return true;
@@ -240,7 +253,7 @@ final class SwooleConnection implements ConnectionInterface
         if ($this->response !== null) {
             if (!$this->responded) {
                 $this->responded = true;
-                $this->response->end();
+                $this->endResponse();
             }
             return;
         }
@@ -273,6 +286,24 @@ final class SwooleConnection implements ConnectionInterface
         }
         $info = $this->server->getClientInfo($this->fd);
         return is_array($info) ? $info : [];
+    }
+
+    /**
+     * 安全写出 HTTP 响应并终段连接。
+     *
+     * Swoole 在 keep-alive / 并发场景下可能已回收底层 fd 对应的 C 层 Response 对象；
+     * 此时若仍对其调用 end() 会触发 C 层崩溃（表现为 worker 静默退出、连接被拒）。
+     * 故在每次 end() 前用 server->exists($fd) 做最后一道闸门：fd 已不存在即跳过写出，
+     * 绝不踩踏已释放对象。无法判定（server 无 exists 方法）时退回原行为，不引入回归。
+     *
+     * @param string $data 响应体；空串等价于 end() 终段空响应
+     */
+    private function endResponse(string $data = ''): void
+    {
+        if (method_exists($this->server, 'exists') && !$this->server->exists($this->fd)) {
+            return; // fd 已被 Swoole 回收，跳过写出，避免 C 层崩溃
+        }
+        $this->response->end($data);
     }
 
     public function isAlive(): bool

@@ -824,18 +824,42 @@ final class NativeRuntime extends AbstractRuntime
      * @param resource             $serverSock
      * @param array<string, mixed> $listener
      */
+    /**
+     * @param resource             $serverSock
+     * @param array<string, mixed> $listener
+     */
     private function accept($serverSock, array $listener): void
     {
-        $connSock = @stream_socket_accept($serverSock, 0, $peerName);
-        if ($connSock === false) {
-            return; // 惊群：其它 worker 已抢先 accept
-        }
+        // 一次可读事件内**循环排空**所有挂起的连接：底层事件循环在边缘触发语义下
+        // （ev / event 扩展的 EvLoop 等）只在可读状态变化时才回调一次，若不循环
+        // accept 直到 EAGAIN，突发连接里除首个外其余会永远等不到下一次回调而被「搁置」，
+        // 表现为并发 connect 部分被拒；即便水平触发（stream_select 兜底），循环排空也能
+        // 显著降低事件往返开销。这与 Workerman / Swoole 的 while-accept-until-EAGAIN 范式一致。
+        do {
+            $peerName = '';
+            $connSock = @stream_socket_accept($serverSock, 0, $peerName);
+            if ($connSock === false) {
+                break; // EAGAIN：队列已空（或 SO_REUSEPORT 下本 worker 无可抢连接）
+            }
+            $this->registerAcceptedConnection($connSock, $listener, $peerName);
+        } while (true);
+    }
+
+    /**
+     * 完成单个已 accept 连接的套接字调优与连接对象装配。
+     *
+     * @param resource             $connSock
+     * @param array<string, mixed> $listener
+     * @param string               $peerName
+     */
+    private function registerAcceptedConnection($connSock, array $listener, string $peerName): void
+    {
         $this->tuneSocket($connSock);
 
         $scheme = (string)$listener['scheme'];
         $conn   = new NativeConnection(
             $connSock,
-            (string)($peerName ?? ''),
+            $peerName,
             $this->protocolClassFor($scheme),
             $this->loop,
             null,

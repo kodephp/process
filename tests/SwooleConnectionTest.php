@@ -117,12 +117,78 @@ final class SwooleConnectionTest extends TestCase
         $this->assertTrue($conn->gzip('payload', 200, []));
         $this->assertSame(['payload'], $server->sent);
     }
+
+    /**
+     * F2 回归：当 Swoole 已回收该 fd（exists() 返回 false）时，所有写出路径都不得调用
+     * response->end()，否则会踩踏 C 层已释放的 Response 对象 → worker 静默崩溃。
+     * 闸门应使写出被安全跳过（不抛异常、不调用 end）。
+     */
+    public function testHttpModeWriteSkippedWhenFdRecycled(): void
+    {
+        $server = new SwooleFakeServer();
+        $server->existsReturn = false; // 模拟 keep-alive 并发下 fd 已失效
+        $resp = new SwooleFakeResponse();
+        $conn = new SwooleConnection($server, 1, $resp);
+
+        // 各写出路径在 fd 失效时都不应真正 end()
+        $conn->send('hello');
+        $this->assertFalse($resp->ended, 'send 不得写出已回收响应');
+
+        $conn->setGzipAuto(true);
+        $conn->send(str_repeat('A', 5000));
+        $this->assertFalse($resp->ended, '自动 gzip 不得写出已回收响应');
+
+        $conn->gzip('payload', 200, []);
+        $this->assertFalse($resp->ended, 'gzip 不得写出已回收响应');
+
+        $conn->beginChunked();
+        $conn->chunk('x');
+        $conn->endChunk();
+        $this->assertFalse($resp->ended, 'endChunk 不得写出已回收响应');
+
+        $conn->close(); // 未 responded 时会尝试 end()
+        $this->assertFalse($resp->ended, 'close 不得写出已回收响应');
+    }
+
+    /**
+     * F2 配套：正常场景下 exists() 返回 true，响应仍需正常写出（闸门不应误伤正常路径）。
+     */
+    public function testHttpModeWriteProceedsWhenFdAlive(): void
+    {
+        $resp = new SwooleFakeResponse();
+        $conn = new SwooleConnection(new SwooleFakeServer(), 1, $resp);
+
+        $conn->send('hi');
+        $this->assertTrue($resp->ended, 'fd 存活时应正常写出');
+        $this->assertSame('hi', $resp->endData);
+    }
+
+    /**
+     * F2 防御性边界：reset() 应清空请求级响应状态。
+     */
+    public function testResetClearsRequestState(): void
+    {
+        $resp = new SwooleFakeResponse();
+        $conn = new SwooleConnection(new SwooleFakeServer(), 1, $resp);
+        $conn->beginChunked();
+        $this->assertTrue($conn->isChunkStarted());
+
+        $conn->reset();
+        $this->assertFalse($conn->isChunkStarted());
+        $this->assertTrue($conn->isAlive());
+    }
 }
 
 final class SwooleFakeServer
 {
     /** @var list<string> */
     public array $sent = [];
+
+    /**
+     * 控制 exists() 返回值，用于模拟 Swoole 已回收 fd 的场景（F2 闸门外）。
+     * 默认 true（正常）；置 false 模拟 keep-alive 并发下 fd 已失效。
+     */
+    public bool $existsReturn = true;
 
     public function send(int $fd, string $data): bool
     {
@@ -132,7 +198,7 @@ final class SwooleFakeServer
 
     public function exists(int $fd): bool
     {
-        return true;
+        return $this->existsReturn;
     }
 }
 
