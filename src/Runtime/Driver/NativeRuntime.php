@@ -72,6 +72,19 @@ final class NativeRuntime extends AbstractRuntime
     private const int READ_CHUNK = 65535;
 
     /**
+     * 头部累积阶段 recvBuffer 硬上限（Slowloris 防护）。
+     *
+     * 一旦连接尚未收齐完整头块（`\r\n\r\n` 未出现）而缓冲已超过此值，立即断开——
+     * 否则客户端以极低速率持续发送不含完整头块的数据即可让 recvBuffer 无限增长，
+     * 单连接即可打爆 worker 内存（千连接级联即内存耗尽）。
+     *
+     * 该上限独立于 {@see HttpProtocol::MAX_LENGTH}（整请求 10MB，含合法大 body）：
+     * 头块定型后进入 {@see HttpProtocol::input()} 的常规长度校验，大 body 不受影响。
+     * WebSocket 握手首包同源受此上限约束（原 16KB 内联判断统一收敛到此常量）。
+     */
+    private const int MAX_HEADER_BUFFER = 65536;
+
+    /**
      * UDP 数据报理论最大长度（IPv4 65535 − 20 IP 头 − 8 UDP 头 = 65507）。
      *
      * `receiveUdp()` 用此值作为 `stream_socket_recvfrom` 的缓冲区上限，
@@ -995,22 +1008,28 @@ final class NativeRuntime extends AbstractRuntime
         if ($scheme === 'websocket' && !$conn->isHandshakeDone()) {
             // 握手前的字节不走 HttpProtocol::input() 的长度上限，客户端持续发送
             // 不含 \r\n\r\n 的数据即可无限增长 recvBuffer → 单连接打爆 worker。
-            if (strlen($conn->getBuffer()) > 16384) {
+            if (strlen($conn->getBuffer()) > self::MAX_HEADER_BUFFER) {
                 $this->closeConnection($conn);
                 return;
             }
             if (!$conn->hasFullHttpRequest()) {
                 return;
             }
-            $req = $conn->getBuffer();
+            $buf        = $conn->getBuffer();
+            $headerEnd  = strpos($buf, "\r\n\r\n");
+            $req        = $headerEnd === false ? $buf : substr($buf, 0, $headerEnd + 4);
             if (!WebSocketProtocol::isHandshakeRequest($req)) {
                 $this->closeConnection($conn);
                 return;
             }
             $conn->sendRaw((string)WebSocketProtocol::handshake($req));
             $conn->setHandshakeDone();
-            $conn->clearBuffer();
-            return;
+            // 保留升级请求之后管道过来的首帧（部分客户端把 upgrade 与第一帧合并发送），
+            // 不能整体 clearBuffer 否则会丢帧。
+            $conn->setBuffer($headerEnd === false ? '' : substr($buf, $headerEnd + 4));
+            // 不 return：握手请求与首帧可能在同一次 fread 里被整段读入，若直接返回，
+            // 遗留在缓冲里的首帧要等到下一次「可读事件」才会被处理——而此时 socket 已无可读
+            // 数据、事件永不触发，帧被永久搁置。落到下方帧处理循环立即消费即可。
         }
 
         $protoClass = $conn->protocolClass();
@@ -1021,6 +1040,15 @@ final class NativeRuntime extends AbstractRuntime
 
         $isHttp = $scheme === 'http';
         $isWs   = $scheme === 'websocket';
+
+        // 头部累积阶段硬上限（Slowloris 防护，见 MAX_HEADER_BUFFER 注释）：
+        // 头块未定型（未出现 \r\n\r\n）而缓冲已超过上限立即断开。仅作用于 HTTP 请求头——
+        // WebSocket 帧与 HTTP 请求体由各自的 input() 长度校验兜底，不在此限。
+        if ($isHttp && !$conn->hasFullHttpRequest()
+            && strlen($conn->getBuffer()) > self::MAX_HEADER_BUFFER) {
+            $this->closeConnection($conn);
+            return;
+        }
 
         while (true) {
             $buf = $conn->getBuffer();

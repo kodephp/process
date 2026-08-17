@@ -330,6 +330,78 @@ final class NativeRuntimeTest extends TestCase
         }
     }
 
+    /**
+     * 审计加固回归：HTTP 头部累积阶段 recvBuffer 硬上限（Slowloris 防护）。
+     *
+     * 客户端持续发送不含完整头块（\r\n\r\n）的超大缓冲，服务器应在超过
+     * MAX_HEADER_BUFFER（64KB）时主动断开，而非任由 recvBuffer 无限增长打爆 worker。
+     */
+    public function testNativeHttpHeaderBufferCap(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port   = $this->findFreePort();
+        $handler = 'function ($conn, $data): void {'
+            . '$text = is_string($data) ? $data : json_encode($data);'
+            . '$conn->send("pong:" . $text);'
+            . '}';
+        $script = $this->writeHttpServerScript($port, ['workers' => 1], $handler);
+        $proc   = proc_open([PHP_BINARY, $script], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native HTTP 服务器子进程');
+        $this->waitForPort($port, 4.0);
+
+        try {
+            $fp = @fsockopen('127.0.0.1', $port, $errno, $errstr, 2.0);
+            $this->assertNotFalse($fp, "HTTP 连接失败: {$errstr} ({$errno})");
+            stream_set_timeout($fp, 3);
+
+            // 发送 70KB 不含 \r\n\r\n 的伪头块，触发头部缓冲上限
+            fwrite($fp, str_repeat('X', 70000));
+
+            $buf    = '';
+            $closed = false;
+            for ($i = 0; $i < 40; $i++) {
+                $chunk = @fread($fp, 1024);
+                if ($chunk === false) {
+                    break;
+                }
+                if ($chunk !== '') {
+                    // 服务器竟然回了数据 → 防护失效
+                    $buf .= $chunk;
+                    break;
+                }
+                if (feof($fp)) {
+                    $closed = true;
+                    break;
+                }
+                usleep(100_000); // fread 超时（无数据）：继续等，不立即判定
+            }
+
+            $this->assertTrue($closed, '服务器未在头部缓冲超限时关闭连接（Slowloris 防护失效）');
+            $this->assertStringNotContainsString(
+                "\r\n\r\n",
+                $buf,
+                '超限连接不应被派发到 handler（缺少头部上限保护）'
+            );
+            fclose($fp);
+        } finally {
+            $status = proc_get_status($proc);
+            $pid = $status['pid'] ?? null;
+            if ($pid !== null && $pid > 0) {
+                @posix_kill($pid, SIGTERM);
+                usleep(300_000);
+                $still = proc_get_status($proc);
+                if ($still['running']) {
+                    @posix_kill($pid, SIGKILL);
+                }
+            }
+            proc_close($proc);
+            @unlink($script);
+        }
+    }
+
     private function findFreePort(): int
     {
         $sock = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
@@ -511,6 +583,85 @@ PHP;
                 }
             }
             $this->assertTrue($gotFull, '分片消息未被重组为完整消息派发');
+
+            fclose($fp);
+        } finally {
+            $status = proc_get_status($proc);
+            $pid = $status['pid'] ?? null;
+            if ($pid !== null && $pid > 0) {
+                @posix_kill($pid, SIGTERM);
+                usleep(300_000);
+                $still = proc_get_status($proc);
+                if ($still['running']) {
+                    @posix_kill($pid, SIGKILL);
+                }
+            }
+            proc_close($proc);
+            @unlink($script);
+        }
+    }
+
+    /**
+     * 审计加固回归：WebSocket 升级请求与首帧在同一包内管道发送时不得丢帧。
+     *
+     * 旧实现握手成功后整体 clearBuffer()，会丢弃紧随升级请求之后的首帧（部分客户端
+     * 把 upgrade 与第一帧合并发送），表现为握手成功但首条消息石沉大海。修复后仅截取
+     * 请求部分，剩余字节落到帧处理循环立即消费。
+     */
+    public function testNativeWebSocketHandshakePipelinedFrame(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port   = $this->findFreePort();
+        $script = $this->writeWsServerScript($port);
+        $proc   = proc_open([PHP_BINARY, $script], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native WS 服务器子进程');
+        $this->waitForPort($port, 4.0);
+
+        try {
+            $fp  = $this->wsConnect($port);
+            $key = base64_encode(random_bytes(16));
+
+            // 握手请求与一条掩码文本帧合并为单个写操作
+            $handshake = "GET / HTTP/1.1\r\n"
+                . "Host: 127.0.0.1\r\n"
+                . "Upgrade: websocket\r\n"
+                . "Connection: Upgrade\r\n"
+                . "Sec-WebSocket-Key: {$key}\r\n"
+                . "Sec-WebSocket-Version: 13\r\n\r\n";
+            $firstFrame = $this->wsMaskedFrame(0x1, 'piped-first');
+
+            fwrite($fp, $handshake . $firstFrame);
+
+            // 101 握手响应与首帧回显可能在同一 TCP 段内合并到达，一次性读完再判定，
+            // 避免先读 101 把后续回显字节从流里「吃」掉导致误判丢帧。
+            stream_set_timeout($fp, 3);
+            $all = '';
+            $deadline = microtime(true) + 3.0;
+            while (microtime(true) < $deadline) {
+                $chunk = @fread($fp, 4096);
+                if ($chunk === '' || $chunk === false) {
+                    if (feof($fp)) {
+                        break;
+                    }
+                    usleep(50_000);
+                    continue;
+                }
+                $all .= $chunk;
+                if (str_contains($all, "\r\n\r\n") && str_contains($all, 'piped-first')) {
+                    break;
+                }
+            }
+
+            $this->assertStringContainsString('101', $all, 'WS 握手未返回 101');
+            // 回显载荷里出现 'piped-first' 即证明管道过来的首帧被正确处理、未丢失
+            $this->assertStringContainsString(
+                'piped-first',
+                $all,
+                '升级请求后管道过来的首帧被丢弃（丢帧 bug）'
+            );
 
             fclose($fp);
         } finally {
