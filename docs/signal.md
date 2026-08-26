@@ -178,6 +178,16 @@ kode info             # 版本信息
 3. **信号安全函数** - 在信号处理器中只使用异步信号安全函数
 4. **多进程注意** - 信号发送给主进程，由主进程分发给子进程
 
+### 进程 fork 后的信号重置
+
+当使用 `pcntl_fork()` 创建子进程时，子进程会继承父进程的信号处理器。本框架在 worker 进程创建期间已处理此问题：
+
+- **NativeRuntime** (`src/Runtime/Driver/NativeRuntime.php:629-631`): fork 后的 worker 进程会自动将 SIGTERM, SIGINT, SIGUSR1, SIGCHLD 重置为 SIG_DFL，避免子进程干扰父进程的信号处理
+- **ProcessManager**: 已在进程管理层面固化此行为，确保 worker 进程启动时信号处理器处于默认状态
+- **自定义 fork**: 若在其他上下文中使用 `pcntl_fork()`，建议在 child callback 中显式重置关键信号至 SIG_DFL，防止信号处理器继承导致的意外行为
+
+> **最佳实践**：在 fork 后的 child callback 中，如需保留自定义信号处理，请显式使用 `pcntl_signal($signal, $handler)` 注册而非依赖继承。
+
 ## 完整示例
 
 ```php

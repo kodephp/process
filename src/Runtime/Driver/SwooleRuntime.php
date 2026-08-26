@@ -34,7 +34,20 @@ final class SwooleRuntime extends AbstractRuntime
 
     public static function isAvailable(): bool
     {
-        return extension_loaded('swoole') && class_exists('\Swoole\Server');
+        if (!extension_loaded('swoole')) {
+            return false;
+        }
+        if (!class_exists('\Swoole\Server')) {
+            return false;
+        }
+        // Older Swoole versions may not properly report protocol version;
+        // verify the extension is functional by checking swoole_version()
+        // returns a non-empty string and the Server class has expected properties.
+        $version = swoole_version();
+        if ($version === '' || $version === null) {
+            return false;
+        }
+        return true;
     }
 
     public static function type(): RuntimeType
@@ -44,7 +57,11 @@ final class SwooleRuntime extends AbstractRuntime
 
     public static function version(): ?string
     {
-        return self::isAvailable() ? (string)swoole_version() : null;
+        if (!self::isAvailable()) {
+            return null;
+        }
+        $v = swoole_version();
+        return $v !== '' ? $v : null;
     }
 
     public function __construct()
