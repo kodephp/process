@@ -78,11 +78,14 @@ class MasterProcess implements ProcessInterface
 
     public function __construct(array $config = [], ?LoggerInterface $logger = null)
     {
+        $root = $config['root'] ?? $_SERVER['DOCUMENT_ROOT'] ?? getcwd();
+        $rootHash = substr(hash('xxh64', $root), 0, 8);
+
         $this->config = array_merge([
             'worker_count' => 4,
             'max_requests' => 10000,
             'heartbeat_interval' => 5.0,
-            'pid_file' => sys_get_temp_dir() . '/kode-process.pid',
+            'pid_file' => sys_get_temp_dir() . "/kode-process-{$rootHash}.pid",
             'log_file' => sys_get_temp_dir() . '/kode-process.log',
             'daemonize' => false,
             'user' => null,
@@ -90,6 +93,8 @@ class MasterProcess implements ProcessInterface
             'chroot' => null,
             'max_memory' => 512 * 1024 * 1024,
             'graceful_timeout' => 30,
+            'restart_backoff_base' => 100000, // 100ms 基础退避
+            'restart_backoff_max' => 5000000, // 5s 最大退避
         ], $config);
 
         $this->logger = $logger ?? new NullLogger();
@@ -222,6 +227,12 @@ class MasterProcess implements ProcessInterface
             exit(0);
         }
 
+        // 子进程重置信号处理器
+        pcntl_async_signals(false);
+        foreach ([SIGTERM, SIGINT, SIGUSR1, SIGCHLD] as $s) {
+            pcntl_signal($s, SIG_DFL);
+        }
+
         posix_setsid();
 
         $pid = pcntl_fork();
@@ -232,6 +243,12 @@ class MasterProcess implements ProcessInterface
 
         if ($pid > 0) {
             exit(0);
+        }
+
+        // 二次 fork 后再次重置（双重保险）
+        pcntl_async_signals(false);
+        foreach ([SIGTERM, SIGINT, SIGUSR1, SIGCHLD] as $s) {
+            pcntl_signal($s, SIG_DFL);
         }
 
         umask(0);
@@ -565,6 +582,20 @@ class MasterProcess implements ProcessInterface
 
     private function respawn(int $slot): void
     {
+        $attempt = $this->restartCounts[$slot] ?? 0;
+
+        // 指数退避：base * 2^attempt，上限 max
+        $base = $this->config['restart_backoff_base'] ?? 100000;
+        $max = $this->config['restart_backoff_max'] ?? 5000000;
+        $delay = min($base * (1 << $attempt), $max);
+
+        $this->logger->info('Worker 重生退避', [
+            'slot' => $slot,
+            'attempt' => $attempt,
+            'delay_us' => $delay,
+        ]);
+        usleep($delay);
+
         try {
             $replacement = ($this->workerSpawner)();
 
@@ -576,7 +607,7 @@ class MasterProcess implements ProcessInterface
             $this->registerWorker($replacement, $slot);
             $this->logger->info('Worker 已自动重生', [
                 'slot' => $slot,
-                'attempt' => $this->restartCounts[$slot] ?? 0,
+                'attempt' => $attempt,
             ]);
         } catch (\Throwable $e) {
             $this->logger->error('Worker 自动重生失败', ['slot' => $slot, 'error' => $e->getMessage()]);

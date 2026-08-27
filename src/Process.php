@@ -146,6 +146,11 @@ final class Process
         }
 
         if ($pid === 0) {
+            // 子进程首行：重置父进程遗留的信号处理器，防止 handler 泄漏导致异常行为
+            pcntl_async_signals(false);
+            foreach ([SIGTERM, SIGINT, SIGUSR1, SIGCHLD] as $s) {
+                pcntl_signal($s, SIG_DFL);
+            }
             $childCallback();
             exit(0);
         }
@@ -242,6 +247,12 @@ final class Process
             exit(0);
         }
 
+        // 子进程重置信号处理器
+        pcntl_async_signals(false);
+        foreach ([SIGTERM, SIGINT, SIGUSR1, SIGCHLD] as $s) {
+            pcntl_signal($s, SIG_DFL);
+        }
+
         posix_setsid();
 
         $pid = pcntl_fork();
@@ -252,6 +263,12 @@ final class Process
 
         if ($pid > 0) {
             exit(0);
+        }
+
+        // 二次 fork 后再次重置（双重保险）
+        pcntl_async_signals(false);
+        foreach ([SIGTERM, SIGINT, SIGUSR1, SIGCHLD] as $s) {
+            pcntl_signal($s, SIG_DFL);
         }
 
         umask(0);
