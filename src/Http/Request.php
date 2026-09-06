@@ -521,10 +521,90 @@ final class Request implements \ArrayAccess, \IteratorAggregate, \Countable, \Js
             self::SRC_ARRAY     => (array)($this->preset['files'] ?? []),
             self::SRC_SWOOLE    => (array)($this->native->files ?? []),
             self::SRC_WORKERMAN => (array)($this->native->file() ?? []),
-            default             => [],
+            default             => $this->parseMultipartFiles(),
         };
 
         return $this->files;
+    }
+
+    /**
+     * Native 运行时 multipart 解析（SRC_RAW）。
+     *
+     * Swoole/Workerman 由引擎预解析；自研运行时在此补齐，否则上传在默认运行时
+     * 永远拿不到文件。约束：单请求至多 20 个文件、单文件 100MB（超限部件按
+     * UPLOAD_ERR_INI_SIZE 标记，不中断其它部件）；文件名经 basename 清洗。
+     *
+     * @return array<string, \Psr\Http\Message\UploadedFileInterface|array>
+     */
+    private function parseMultipartFiles(): array
+    {
+        $files = [];
+        if ($this->source !== self::SRC_RAW) {
+            return $files;
+        }
+
+        $contentType = $this->rawHeader('content-type');
+        if ($contentType === '' || stripos($contentType, 'multipart/form-data') === false) {
+            return $files;
+        }
+        if (!preg_match('/boundary=(?:"([^"]{1,128})"|([^\s;,]{1,128}))/', $contentType, $m)) {
+            return $files;
+        }
+        $boundary = $m[1] !== '' ? $m[1] : $m[2];
+
+        $body = $this->body();
+        if ($body === '') {
+            return $files;
+        }
+
+        $count = 0;
+        foreach (explode('--' . $boundary, $body) as $part) {
+            $part = ltrim($part, "\r\n");
+            if ($part === '' || $part === '--' || str_starts_with($part, '--')) {
+                continue;
+            }
+            if (++$count > 20) {
+                break;
+            }
+            $sep = strpos($part, "\r\n\r\n");
+            if ($sep === false) {
+                continue;
+            }
+            $head = substr($part, 0, $sep);
+            $content = substr($part, $sep + 4);
+            if (str_ends_with($content, "\r\n")) {
+                $content = substr($content, 0, -2);
+            }
+            if (!preg_match('/Content-Disposition:\s*form-data;\s*name="([^"]*)"/i', $head, $nm)) {
+                continue;
+            }
+            $name = $nm[1];
+            if (!preg_match('/filename="([^"]*)"/i', $head, $fm)) {
+                continue; // 纯文本字段归 post()，此处只收文件
+            }
+            $filename = basename($fm[1]);
+            if ($filename === '') {
+                continue;
+            }
+            $mediaType = 'application/octet-stream';
+            if (preg_match('/Content-Type:\s*([^\s;]+)/i', $head, $tm)) {
+                $mediaType = trim($tm[1]);
+            }
+
+            $size = strlen($content);
+            if ($size > 100 * 1024 * 1024) {
+                $files[$name] = new UploadedFile('', 0, UPLOAD_ERR_INI_SIZE, $filename, $mediaType);
+                continue;
+            }
+            $tmp = tempnam(sys_get_temp_dir(), 'kode_up_');
+            if ($tmp === false || file_put_contents($tmp, $content) === false) {
+                $files[$name] = new UploadedFile('', 0, UPLOAD_ERR_CANT_WRITE, $filename, $mediaType);
+                continue;
+            }
+            $files[$name] = new UploadedFile($tmp, $size, UPLOAD_ERR_OK, $filename, $mediaType);
+        }
+
+        return $files;
     }
 
     // --------------------------------------------------------- 附加数据

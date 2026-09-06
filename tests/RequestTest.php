@@ -468,4 +468,36 @@ final class RequestTest extends TestCase
     {
         $this->assertNull(Request::fromRaw(self::RAW_GET)->native());
     }
+
+    // ------------------------------------------------------------ multipart
+
+    private const string RAW_UPLOAD =
+        "POST /api/upload HTTP/1.1\r\n"
+        . "Host: example.com\r\n"
+        . "Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW\r\n"
+        . "\r\n"
+        . "------WebKitFormBoundary7MA4YWxkTrZu0gW\r\n"
+        . "Content-Disposition: form-data; name=\"file\"; filename=\"hello.txt\"\r\n"
+        . "Content-Type: text/plain\r\n"
+        . "\r\n"
+        . "hello upload\n"
+        . "\r\n------WebKitFormBoundary7MA4YWxkTrZu0gW--\r\n";
+
+    public function testMultipartFilesParsed(): void
+    {
+        $req = Request::fromRaw(self::RAW_UPLOAD);
+        $files = $req->files();
+
+        $this->assertArrayHasKey('file', $files);
+        $this->assertInstanceOf(\Psr\Http\Message\UploadedFileInterface::class, $files['file']);
+        $this->assertSame(UPLOAD_ERR_OK, $files['file']->getError());
+        $this->assertSame('hello.txt', $files['file']->getClientFilename());
+        $this->assertSame('text/plain', $files['file']->getClientMediaType());
+        $this->assertSame("hello upload\n", $files['file']->getStream()->getContents());
+    }
+
+    public function testNonMultipartHasNoFiles(): void
+    {
+        $this->assertSame([], Request::fromRaw(self::RAW_POST_JSON)->files());
+    }
 }
