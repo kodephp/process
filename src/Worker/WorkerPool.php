@@ -12,8 +12,11 @@ use Psr\Log\NullLogger;
 
 /**
  * Worker 进程池
- * 
- * 管理一组 Worker 进程，提供负载均衡和自动伸缩
+ *
+ * 管理一组 Worker 进程，提供负载均衡。
+ * 伸缩接口（scale/addWorker/removeWorker）只是容量操作：getAverageLoad() 读到的是
+ * master 侧 fork 时的冻结副本（恒为初始值），不能据此自动伸缩——autoScale 须由外部
+ * 用真实指标（IPC 上报、系统负载）驱动。
  */
 class WorkerPool implements PoolInterface
 {

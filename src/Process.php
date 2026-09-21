@@ -33,6 +33,9 @@ final class Process
 
     private static ?LoggerInterface $logger = null;
 
+    /** daemonize() 重挂的 0/1/2 号标准流，持有引用防止 GC 关闭 fd */
+    private static array $daemonStdHandles = [];
+
     private static array $ipcChannels = [];
 
     public static function setLogger(LoggerInterface $logger): void
@@ -169,11 +172,16 @@ final class Process
 
         $result = pcntl_waitpid($targetPid, $status, $flags);
 
+        // 状态位必须先判断终止类别再取值：对被信号杀死/停止的子进程无条件调
+        // pcntl_wexitstatus 会读出垃圾值（信号编号被当成退出码）。
+        $exited = $result > 0 && pcntl_wifexited($status);
+        $signaled = $result > 0 && pcntl_wifsignaled($status);
+
         return [
             'pid' => $result,
-            'exit_code' => $result > 0 ? pcntl_wexitstatus($status) : 0,
-            'signaled' => $result > 0 ? pcntl_wifsignaled($status) : false,
-            'signal' => $result > 0 ? pcntl_wtermsig($status) : 0,
+            'exit_code' => $exited ? pcntl_wexitstatus($status) : 0,
+            'signaled' => $signaled,
+            'signal' => $signaled ? pcntl_wtermsig($status) : 0,
         ];
     }
 
@@ -277,6 +285,15 @@ final class Process
         fclose(STDIN);
         fclose(STDOUT);
         fclose(STDERR);
+
+        // 关闭后必须重挂：fd 0/1/2 悬空时，后续任何 fopen/socket 都可能占用它们，
+        // 导致 echo/var_dump 写进业务文件句柄。且引用必须存放在静态属性——
+        // 局部变量出作用域即销毁资源、fd 又被关掉，等于没重挂。
+        $stdin = fopen('/dev/null', 'r');
+        $stdout = fopen('/dev/null', 'w');
+        $stderr = fopen('/dev/null', 'w');
+
+        self::$daemonStdHandles = array_filter([$stdin, $stdout, $stderr]);
 
         return true;
     }

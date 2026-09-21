@@ -434,9 +434,24 @@ final class TimerTest extends TestCase
         $this->assertSame(intdiv($a, 60), intdiv($b, 60));
         $this->assertSame(intdiv($b, 60), intdiv($c, 60));
 
-        // 且分钟组件本身正确（每月 4 日 03:17，当前 8 月 17 日之后最近为 9 月 4 日）
+        // 且命中组件正确：期望值按「下一个 4 日 03:17」动态推导，
+        // 不硬编码月份（原断言写死 mon=9 只在大约 8 月内成立，跨月即假失败）
         $d = getdate($a);
-        $this->assertSame(9, $d['mon']);
+
+        $now = new \DateTimeImmutable('now');
+        $minuteFloor = $now->setTime((int) $now->format('G'), (int) $now->format('i'), 0);
+        $expected = $minuteFloor
+            ->setDate((int) $minuteFloor->format('Y'), (int) $minuteFloor->format('n'), 4)
+            ->setTime(3, 17, 0);
+
+        if ($expected < $minuteFloor) {
+            $nextMonth = $minuteFloor->modify('first day of next month');
+            $expected = $nextMonth
+                ->setDate((int) $nextMonth->format('Y'), (int) $nextMonth->format('n'), 4)
+                ->setTime(3, 17, 0);
+        }
+
+        $this->assertSame(intdiv($expected->getTimestamp(), 60), intdiv($a, 60), '命中的分钟与期望不符');
         $this->assertSame(4, $d['mday']);
         $this->assertSame(3, $d['hours']);
         $this->assertSame(17, $d['minutes']);

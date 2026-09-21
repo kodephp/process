@@ -230,6 +230,7 @@ class WorkerProcess implements WorkerInterface
     public function stop(bool $graceful = true): void
     {
         if (!$this->running) {
+            $this->stopRemoteChild($graceful);
             return;
         }
 
@@ -252,6 +253,71 @@ class WorkerProcess implements WorkerInterface
         $this->state = ProcessInterface::STATE_STOPPED;
 
         $this->logger->info('Worker 已停止', ['worker_id' => $this->id]);
+    }
+
+    /**
+     * master 侧「代理对象」上的 stop。
+     *
+     * running 只在子进程内被 prepareWorker 置 true，master 持有的对象恒为 false；
+     * 原实现在此直接 return，导致池停止/缩容时对真实子进程既不发信号也不回收，
+     * worker 变成孤儿进程继续运行。此分支补上：发信号、限时等待退出并回收自家子进程。
+     */
+    private function stopRemoteChild(bool $graceful): void
+    {
+        if ($this->pid <= 0 || $this->pid === posix_getpid()) {
+            return;
+        }
+
+        $pid = $this->pid;
+        $signal = $graceful ? Signal::TERM : Signal::KILL;
+
+        if (!@posix_kill($pid, $signal)) {
+            // 发送失败：进程多半已退出但未回收（僵尸），回收并落状态
+            $this->reapIfOurs($pid);
+            $this->state = ProcessInterface::STATE_STOPPED;
+            return;
+        }
+
+        if ($graceful) {
+            $deadline = microtime(true) + 10;
+
+            // 僵尸状态下 posix_kill(pid,0) 仍为 true，须靠 waitpid 回收才能感知退出
+            while ($this->reapIfOurs($pid) === false && microtime(true) < $deadline) {
+                if (!@posix_kill($pid, 0)) {
+                    break;  // 已被别处（master SIGCHLD 处理器）回收
+                }
+                usleep(50000);
+            }
+        }
+
+        if (@posix_kill($pid, 0)) {
+            @posix_kill($pid, Signal::KILL);
+
+            $deadline = microtime(true) + 2;
+
+            while ($this->reapIfOurs($pid) === false && microtime(true) < $deadline) {
+                if (!@posix_kill($pid, 0)) {
+                    break;
+                }
+                usleep(20000);
+            }
+        }
+
+        $this->reapIfOurs($pid);
+        $this->state = ProcessInterface::STATE_STOPPED;
+
+        $this->logger->info('Worker 子进程已终止', ['worker_id' => $this->id, 'pid' => $pid]);
+    }
+
+    /**
+     * 只回收本对象对应的直接子进程；非自家子进程返回 false，绝不 waitpid(-1) 抢收
+     * （回收与重生是 MasterProcess::reapChildren 的职责）。
+     */
+    private function reapIfOurs(int $pid): bool
+    {
+        $status = 0;
+
+        return @pcntl_waitpid($pid, $status, WNOHANG) === $pid;
     }
 
     public function restart(): void
@@ -351,6 +417,13 @@ class WorkerProcess implements WorkerInterface
         return $this->load;
     }
 
+    /**
+     * 心跳快照。
+     *
+     * 注意：在 master 侧代理对象上调用时，返回的是 fork 时刻的冻结副本——子进程内的
+     * processedCount/lastHeartbeat 不会跨进程同步，启动超过 heartbeatTimeout 后
+     * 'overdue' 会恒为 true。真实心跳需子进程经 IPC/共享内存上报，勿据此直接杀进程。
+     */
     public function heartbeat(): array
     {
         $now = microtime(true);
@@ -370,6 +443,12 @@ class WorkerProcess implements WorkerInterface
         ];
     }
 
+    /**
+     * 同步执行一个任务。
+     *
+     * 重要：回调在「调用方进程」里直接跑——在 master 侧代理对象上调用即在 master
+     * 事件循环内阻塞执行，并不会投递给已 fork 的子进程。真正的跨进程派单需走 IPC。
+     */
     public function assignTask(string $taskId, array $data): void
     {
         if ($this->status !== WorkerInterface::STATUS_FREE) {

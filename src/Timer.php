@@ -398,6 +398,14 @@ final class Timer
         ];
     }
 
+    /**
+     * 计算 cron 表达式的下一次触发时间。
+     *
+     * 语义注意：5 个字段全部按「AND」匹配，未实现 Vixie cron 的
+     * 「day-of-month 与 day-of-week 同时受限时取 OR」规则
+     * （如 `0 9 1 * 5` 在 Vixie 下=每月1号 或 每周五，这里=仅逢1且逢五）。
+     * 需 OR 语义请改用 kode/scheduling 的 Cron 实现。
+     */
     private static function parseCronNext(string $expression): float
     {
         $parts = preg_split('/\s+/', trim($expression));

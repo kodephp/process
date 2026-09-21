@@ -32,6 +32,10 @@ class ProcessManager
 
     private bool $started = false;
 
+    private ?\Closure $workerCallback = null;
+
+    private ?\Closure $masterCallback = null;
+
     public function __construct(array $config = [], ?LoggerInterface $logger = null)
     {
         $this->config = array_merge([
@@ -61,7 +65,27 @@ class ProcessManager
 
         $this->logger->info('进程管理器启动中...');
 
-        $this->master = new MasterProcess($this->config, $this->logger);
+        $this->workerCallback = $workerCallback(...);
+
+        if ($masterCallback !== null) {
+            $this->masterCallback = $masterCallback(...);
+        }
+
+        // 配置键名对齐：ProcessManager 侧叫 *_per_worker/worker_timeout/restart_delay，
+        // WorkerFactory 与 MasterProcess 读的是另一套键——此前从不传递，自定义配置静默失效。
+        $this->workerFactory->setDefaults([
+            'max_requests' => $this->config['max_requests_per_worker'],
+            'max_memory' => $this->config['max_memory_per_worker'],
+            'heartbeat_timeout' => $this->config['worker_timeout'],
+        ]);
+
+        $masterConfig = array_merge($this->config, [
+            'max_requests' => $this->config['max_requests_per_worker'],
+            'max_restart_attempts' => $this->config['max_restart_attempts'],
+            'restart_backoff_base' => (int) ($this->config['restart_delay'] * 1000000),
+        ]);
+
+        $this->master = new MasterProcess($masterConfig, $this->logger);
 
         $this->workerPool = new WorkerPool(
             $this->config['worker_count'],
@@ -81,8 +105,8 @@ class ProcessManager
         // 未注入时（直接 new MasterProcess 使用）保持旧行为——退出不重生。
         $this->master->setWorkerSpawner(fn() => $this->workerPool->addWorker());
 
-        if ($masterCallback !== null) {
-            $this->master->onHeartbeat($masterCallback);
+        if ($this->masterCallback !== null) {
+            $this->master->onHeartbeat($this->masterCallback);
         }
 
         $this->started = true;
@@ -118,6 +142,13 @@ class ProcessManager
         usleep(100000);
 
         $this->started = false;
+
+        if ($this->workerCallback === null) {
+            $this->logger->warning('restart() 前从未成功 start()，无回调可复用，仅完成停止');
+            return;
+        }
+
+        $this->start($this->workerCallback, $this->masterCallback);
     }
 
     public function reload(): void

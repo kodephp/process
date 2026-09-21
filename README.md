@@ -536,6 +536,19 @@ src/
 ./vendor/bin/phpunit
 ```
 
+## 版本要点
+
+### v5.3.0
+- Master 侧 `WorkerProcess` 代理对象的 `stop()` 此前直接空转（`running` 仅子进程内置位），池停止/缩容时对真实子进程不发信号不回收，留下孤儿进程；现在会发 TERM/KILL、限时等待并只回收自家子进程（`pcntl_waitpid(pid, WNOHANG)`），不与 `MasterProcess::reapChildren` 抢收。
+- `MasterProcess::start()` 监听失败现在回滚 PID 文件并复位状态（否则残留 PID 文件让下次启动误判「已在运行」）；`max_restart_attempts` 配置此前从未生效，现已接入。
+- `serverSocket` 属性与 `getServerSocket()` 返回类型改为 `?\Socket`（`socket_create()` 返回对象，原 `?int` 标注使一切 port 配置启动即 TypeError）；bind/listen 失败异常携带 strerror 且不再双打 PHP 告警。
+- 守护化重挂的 0/1/2 号流现在持有引用（局部变量出作用域即被 GC 关闭），`rotateLog()` 轮转后重开日志文件，避免继续写入已改名的旧 inode。
+- `Process::wait()` 按终止类别取退出状态：被信号杀死的子进程不再把信号编号当退出码返回。
+- `ProcessManager`：`max_requests_per_worker / max_memory_per_worker / worker_timeout / restart_delay / max_restart_attempts` 现在真正传递到 WorkerFactory 与 MasterProcess（此前静默走内置默认）；`restart()` 现在用保存的回调真正重新拉起，而不是只停不起。
+- `Timer::cron()` 文档明确：5 字段纯 AND 匹配，未实现 Vixie 的 day-of-month/day-of-week OR 规则（需该语义用 kode/scheduling 的 Cron）。
+- `WorkerProcess::heartbeat()/assignTask()` 文档明确各自陷阱：master 侧心跳是 fork 时冻结副本（超时后 `overdue` 恒真）；`assignTask()` 的回调在调用方进程同步执行，不会投递给子进程。
+- 测试：`TimerTest` 硬编码月份的断言改为按「下一个 4 日 03:17」动态推导（此前跨月即假失败）；新增 `ProcessFixesTest` 6 例回归。
+
 ## 许可证
 
 Apache License 2.0

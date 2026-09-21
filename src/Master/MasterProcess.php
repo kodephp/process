@@ -56,7 +56,14 @@ class MasterProcess implements ProcessInterface
 
     private array $config;
 
-    private ?int $serverSocket = null;
+    /**
+     * 服务器套接字。socket_create() 返回的是 Socket 对象（不是 int），
+     * 此前误标 ?int——任何走 port 配置的启动都会赋值即 TypeError。
+     */
+    private ?\Socket $serverSocket = null;
+
+    /** 守护化后重新挂接的 0/1/2 号标准流，必须持有引用防止 GC 关闭 fd */
+    private array $daemonHandles = [];
 
     private ?string $pidFile = null;
 
@@ -104,6 +111,7 @@ class MasterProcess implements ProcessInterface
         $this->daemonize = $this->config['daemonize'];
         $this->maxRequests = $this->config['max_requests'];
         $this->heartbeatInterval = $this->config['heartbeat_interval'];
+        $this->maxRestartAttempts = (int) ($this->config['max_restart_attempts'] ?? $this->maxRestartAttempts);
     }
 
     public function start(): void
@@ -125,7 +133,16 @@ class MasterProcess implements ProcessInterface
 
         $this->writePidFile();
         $this->registerSignalHandlers();
-        $this->setupServerSocket();
+
+        try {
+            $this->setupServerSocket();
+        } catch (\Throwable $e) {
+            // 监听失败必须回滚：否则 PID 文件残留，下次启动误判「进程已在运行」而拒绝启动。
+            $this->removePidFile();
+            $this->running = false;
+            $this->state = ProcessInterface::STATE_STOPPED;
+            throw $e;
+        }
 
         $this->state = ProcessInterface::STATE_RUNNING;
         $this->logger->info('Master 进程已启动', ['pid' => $this->pid]);
@@ -267,6 +284,10 @@ class MasterProcess implements ProcessInterface
         $stdout = fopen($this->logFile, 'a');
         $stderr = fopen($this->logFile, 'a');
 
+        // 必须持有引用：fopen 返回的资源若无变量持有，PHP 释放时会自动 fclose，
+        // 新挂接的 0/1/2 号 fd 又变空，后续写 stdout 直接失败。
+        $this->daemonHandles = [$stdin, $stdout, $stderr];
+
         if ($this->config['user']) {
             $user = posix_getpwnam($this->config['user']);
             if ($user) {
@@ -341,12 +362,18 @@ class MasterProcess implements ProcessInterface
         $host = $this->config['host'] ?? '0.0.0.0';
         $port = $this->config['port'];
 
-        if (!socket_bind($socket, $host, $port)) {
-            throw new ProcessException(sprintf('无法绑定到 %s:%d', $host, $port));
+        // 失败路径 @ 抑制 PHP 内置告警：紧随的异常已携带 strerror 上下文
+        if (!@socket_bind($socket, $host, $port)) {
+            throw new ProcessException(sprintf(
+                '无法绑定到 %s:%d: %s',
+                $host,
+                $port,
+                socket_strerror(socket_last_error($socket))
+            ));
         }
 
-        if (!socket_listen($socket, $this->config['backlog'] ?? 1024)) {
-            throw new ProcessException('无法监听套接字');
+        if (!@socket_listen($socket, $this->config['backlog'] ?? 1024)) {
+            throw new ProcessException('无法监听套接字: ' . socket_strerror(socket_last_error($socket)));
         }
 
         $this->serverSocket = $socket;
@@ -651,6 +678,21 @@ class MasterProcess implements ProcessInterface
         $backup = $this->logFile . '.' . date('YmdHis');
         rename($this->logFile, $backup);
 
+        // rename 不会使已打开的 fd 失效：守护模式下 stdout/stderr 仍写向被改名的
+        // 旧 inode，新日志文件永远为空。轮转后必须重开并替换持有引用的句柄。
+        if ($this->daemonHandles !== []) {
+            $handleCount = count($this->daemonHandles);
+            $this->daemonHandles = [];  // 先释引用，避免关闭顺序把新 fd 干掉
+
+            for ($i = 1; $i < $handleCount; $i++) {
+                $fresh = fopen($this->logFile, 'a');
+
+                if ($fresh !== false) {
+                    $this->daemonHandles[$i] = $fresh;
+                }
+            }
+        }
+
         $this->logger->info('日志文件已轮转', ['backup' => $backup]);
     }
 
@@ -830,7 +872,7 @@ class MasterProcess implements ProcessInterface
         return $this->logger;
     }
 
-    public function getServerSocket(): ?int
+    public function getServerSocket(): ?\Socket
     {
         return $this->serverSocket;
     }
