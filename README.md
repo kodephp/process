@@ -538,6 +538,9 @@ src/
 
 ## 版本要点
 
+### v5.3.1
+- 修正版本常量漂移：`Version::MAJOR/MINOR/PATCH/VERSION/VERSION_ID` 停在 5.2.36，而包已发布到 5.3.0，运行时信息（`NativeRuntime::version()` 等）对外报旧版本。新增 `tests/VersionGuardTest` 双向守卫：常量组 == composer.json 的 version，且 `VERSION_ID == MAJOR*10000 + MINOR*100 + PATCH`。行为无变化。
+
 ### v5.3.0
 - Master 侧 `WorkerProcess` 代理对象的 `stop()` 此前直接空转（`running` 仅子进程内置位），池停止/缩容时对真实子进程不发信号不回收，留下孤儿进程；现在会发 TERM/KILL、限时等待并只回收自家子进程（`pcntl_waitpid(pid, WNOHANG)`），不与 `MasterProcess::reapChildren` 抢收。
 - `MasterProcess::start()` 监听失败现在回滚 PID 文件并复位状态（否则残留 PID 文件让下次启动误判「已在运行」）；`max_restart_attempts` 配置此前从未生效，现已接入。

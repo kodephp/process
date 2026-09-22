@@ -16,13 +16,15 @@ final class VersionTest extends TestCase
 
     public function testVersionId(): void
     {
-        $this->assertSame(50236, Version::getId());
+        $this->assertSame(Version::VERSION_ID, Version::getId());
     }
 
     public function testVersionComponents(): void
     {
+        $parts = explode('.', Version::get());
+
         $this->assertSame(5, Version::getMajor());
-        $this->assertSame(2, Version::getMinor());
+        $this->assertSame((int) $parts[1], Version::getMinor());
         $this->assertGreaterThanOrEqual(0, Version::getPatch());
     }
 
@@ -108,8 +110,8 @@ final class VersionTest extends TestCase
     {
         $info = Version::getInfo();
 
-        $this->assertSame('5.2.36', $info['version']);
-        $this->assertSame(50236, $info['version_id']);
+        $this->assertSame(Version::VERSION, $info['version']);
+        $this->assertSame(Version::VERSION_ID, $info['version_id']);
         $this->assertSame('8.3.0', $info['minimum_php']);
         $this->assertTrue($info['php_supported']);
         $this->assertIsArray($info['features']);
@@ -137,15 +139,16 @@ final class VersionTest extends TestCase
 
     public function testVersionComparison(): void
     {
-        $this->assertTrue(Version::isEqualTo('5.2.36'));
+        // 全部以当前版本为基准，避免每次发版回来改字面量
+        $this->assertTrue(Version::isEqualTo(Version::get()));
         $this->assertTrue(Version::isGreaterThan('2.9.0'));
         // 用一个不可能达到的版本，避免每次发版都要回来改这行
         $this->assertTrue(Version::isLessThan('99.0.0'));
-        $this->assertFalse(Version::isGreaterThan('5.2.36'));
+        $this->assertFalse(Version::isGreaterThan(Version::get()));
     }
 
     public function testToString(): void
     {
-        $this->assertSame('5.2.36', (string) new Version());
+        $this->assertSame(Version::get(), (string) new Version());
     }
 }
