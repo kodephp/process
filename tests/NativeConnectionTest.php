@@ -264,6 +264,31 @@ final class NativeConnectionTest extends TestCase
         fclose($peer);
     }
 
+    /**
+     * 每请求盖来路 IP 时不能反复碰套接字：peerName 在 accept 时就已经在手上，
+     * remoteIp() 只做一次去端口并缓存。
+     */
+    public function testRemoteIpStripsPortAndCaches(): void
+    {
+        $sock = fopen('php://memory', 'r+');
+        $conn = new NativeConnection($sock, '203.0.113.9:51000');
+        $this->assertSame('203.0.113.9', $conn->remoteIp());
+        $this->assertSame('203.0.113.9', $conn->remoteIp(), '第二次必须走缓存而不是再问一次套接字');
+
+        $v6 = new NativeConnection($sock, '[::1]:9527');
+        $this->assertSame('::1', $v6->remoteIp());
+        fclose($sock);
+    }
+
+    /** UDP 连接的对端在 udpPeer 上，同样要去端口。 */
+    public function testRemoteIpPrefersUdpPeer(): void
+    {
+        $sock = fopen('php://memory', 'r+');
+        $conn = new NativeConnection($sock, '', null, null, '192.0.2.17:40000');
+        $this->assertSame('192.0.2.17', $conn->remoteIp());
+        fclose($sock);
+    }
+
     private function readPeer($peer): string
     {
         $bytes    = '';

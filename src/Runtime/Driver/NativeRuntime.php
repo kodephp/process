@@ -1155,6 +1155,10 @@ final class NativeRuntime extends AbstractRuntime
             $connectionHeader = null;
 
             if ($isHttp && $message instanceof Request) {
+                // 来路 IP 由运行时盖：请求对象不知道自己属于哪条连接，而 accept 时
+                // 对端地址已经在手上了。审计、限流、登录防爆破读的都是这一个值。
+                $message->setRemoteAddress($conn->remoteIp());
+
                 // gzip / h2c / keep-alive 三处判定都走 Request::rawHeader() 的定向扫描：
                 // 只在原始报文里找那一行，不触发整块头部解析。业务不碰请求字段时，
                 // 一个请求从头到尾不会产生任何 header 数组。
@@ -1361,7 +1365,9 @@ final class NativeRuntime extends AbstractRuntime
         }
 
         // 与 HTTP/1.1 交付同一个类型：同一份 handler 无需分支即可服务 1.1 与 2
-        $this->fireMessage($stream, Request::fromArray($item['request']));
+        // 来路 IP 同样在这里盖：HTTP/2 的多路复用让「请求 ↔ 连接」的对应关系
+        // 只在这一行存在，流对象自己算不出对端地址。
+        $this->fireMessage($stream, Request::fromArray($item['request'])->setRemoteAddress($conn->remoteIp()));
         $this->countRequest();
 
         // 业务只发了头没发体（beginChunked 风格）时补上结束标记，避免客户端一直等

@@ -167,6 +167,86 @@ final class RequestTest extends TestCase
         $this->assertSame('1.2.3.4', $req->ip(true));
     }
 
+    /**
+     * 没人盖章就等于没有来路：这条本身不是 bug，bug 是运行时忘记盖章——
+     * 空串会让下游「按来路 IP」的判据把所有客户端折成同一个桶。
+     * 盖章动作由三个运行时各自主动执行，见 *RuntimeTest 的端到端断言。
+     */
+    public function testUnstampedRequestHasNoIp(): void
+    {
+        $req = Request::fromRaw("GET / HTTP/1.1\r\n\r\n");
+        $this->assertSame('', $req->ip());
+
+        $req->setRemoteAddress('203.0.113.7');
+        $this->assertSame('203.0.113.7', $req->ip(), 'setRemoteAddress 必须写进 ip() 读的那个键');
+    }
+
+    public function testSetRemoteAddressIsFluent(): void
+    {
+        $req = Request::fromRaw("GET / HTTP/1.1\r\n\r\n");
+        $this->assertSame($req, $req->setRemoteAddress('10.0.0.1'));
+    }
+
+    /**
+     * 对端地址串的形状由底层决定（IPv4 带端口、IPv6 带方括号端口、UDS 是路径），
+     * 切错了就是把端口留在审计里、或把 `::1` 切成 `:`。
+     *
+     * @dataProvider remoteAddressShapes
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('remoteAddressShapes')]
+    public function testIpOfExtractsAddressFromPeerName(string $address, string $expected): void
+    {
+        $this->assertSame($expected, Request::ipOf($address));
+    }
+
+    /** @return array<string, array{0: string, 1: string}> */
+    public static function remoteAddressShapes(): array
+    {
+        return [
+            'ipv4 with port'    => ['127.0.0.1:52341', '127.0.0.1'],
+            'ipv4 no port'      => ['10.0.0.1', '10.0.0.1'],
+            'ipv6 bracketed'    => ['[::1]:9527', '::1'],
+            'ipv6 v6 bracketed' => ['[2001:db8::1]:443', '2001:db8::1'],
+            'ipv6 bare'         => ['::1', '::1'],
+            'ipv6 bare v6'      => ['2001:db8::1', '2001:db8::1'],
+            'uds path'          => ['/tmp/kode/run.sock', '/tmp/kode/run.sock'],
+            'empty'             => ['', ''],
+            // 只有一个冒号且尾部是数字就按「地址:端口」切：调用方的输入恒是
+            // accept() 给的对端串，不是任意主机名，所以这里不校验地址形状。
+            'host with port'    => ['web:8080', 'web'],
+            'unclosed bracket'  => ['[::1', '[::1'],
+        ];
+    }
+
+    /**
+     * Swoole 把对端拆成 server['remote_addr'] + server['remote_port']，
+     * 工厂必须顺手搬进 ip() 读的那个键——否则 Swoole 上的审计同样是空列。
+     */
+    public function testSwooleFactoryCarriesRemoteAddr(): void
+    {
+        $native = new class () {
+            /** @var array<string, mixed> */
+            public array $server = ['remote_addr' => '198.51.100.9', 'remote_port' => 51000];
+            /** @var array<string, string> */
+            public array $header = [];
+        };
+        $this->assertSame('198.51.100.9', Request::fromSwoole($native)->ip());
+    }
+
+    /** 伪造的/缺字段的原生对象不能让工厂崩（本包对三方对象的字段一律按可选处理）。 */
+    public function testSwooleFactoryToleratesMissingServerParams(): void
+    {
+        $bare = new class () {
+        };
+        $this->assertSame('', Request::fromSwoole($bare)->ip());
+
+        $partial = new class () {
+            /** @var array<string, mixed> */
+            public array $server = ['query_string' => ''];
+        };
+        $this->assertSame('', Request::fromSwoole($partial)->ip());
+    }
+
     public function testHeaderFloodIsCapped(): void
     {
         $lines = '';

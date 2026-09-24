@@ -136,6 +136,14 @@ final class Request implements \ArrayAccess, \IteratorAggregate, \Countable, \Js
     {
         $req         = new self(self::SRC_SWOOLE);
         $req->native = $native;
+
+        // Swoole 把对端拆成 server['remote_addr'] + server['remote_port']，已是纯地址，
+        // 无需去端口。这里读的是直连对端，代理还原交给 ip(true) 那一侧。
+        $server = $native->server ?? null;
+        if (is_array($server) && isset($server['remote_addr']) && is_string($server['remote_addr'])) {
+            $req->attributes['remote_addr'] = $server['remote_addr'];
+        }
+
         return $req;
     }
 
@@ -374,6 +382,9 @@ final class Request implements \ArrayAccess, \IteratorAggregate, \Countable, \Js
      * 客户端 IP。默认只信任直连地址；`$trustProxy` 为真时才采信
      * `X-Forwarded-For` / `X-Real-IP`——反代头是可以伪造的，
      * 不在可信网络里就不该拿它做鉴权。
+     *
+     * 直连地址由运行时在交付请求时写入（{@see setRemoteAddress()}）。
+     * 空串 = 运行时没给（例如请求是手工构造的），此时不要拿它做判定。
      */
     public function ip(bool $trustProxy = false): string
     {
@@ -390,6 +401,49 @@ final class Request implements \ArrayAccess, \IteratorAggregate, \Countable, \Js
         }
 
         return (string)($this->attributes['remote_addr'] ?? '');
+    }
+
+    /**
+     * 回写直连对端地址（已去端口），供 {@see ip()} 读取。
+     *
+     * 三个运行时的对端信息来源不同（Native 是 accept 时的 `ip:port`、Swoole 是
+     * `server['remote_addr']`、Workerman 是连接的 `getRemoteIp()`），但都必须落到
+     * 同一个键上：审计、限流、登录防爆破的「按来路 IP」判据全读这一个值。
+     * 漏掉任何一处，那条判据就会静默退化——空串会把所有客户端折成同一个 IP 桶，
+     * 表现为「一个人刷失败次数，全站一起被锁」。
+     */
+    public function setRemoteAddress(string $ip): self
+    {
+        $this->attributes['remote_addr'] = $ip;
+        return $this;
+    }
+
+    /**
+     * 从 `ip:port` / `[ipv6]:port` 形式的对端地址里取出地址段。
+     *
+     * 只认「恰好一个冒号且冒号后全是数字」这一种带端口的形态（PHP 的
+     * `stream_socket_accept` 与 Workerman 的 `getRemoteAddress()` 对 IPv4 就是这么给的）；
+     * IPv6 的对端串带方括号，走上面的分支。裸写的 IPv6（`::1`）与 Unix 套接字路径
+     * 冒号数不为 1，原样返回——按 `strrpos` 切会把 `::1` 切成 `:`。
+     */
+    public static function ipOf(string $address): string
+    {
+        if ($address === '') {
+            return '';
+        }
+        if ($address[0] === '[') {
+            $end = strpos($address, ']');
+            return $end === false ? $address : substr($address, 1, $end - 1);
+        }
+
+        $pos = strpos($address, ':');
+        if ($pos === false || strrpos($address, ':') !== $pos) {
+            return $address;
+        }
+
+        $tail = substr($address, $pos + 1);
+
+        return ($tail !== '' && ctype_digit($tail)) ? substr($address, 0, $pos) : $address;
     }
 
     // ------------------------------------------------------- 查询与表单

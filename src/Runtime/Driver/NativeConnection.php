@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Kode\Process\Runtime\Driver;
 
 use Kode\Process\Http\Psr7Response;
+use Kode\Process\Http\Request;
 use Kode\Process\Protocol\Http2\Frame;
 use Kode\Process\Protocol\Http2\Http2Session;
 use Kode\Process\Protocol\HttpProtocol;
@@ -445,6 +446,20 @@ final class NativeConnection implements ConnectionInterface
             }
         }
         return '';
+    }
+
+    /** 已求解的对端 IP（null = 尚未求解；空串是合法结果，表示拿不到对端） */
+    private ?string $remoteIp = null;
+
+    /**
+     * 对端 IP，去掉 `stream_socket_accept` 带来的端口后缀。
+     *
+     * 每请求都要给请求对象盖一个来路地址，所以这里只接受一次 `remoteAddress()`
+     * 的开销（其中 `stream_socket_get_name` 是真实的套接字调用），之后走缓存。
+     */
+    public function remoteIp(): string
+    {
+        return $this->remoteIp ??= Request::ipOf($this->remoteAddress());
     }
 
     public function localAddress(): string

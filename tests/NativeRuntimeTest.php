@@ -8,6 +8,8 @@ use Kode\Process\Kode;
 use Kode\Process\Protocol\ProtocolFactory;
 use Kode\Process\Runtime;
 use Kode\Process\Runtime\Capability;
+use Kode\Process\Protocol\Http2\Frame;
+use Kode\Process\Protocol\Http2\Hpack;
 use Kode\Process\Protocol\Http2\Http2Session;
 use Kode\Process\Runtime\Driver\NativeRuntime;
 use Kode\Process\Runtime\RuntimeType;
@@ -1132,6 +1134,112 @@ PHP;
             $this->assertStringContainsString("\r\n\r\nhi", $resp);
         } finally {
             $this->stopProc($proc, $script);
+        }
+    }
+
+    /**
+     * 端到端正对照：一次真实 accept 之后，handler 里的 `$req->ip()` 必须是对端地址。
+     *
+     * 这条只能在子进程 + 真套接字上验：去端口发生在 accept 的产物上，盖章发生在
+     * 运行时的交付点，单元里手工 `setAttribute` 的那份测试证不了这两步接上了。
+     * 接不上的表现是静默的——审计的 ip 列恒空，而「按来路 IP 限流/防爆破」
+     * 把所有客户端折成同一个空串桶。
+     */
+    public function testNativeHttpRequestCarriesPeerIp(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port   = $this->findFreePort();
+        $script = $this->writeHttpServerScript(
+            $port,
+            ['workers' => 1],
+            'function ($conn, $req): void { $conn->send("ip=" . $req->ip()); }'
+        );
+        $proc = proc_open([PHP_BINARY, $script, (string)$port], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native 服务器子进程');
+        $this->waitForPort($port, 4.0);
+
+        try {
+            $resp = $this->httpGet($port, []);
+            $this->assertSame('ip=127.0.0.1', $this->httpBody($resp));
+        } finally {
+            $this->stopProc($proc, $script);
+        }
+    }
+
+    /**
+     * HTTP/2 走的是另一条交付点（`dispatchHttp2Request`，每个流单独造一个 Request），
+     * 所以它需要单独证一次：流对象自己算不出对端地址，必须由运行时从父连接盖上。
+     *
+     * 判定回写进标记文件而不是响应体——测试侧因此不必实现 HPACK 解码，
+     * 而「handler 真的收到了带地址的请求」这一件事本身才是被测对象。
+     */
+    public function testNativeHttp2RequestCarriesPeerIp(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port     = $this->findFreePort();
+        $marker   = tempnam(sys_get_temp_dir(), 'kode_h2ip_');
+        $autoload = realpath(__DIR__ . '/../vendor/autoload.php');
+        $code     = <<<PHP
+<?php
+require '{$autoload}';
+use Kode\\Process\\Kode;
+
+Kode::serve('http://127.0.0.1:{$port}', ['workers' => 1], 'native')
+    ->on('message', function (\$conn, \$req): void {
+        file_put_contents('{$marker}', 'ip=' . \$req->ip());
+        \$conn->send('ok');
+    })
+    ->start();
+PHP;
+        $script = tempnam(sys_get_temp_dir(), 'kode_h2srv_');
+        file_put_contents($script, $code);
+
+        $proc = proc_open([PHP_BINARY, $script], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native h2c 服务器子进程');
+        $this->waitForPort($port, 4.0);
+
+        try {
+            $fp = @fsockopen('127.0.0.1', $port, $errno, $errstr, 2.0);
+            $this->assertNotFalse($fp, "连接失败: {$errstr} ({$errno})");
+
+            $headers = (new Hpack())->encode([
+                [':method', 'GET'],
+                [':scheme', 'http'],
+                [':path', '/'],
+                [':authority', '127.0.0.1:' . $port],
+            ]);
+            // prior-knowledge：前奏 + 空 SETTINGS + 一条 HEADERS
+            // （必须同时置 END_STREAM 与 END_HEADERS，否则头块被当作未收完而挂起）
+            fwrite($fp, Frame::PREFACE
+                . Frame::encode(Frame::TYPE_SETTINGS, 0x0, 0, '')
+                . Frame::encode(
+                    Frame::TYPE_HEADERS,
+                    Frame::FLAG_END_STREAM | Frame::FLAG_END_HEADERS,
+                    1,
+                    $headers
+                ));
+
+            $seen     = '';
+            $deadline = microtime(true) + 3.0;
+            while (microtime(true) < $deadline) {
+                $seen = (string) @file_get_contents($marker);
+                if ($seen !== '') {
+                    break;
+                }
+                usleep(10000);
+            }
+            fclose($fp);
+
+            $this->assertSame('ip=127.0.0.1', $seen, 'h2c 交付的请求同样必须带对端地址');
+        } finally {
+            $this->stopProc($proc, $script);
+            @unlink($marker);
         }
     }
 

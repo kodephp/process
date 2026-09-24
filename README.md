@@ -538,6 +538,12 @@ src/
 
 ## 版本要点
 
+### v5.4.0
+- **HTTP 请求终于带来路 IP 了。** `Http\Request::ip()` 读的是 `attributes['remote_addr']`，而这个键此前**没有任何运行时写过** —— 三个运行时交付给 handler 的请求里 `ip()` 恒为空串。后果不止缺一列：所有「按来路 IP 记账」的能力（限流、访问日志、审计、登录防爆破）会把全站客户端塌进同一个桶，等于一个共享预算，谁都能把别人锁在门外。现在由运行时在交付请求时统一盖戳：Native 取 accept 时的 peer 名（HTTP/2 子流继承父连接），Workerman 取 `getRemoteIp()`，Swoole 从 `swoole_dispatch` 的 `server.remote_addr` 带出。
+- 新增 `Request::setRemoteAddress(string)`：运行时/自建服务盖来路 IP 的唯一入口；`Request::ipOf(string)`：从 peer 串（`1.2.3.4:52341`、`[::1]:9527`、unix 套接字路径）里取出地址段，纯函数、不抛错，拿不准就原样返回。
+- `NativeConnection::remoteIp()`：解析一次并缓存，避免每个请求重切字符串。
+- `ip()` 语义写进文档：空串表示「运行时没给」，**不要**当作本地回环处理；反代场景仍走 `ip(true)` + 可信代理白名单。
+
 ### v5.3.1
 - 修正版本常量漂移：`Version::MAJOR/MINOR/PATCH/VERSION/VERSION_ID` 停在 5.2.36，而包已发布到 5.3.0，运行时信息（`NativeRuntime::version()` 等）对外报旧版本。新增 `tests/VersionGuardTest` 双向守卫：常量组 == composer.json 的 version，且 `VERSION_ID == MAJOR*10000 + MINOR*100 + PATCH`。行为无变化。
 

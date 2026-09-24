@@ -200,6 +200,12 @@ final class WorkermanRuntime extends AbstractRuntime
                 $requestClass = self::WORKERMAN_REQUEST;
                 if ($data instanceof $requestClass) {
                     $request = Request::fromWorkerman($data);
+                    // Workerman 的请求对象不带对端地址（它只是报文），地址在连接上。
+                    // 与 Native / Swoole 交付的字段对齐，否则下游按 IP 的判据会退化。
+                    $peer = method_exists($conn, 'getRemoteIp')
+                        ? (string) $conn->getRemoteIp()
+                        : $wrap->remoteAddress();
+                    $request->setRemoteAddress(Request::ipOf($peer));
                     if ($this->gzipEnabled && HttpProtocol::acceptsGzip($request->header('accept-encoding', '') ?? '')) {
                         $wrap->setGzipAuto(true);
                     }
