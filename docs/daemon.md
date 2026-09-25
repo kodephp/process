@@ -79,6 +79,30 @@ kode process restart daemon.php                            # 平滑重启（deta
 > CLI 启动的 PID 文件默认 `/tmp/kode-daemon.pid`；可用环境变量 `KODE_DAEMON_PID_FILE`
 > 覆盖（命令与 `stop`/`status`/`restart` 共用，必须一致）。
 
+### PID 文件即互斥锁
+
+pid 文件回答的是**唯一**一个问题：「这一路守护进程是谁在跑」。因此它的规则只有四条，
+全部由 `Daemon::claimPidFile()` 一份判据实现（`run()` 在守护化之前、`writePidFile()` 在落盘之前各调一次）：
+
+| pid 文件现状 | 判定 | 依据 |
+|------|------|------|
+| 写着**存活且非本进程**的 pid | 抛 `ProcessException` 拒绝启动，文件**一个字节都不动** | 覆盖 = 把第一代抹成查不到的孤儿 |
+| 写着自己的 pid | 放行（幂等重入） | 同一进程不需要跟自己抢 |
+| 写着一个已死的 pid | 接管并覆写 | 上一代崩溃/被 SIGKILL 留下的现场 |
+| 内容为空或不是纯数字 | 接管并覆写 | 读不出归属；**绝不猜一个 pid 去判活** |
+
+两条容易忽略的口径：
+
+- **判定存活用 `Process::isProcessAlive()`，EPERM 也算活着。** 查不到的进程一律按「别抢」处理，
+  宁可拒启也不能把别人的实例赶走（pid 会被操作系统复用，这是这个方案固有的代价，
+  管理端发信号前请核对 pid）。
+- **退出清理只删写着「自己 pid」的文件。** 无条件 `unlink` 等于第二次启动的进程退出时
+  把第一次那位的登记抹掉 —— 和「覆盖」是同一个后果。
+- **占位判定排在 `daemonize()` 之前。** 守护化会 fork 且父进程随即 `exit`，
+  在那之后才失败意味着异常没人读得到（落进 `kode process start` 的返回值里就是「静默启动失败」）。
+
+因此 `kode process start` 重复执行**不会**叠出第二套守护进程：第二代直接拒绝启动并点名占位的 pid。
+
 ### 独立脚本（不走 CLI）
 
 daemon 文件里直接 `->run()` 也能跑，然后 `php daemon.php` 即可。需要自己管 PID 文件与停止信号时
@@ -153,9 +177,9 @@ Daemon 解决的是**单机上 N 个 worker 各自可靠地周期跑任务**。�
 | `cron(string $expression)` | cron 表达式，优先级高于 `every` |
 | `workers(int $count)` | worker 子进程数（≥1） |
 | `daemonize(bool $v = true)` | 脱离终端常驻 |
-| `pidFile(string $path)` | PID 文件路径 |
+| `pidFile(string $path)` | PID 文件路径（**互斥占位**，见上节《PID 文件即互斥锁》） |
 | `maxRestarts(int $n)` | 单槽累计重生上限（防 fork bomb） |
-| `run()` | 启动（fork worker + 监督循环，直到停止信号） |
+| `run()` | 启动（占 pid 文件 → fork worker → 监督循环，直到停止信号） |
 
 内部可测方法（供测试）：`runWorker(int $slot)`（子进程主循环）、`spawnWorker`、`stopAllWorkers`、
-`exceedsRestartBudget(int $slot)`。
+`exceedsRestartBudget(int $slot)`、`claimPidFile()`（pid 归属判定，唯一一份）、`cleanup()`（只删自己那份）。

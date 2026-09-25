@@ -211,7 +211,7 @@ final class Daemon
     /**
      * 启动常驻运行器：fork worker 并进入监督循环，直到收到停止信号。
      *
-     * @throws ProcessException 未设置任务、非 CLI、daemonize 失败
+     * @throws ProcessException 未设置任务、非 CLI、pid 文件被存活进程占用、daemonize 失败
      */
     public function run(): void
     {
@@ -223,10 +223,15 @@ final class Daemon
             throw new ProcessException('Daemon 只能在 CLI SAPI 下运行');
         }
 
+        // 先占位判定再守护化：为了「文件被别人占」而 fork 一次再退出，
+        // 等于把失败原因连同子进程一起丢掉（守护化后父进程已 exit，没人读得到异常）。
+        $this->claimPidFile();
+
         if ($this->daemonize && !Process::daemonize()) {
             throw new ProcessException('daemonize() 失败');
         }
 
+        // 守护化会换 pid，所以落盘必须在它之后（此处再判一次，以最终 pid 为准）。
         $this->writePidFile();
         $this->installSupervisorSignals();
 
@@ -421,14 +426,74 @@ final class Daemon
         $this->logger->info('Daemon worker 已全部平滑重启');
     }
 
+    /**
+     * 占住 pid 文件：确认没有**别的存活守护进程**登记在此，否则拒绝启动。
+     *
+     * 判据只有这一份（`run()` 守护化之前、`writePidFile()` 落盘之前各调一次）。
+     * 此前 `run()` 是无条件 `file_put_contents()`，第二次启动会把第一代的 pid
+     * 覆盖成自己的 —— 而 pid 文件是「谁在跑」的唯一来源，于是第一代从此查不到、
+     * 收不到停止/重载信号，却仍在跑同一份资源。
+     *
+     * @throws ProcessException 文件里写着一个存活且非本进程的 pid
+     */
+    private function claimPidFile(): void
+    {
+        $raw = is_file($this->pidFile) ? @file_get_contents($this->pidFile) : false;
+
+        if ($raw === false) {
+            return;
+        }
+
+        $trimmed = trim($raw);
+
+        // 空文件/内容不是数字：读不出归属，按「未占用」处理并接管。
+        // 绝不能猜一个 pid 去判定 —— 猜中别人的进程会把活着的实例赶走。
+        if ($trimmed === '' || !ctype_digit($trimmed)) {
+            return;
+        }
+
+        $pid = (int) $trimmed;
+
+        if ($pid === posix_getpid()) {
+            return;
+        }
+
+        // EPERM 也按存活算（见 Process::isProcessAlive）：宁可拒启，
+        // 也不能对一个查不到的进程假定它已经死了。
+        if (Process::isProcessAlive($pid)) {
+            $this->logger->error('Daemon 拒绝启动：pid 文件被存活进程占用', [
+                'pid_file' => $this->pidFile,
+                'owner' => $pid,
+                'self' => posix_getpid(),
+            ]);
+
+            throw new ProcessException(
+                "Daemon 拒绝启动：pid 文件 {$this->pidFile} 已被存活进程 {$pid} 占用"
+                . '（本进程 ' . posix_getpid() . '）。请先停止该实例，或确认它确实是残留文件后删除该 pid 文件。'
+            );
+        }
+    }
+
     private function writePidFile(): void
     {
-        file_put_contents($this->pidFile, (string) posix_getpid());
+        $this->claimPidFile();
+
+        // 落盘失败必须抛：pid 写不下去 = 这一代在状态表里永久查不到，
+        // 互斥也随之失效（下一个实例能直接起），而进程看着一切正常。
+        $written = @file_put_contents($this->pidFile, (string) posix_getpid());
+
+        if ($written === false) {
+            throw new ProcessException("Daemon 无法写入 pid 文件：{$this->pidFile}");
+        }
     }
 
     private function cleanup(): void
     {
-        if (file_exists($this->pidFile)) {
+        // 只删写着**自己 pid** 的文件。别人占的文件删掉，等于让那一代守护进程
+        // 从状态表里消失 —— 和「覆盖」是同一个后果，清理责任只属于写侧自己那一份。
+        $raw = is_file($this->pidFile) ? @file_get_contents($this->pidFile) : false;
+
+        if ($raw !== false && trim($raw) === (string) posix_getpid()) {
             @unlink($this->pidFile);
         }
     }

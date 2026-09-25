@@ -390,6 +390,12 @@ kode process restart daemon.php                         # 平滑重启（detache
 > 若还要跨进程/跨机「同一时刻只跑一次」，仍用 `Kode::cronCluster()`（集群锁）或
 > `Kode::tickCronOnLeader()`（Leader 选举）去重，二者可叠加。详见 [docs/daemon.md](docs/daemon.md)。
 
+> **pid 文件是互斥占位，不是日志。** `run()` 在守护化之前先读它：里面写着一个**存活且非本进程**的
+> pid 就抛 `ProcessException` 拒绝启动，并且一个字节都不动那个文件。此前是无条件覆盖，
+> 于是第二次 `kode process start` 会把第一代的 pid 改成自己的 —— 而 pid 文件是「谁在跑」的唯一来源，
+> 结果第一代查不到、收不到停止/重载信号，却还在跑同一份资源。内容读不出 pid（空/非数字）或 pid 已死，
+> 按未占用接管；退出清理只删写着**自己 pid** 的文件。
+
 ## 队列系统
 
 ```php
@@ -537,6 +543,12 @@ src/
 ```
 
 ## 版本要点
+
+### v5.5.0
+- **`Daemon` 的 pid 文件终于是一把互斥锁。** `run()` 此前无条件 `file_put_contents()`，第二次启动会把第一代的 pid 覆盖成自己的 —— 而 pid 文件是「谁在跑」的唯一来源，于是第一代守护进程（连同它的 worker 子进程）永久查不到、收不到停止/重载信号，却还在跑同一份资源；`kode process start` 每跑一次就多叠一套。现在新增 `claimPidFile()` 一份判据：文件里写着**存活且非本进程**的 pid 就抛 `ProcessException` 拒绝启动并原样保留文件，失效 pid／内容读不出 pid／文件不存在一律接管。判定排在 `daemonize()` **之前**（守护化后父进程已 exit，在那之后失败等于「静默启动失败」）。
+- `cleanup()` 不再无条件 `unlink`：只删写着**自己 pid** 的文件。此前第二个实例退出时会把第一个实例的登记抹掉，与「覆盖」是同一个后果。
+- pid 落盘失败现在抛错而不是静默裸跑：写不下去 = 这一代在状态表里查不到，互斥也随之失效。
+- 新增 `tests/DaemonPidFileTest` 10 例（存活占用／自己重入／失效接管／垃圾内容／文件缺失／退出清理不抢删／run() 在派生 worker 前拒绝／占位排在守护化之前）。
 
 ### v5.4.0
 - **HTTP 请求终于带来路 IP 了。** `Http\Request::ip()` 读的是 `attributes['remote_addr']`，而这个键此前**没有任何运行时写过** —— 三个运行时交付给 handler 的请求里 `ip()` 恒为空串。后果不止缺一列：所有「按来路 IP 记账」的能力（限流、访问日志、审计、登录防爆破）会把全站客户端塌进同一个桶，等于一个共享预算，谁都能把别人锁在门外。现在由运行时在交付请求时统一盖戳：Native 取 accept 时的 peer 名（HTTP/2 子流继承父连接），Workerman 取 `getRemoteIp()`，Swoole 从 `swoole_dispatch` 的 `server.remote_addr` 带出。
