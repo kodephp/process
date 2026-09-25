@@ -434,9 +434,96 @@ final class Daemon
      * 覆盖成自己的 —— 而 pid 文件是「谁在跑」的唯一来源，于是第一代从此查不到、
      * 收不到停止/重载信号，却仍在跑同一份资源。
      *
-     * @throws ProcessException 文件里写着一个存活且非本进程的 pid
+     * @throws ProcessException 另一进程正在判定同一份文件 / 文件里写着一个存活且非本进程的 pid
      */
     private function claimPidFile(): void
+    {
+        $this->withPidLock(function (): void {
+            $this->assertPidFileUnowned();
+        });
+    }
+
+    private function writePidFile(): void
+    {
+        // 判归属与落盘必须在**同一把锁**内：分两次取锁，中间那段就是 TOCTOU。
+        $this->withPidLock(function ($handle): void {
+            /** @var resource $handle */
+            $this->assertPidFileUnowned();
+
+            // 落盘失败必须抛：pid 写不下去 = 这一代在状态表里永久查不到，
+            // 互斥也随之失效（下一个实例能直接起），而进程看着一切正常。
+            // 用持锁的那只手写：file_put_contents() 会另开一个 fd，等于绕过自己的锁。
+            if (ftruncate($handle, 0) === false) {
+                throw new ProcessException("Daemon 无法写入 pid 文件：{$this->pidFile}");
+            }
+
+            if (fwrite($handle, (string) posix_getpid()) === false) {
+                throw new ProcessException("Daemon 无法写入 pid 文件：{$this->pidFile}");
+            }
+
+            fflush($handle);
+        });
+    }
+
+    /**
+     * 对 pid 文件加一把**非阻塞**排他锁，跑完一段临界区就立刻放掉。
+     *
+     * 为什么必须有这把锁：`claimPidFile()` 只负责「读→判→返回」，写盘发生在它返回之后，
+     * 两步之间没有任何互斥。实测同时敲两次 `kode process:start`：两边都在对方落盘之前
+     * 读到「没人占用」，于是真起出**两套**守护进程（两个 master、各带 worker），
+     * 而 pid 文件里只留下其中一个 —— 另一套从状态表上永久隐形，stop/reload 都摸不到它。
+     * 光靠「判活」挡不住这种交错，因为判定那一刻对方本来就还没写。
+     *
+     * 锁加在 pid 文件本身，而不是旁边的 `*.lock`：路径只有一份（`getPidFile()` 就够，
+     * 读侧/测试都不必再拼第二个名字），也少一类「删了 pid 文件忘了删锁文件」的残留。
+     *
+     * 非阻塞是有意的：正在启动的那一位马上就会放锁，而卡在这里的是 supervise 循环的
+     * 入口。宁可回一句「并发启动，请重试」，也不能让两条命令互相等成看不出原因的挂起。
+     *
+     * @param callable(resource):void $critical 拿到**已持锁**的句柄；要写盘必须用它写
+     *
+     * @throws ProcessException 打不开该路径，或另一个进程正握着这把锁
+     */
+    private function withPidLock(callable $critical): void
+    {
+        // 'c'：不存在就建，存在则**不截断**。截断会把别人的占位抹成空文件，
+        // 而空文件按「未占用」处理 —— 那等于用一次 open 把活着的实例赶走。
+        $handle = @fopen($this->pidFile, 'c');
+
+        if ($handle === false) {
+            // 打不开就是写不下去（路径是目录、目录不可写…）。这里先说清楚，
+            // 别让下面那句「读不到内容」把它伪装成「没人占用」。
+            throw new ProcessException("Daemon 无法打开 pid 文件：{$this->pidFile}");
+        }
+
+        if (!flock($handle, LOCK_EX | LOCK_NB)) {
+            fclose($handle);
+
+            $this->logger->error('Daemon 拒绝启动：另一进程正在判定同一份 pid 文件', [
+                'pid_file' => $this->pidFile,
+                'self' => posix_getpid(),
+            ]);
+
+            throw new ProcessException(
+                "Daemon 拒绝启动：另一个进程正在启动并占用 {$this->pidFile}（并发启动）。"
+                . '请等它落定后重试；只想重载代码请发 SIGUSR1。'
+            );
+        }
+
+        try {
+            $critical($handle);
+        } finally {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+        }
+    }
+
+    /**
+     * 读 pid 文件判断归属（调用方必须已持锁，否则这个结论下一秒就可能作废）。
+     *
+     * @throws ProcessException 文件里写着一个存活且非本进程的 pid
+     */
+    private function assertPidFileUnowned(): void
     {
         $raw = is_file($this->pidFile) ? @file_get_contents($this->pidFile) : false;
 
@@ -471,19 +558,6 @@ final class Daemon
                 "Daemon 拒绝启动：pid 文件 {$this->pidFile} 已被存活进程 {$pid} 占用"
                 . '（本进程 ' . posix_getpid() . '）。请先停止该实例，或确认它确实是残留文件后删除该 pid 文件。'
             );
-        }
-    }
-
-    private function writePidFile(): void
-    {
-        $this->claimPidFile();
-
-        // 落盘失败必须抛：pid 写不下去 = 这一代在状态表里永久查不到，
-        // 互斥也随之失效（下一个实例能直接起），而进程看着一切正常。
-        $written = @file_put_contents($this->pidFile, (string) posix_getpid());
-
-        if ($written === false) {
-            throw new ProcessException("Daemon 无法写入 pid 文件：{$this->pidFile}");
         }
     }
 
