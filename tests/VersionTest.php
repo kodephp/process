@@ -23,7 +23,7 @@ final class VersionTest extends TestCase
     {
         $parts = explode('.', Version::get());
 
-        $this->assertSame(6, Version::getMajor());
+        $this->assertSame((int) explode('.', Version::VERSION)[0], Version::getMajor());
         $this->assertSame((int) $parts[1], Version::getMinor());
         $this->assertGreaterThanOrEqual(0, Version::getPatch());
     }
@@ -73,7 +73,6 @@ final class VersionTest extends TestCase
 
     public function testFeatureFlagsMatchRuntime(): void
     {
-        $this->assertSame(PHP_VERSION_ID >= 80400, Version::supportsPropertyHooks());
         $this->assertSame(PHP_VERSION_ID >= 80500, Version::supportsCloneWith());
         $this->assertSame(PHP_VERSION_ID >= 80500, Version::supportsPipeOperator());
     }
@@ -81,7 +80,6 @@ final class VersionTest extends TestCase
     public function testExactlyOneMinorVersionMatches(): void
     {
         $matches = array_filter([
-            Version::isPhp83(),
             Version::isPhp84(),
             Version::isPhp85(),
         ]);

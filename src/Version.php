@@ -9,16 +9,16 @@ use Kode\Process\Exceptions\ProcessException;
 /**
  * 版本与运行环境信息
  *
- * 自 3.0.0 起最低要求 PHP 8.3。所有在 8.3 已无条件可用的特性探测方法均已移除，
- * 仅保留对 8.4 / 8.5 前瞻特性的运行时探测。
+ * 最低要求 PHP 8.4（见 MINIMUM_PHP_VERSION）。所有在 8.4 已无条件可用的特性探测
+ * 方法均已移除或恒真，仅保留对 8.5 及以后前瞻特性的运行时探测。
  */
 final class Version
 {
-    public const int MAJOR = 6;
+    public const int MAJOR = 7;
     public const int MINOR = 0;
     public const int PATCH = 0;
-    public const string VERSION = '6.0.0';
-    public const int VERSION_ID = 60000;
+    public const string VERSION = '7.0.0';
+    public const int VERSION_ID = 70000;
 
     /** 本库要求的最低 PHP 版本 */
     public const string MINIMUM_PHP_VERSION = '8.4.0';
@@ -91,11 +91,6 @@ final class Version
     public static function getPhpMinorVersion(): int
     {
         return PHP_MINOR_VERSION;
-    }
-
-    public static function isPhp83(): bool
-    {
-        return PHP_VERSION_ID >= 80300 && PHP_VERSION_ID < 80400;
     }
 
     public static function isPhp84(): bool
@@ -214,17 +209,17 @@ final class Version
 
     public static function supportsPropertyHooks(): bool
     {
-        return PHP_VERSION_ID >= 80400;
+        return true;
     }
 
     public static function supportsAsymmetricVisibility(): bool
     {
-        return PHP_VERSION_ID >= 80400;
+        return true;
     }
 
     public static function supportsLazyObjects(): bool
     {
-        return PHP_VERSION_ID >= 80400;
+        return true;
     }
 
     public static function compare(string $version): int

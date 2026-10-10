@@ -17,7 +17,7 @@
 
 | 软件 | 版本 |
 |------|------|
-| PHP | 8.3+ |
+| PHP | 8.4+ |
 | Composer | 2.0+ |
 | 扩展 | pcntl, posix, sockets |
 | 可选扩展 | opcache, redis, pdo |
@@ -29,7 +29,7 @@
 ```bash
 # Ubuntu/Debian
 sudo apt update
-sudo apt install php8.3-cli php8.3-fpm php8.3-mysql php8.3-redis php8.3-curl
+sudo apt install php8.4-cli php8.4-fpm php8.4-mysql php8.4-redis php8.4-curl
 
 # CentOS/RHEL
 sudo yum install php83-php-cli php83-php-fpm php83-php-mysqlnd php83-php-redis
@@ -39,10 +39,10 @@ sudo yum install php83-php-cli php83-php-fpm php83-php-mysqlnd php83-php-redis
 
 ```bash
 # 必需扩展
-sudo apt install php8.3-pcntl php8.3-posix php8.3-sockets
+sudo apt install php8.4-pcntl php8.4-posix php8.4-sockets
 
 # 可选扩展
-sudo apt install php8.3-opcache php8.3-redis php8.3-pdo php8.3-mysql
+sudo apt install php8.4-opcache php8.4-redis php8.4-pdo php8.4-mysql
 ```
 
 ### 2.1 启用多线程并行（ZTS，可选）
@@ -52,7 +52,7 @@ sudo apt install php8.3-opcache php8.3-redis php8.3-pdo php8.3-mysql
 **推荐：使用官方 ZTS Docker 镜像**（最简单，无需自行编译）：
 
 ```dockerfile
-FROM php:8.3-zts
+FROM php:8.4-zts
 
 # 安装 ext-parallel（仅能在 ZTS 构建上编译/加载）
 RUN pecl install parallel \
@@ -87,7 +87,7 @@ composer install --no-dev --optimize-autoloader
 ### 4. 配置 PHP
 
 ```ini
-; /etc/php/8.3/cli/php.ini
+; /etc/php/8.4/cli/php.ini
 
 ; 基础配置
 memory_limit = 512M

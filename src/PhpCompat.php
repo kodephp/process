@@ -7,8 +7,8 @@ namespace Kode\Process;
 /**
  * PHP 版本能力探测与前向兼容垫片
  *
- * 自 3.0.0 起最低要求 PHP 8.3，因此 8.0 - 8.3 的语言特性一律视为可用，
- * 相关的恒真探测方法已全部移除。本类只处理 8.4 / 8.5 及以后的前瞻特性。
+ * 最低要求 PHP 8.4，因此 8.0 - 8.4 的语言特性一律视为可用，
+ * 相关的恒真探测方法已全部移除。本类只处理 8.5 及以后的前瞻特性。
  *
  * 能力探测优先使用 function_exists()/extension_loaded() 而非版本号比较：
  * 版本号只能表达「某版本起应当存在」，而实际运行环境可能禁用了对应函数。
@@ -25,11 +25,6 @@ final class PhpCompat
     public static function versionId(): int
     {
         return PHP_VERSION_ID;
-    }
-
-    public static function isPhp83(): bool
-    {
-        return PHP_VERSION_ID >= 80300 && PHP_VERSION_ID < 80400;
     }
 
     public static function isPhp84(): bool
@@ -49,17 +44,17 @@ final class PhpCompat
 
     public static function hasPropertyHooks(): bool
     {
-        return PHP_VERSION_ID >= 80400;
+        return true;
     }
 
     public static function hasAsymmetricVisibility(): bool
     {
-        return PHP_VERSION_ID >= 80400;
+        return true;
     }
 
     public static function hasLazyObjects(): bool
     {
-        return PHP_VERSION_ID >= 80400;
+        return true;
     }
 
     public static function hasPipeOperator(): bool

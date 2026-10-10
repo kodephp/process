@@ -16,7 +16,7 @@
 | 并发类型 | 协作式（cooperative） | 抢占式（preemptive） |
 | 线程模型 | 单线程内切换 | 多个真实 OS 线程 |
 | 适合场景 | I/O 密集型（网络/文件/DB） | CPU 密集型（计算/编码） |
-| PHP 构建要求 | 任何 8.3+（含 NTS） | **必须 ZTS（线程安全）构建** |
+| PHP 构建要求 | 任何 8.4+（含 NTS） | **必须 ZTS（线程安全）构建** |
 | 所需扩展 | 无（PHP 内建 Fiber） | **ext-parallel**（或 kode/parallel 封装） |
 | 失败传播 | 异常在协程内抛出 | 异常通过 `Future` 透传 |
 | 本库入口 | `Kode::go()` / `Kode::batch()` | `Kode::parallel()` / `Kode::awaitParallel()` |
@@ -68,10 +68,10 @@ php -i | grep -i "thread safety"
 
 ### 3.2 Docker（推荐，最简单）
 
-官方 PHP 镜像提供 `zts` 变体（如 `php:8.3-zts`、`php:8.3-zts-alpine`），已开启 Zend Thread Safety。
+官方 PHP 镜像提供 `zts` 变体（如 `php:8.4-zts`、`php:8.4-zts-alpine`），已开启 Zend Thread Safety。
 
 ```dockerfile
-FROM php:8.3-zts
+FROM php:8.4-zts
 
 # 安装 ext-parallel（仅能在 ZTS 构建上编译/加载）
 RUN pecl install parallel \
@@ -98,8 +98,8 @@ sudo apt install -y build-essential libxml2-dev pkg-config autoconf bison re2c \
     libsqlite3-dev libcurl4-openssl-dev libssl-dev libonig-dev
 
 # 2) 下载并编译开启 --enable-zts 的 PHP
-wget https://www.php.net/distributions/php-8.3.31.tar.xz
-tar xf php-8.3.31.tar.xz
+wget https://www.php.net/distributions/php-8.4.26.tar.xz
+tar xf php-8.4.26.tar.xz
 cd php-8.3.31
 ./buildconf --force
 ./configure --enable-zts --enable-cli \

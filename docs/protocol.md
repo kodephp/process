@@ -16,7 +16,7 @@
 | UDP | `udp://0.0.0.0:9002` | ✅ | ✅ | ✅ |
 
 > \* SSL 需要 `ext-openssl`（Swoole 还需编译时开启）。
-> Native 运行时（零扩展、纯 PHP 8.3+）同样自带 UDP / HTTP / WebSocket 等服务器，无需依赖 Swoole / Workerman；三种运行时均支持上述全部协议。
+> Native 运行时（零扩展、纯 PHP 8.4+）同样自带 UDP / HTTP / WebSocket 等服务器，无需依赖 Swoole / Workerman；三种运行时均支持上述全部协议。
 
 ## 内置协议
 

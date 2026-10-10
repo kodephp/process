@@ -2,11 +2,11 @@
 
 ## 环境要求
 
-- **PHP**: >= 8.3
+- **PHP**: >= 8.4
 - **扩展**: pcntl, posix, sockets
 - **可选扩展**: sysvmsg, sysvshm, sysvsem, parallel, swoole
 
-> v3.0 起最低要求 PHP 8.3；PHP 8.1 / 8.2 环境请使用 `^2.9`。
+> v6.0 起最低要求 PHP 8.4；PHP 8.3 及更早环境请使用 `^5`。
 
 > 🧵 **真正的多线程并行**需要 **ZTS（线程安全）构建**的 PHP 并加载 **ext-parallel**，普通 NTS 构建无法启用。
 > 环境探测、安装步骤与 Fiber ↔ Parallel 桥接用法见 **[并行（多线程）文档](parallel.md)**。

@@ -12,13 +12,11 @@ final class PhpCompatTest extends TestCase
     public function testVersionDetection(): void
     {
         $this->assertNotEmpty(PhpCompat::version());
-        $this->assertGreaterThanOrEqual(80300, PhpCompat::versionId());
     }
 
     public function testExactlyOneMinorVersionMatches(): void
     {
         $matches = array_filter([
-            PhpCompat::isPhp83(),
             PhpCompat::isPhp84(),
             PhpCompat::isPhp85(),
             PhpCompat::isPhp86(),
@@ -29,8 +27,6 @@ final class PhpCompatTest extends TestCase
 
     public function testForwardLookingFeatureFlags(): void
     {
-        $this->assertSame(PHP_VERSION_ID >= 80400, PhpCompat::hasPropertyHooks());
-        $this->assertSame(PHP_VERSION_ID >= 80400, PhpCompat::hasAsymmetricVisibility());
         $this->assertSame(PHP_VERSION_ID >= 80500, PhpCompat::hasCloneWith());
         $this->assertSame(PHP_VERSION_ID >= 80500, PhpCompat::hasPipeOperator());
         $this->assertSame(PHP_VERSION_ID >= 80500, PhpCompat::supportsPipe());
@@ -125,8 +121,8 @@ final class PhpCompatTest extends TestCase
 
     public function testRemovedLegacyProbesAreGone(): void
     {
-        // PHP 8.3 基线下这些恒真探测已移除，防止回流
-        foreach (['isPhp81', 'isPhp82', 'hasEnums', 'hasReadonlyProperties', 'hasNeverType'] as $method) {
+        // floor = 8.4 后这些恒真/恒假探测已移除，防止回流
+        foreach (['isPhp81', 'isPhp82', 'isPhp83', 'hasEnums', 'hasReadonlyProperties', 'hasNeverType'] as $method) {
             $this->assertFalse(
                 method_exists(PhpCompat::class, $method),
                 "已废弃的探测方法 {$method}() 不应重新出现"
