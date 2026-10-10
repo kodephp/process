@@ -23,7 +23,7 @@ final class VersionTest extends TestCase
     {
         $parts = explode('.', Version::get());
 
-        $this->assertSame(5, Version::getMajor());
+        $this->assertSame(6, Version::getMajor());
         $this->assertSame((int) $parts[1], Version::getMinor());
         $this->assertGreaterThanOrEqual(0, Version::getPatch());
     }
@@ -46,13 +46,13 @@ final class VersionTest extends TestCase
     public function testPhpVersion(): void
     {
         $this->assertMatchesRegularExpression('/^\d+\.\d+\./', Version::getPhpVersion());
-        $this->assertGreaterThanOrEqual(80300, Version::getPhpVersionId());
+        $this->assertGreaterThanOrEqual(80400, Version::getPhpVersionId());
     }
 
     public function testMinimumPhpBaseline(): void
     {
-        $this->assertSame('8.3.0', Version::MINIMUM_PHP_VERSION);
-        $this->assertSame(80300, Version::MINIMUM_PHP_VERSION_ID);
+        $this->assertSame('8.4.0', Version::MINIMUM_PHP_VERSION);
+        $this->assertSame(80400, Version::MINIMUM_PHP_VERSION_ID);
         $this->assertTrue(Version::isPhpSupported());
     }
 
@@ -112,7 +112,7 @@ final class VersionTest extends TestCase
 
         $this->assertSame(Version::VERSION, $info['version']);
         $this->assertSame(Version::VERSION_ID, $info['version_id']);
-        $this->assertSame('8.3.0', $info['minimum_php']);
+        $this->assertSame('8.4.0', $info['minimum_php']);
         $this->assertTrue($info['php_supported']);
         $this->assertIsArray($info['features']);
         $this->assertIsArray($info['optional_extensions']);

@@ -14,15 +14,15 @@ use Kode\Process\Exceptions\ProcessException;
  */
 final class Version
 {
-    public const int MAJOR = 5;
-    public const int MINOR = 5;
-    public const int PATCH = 1;
-    public const string VERSION = '5.5.1';
-    public const int VERSION_ID = 50501;
+    public const int MAJOR = 6;
+    public const int MINOR = 0;
+    public const int PATCH = 0;
+    public const string VERSION = '6.0.0';
+    public const int VERSION_ID = 60000;
 
     /** 本库要求的最低 PHP 版本 */
-    public const string MINIMUM_PHP_VERSION = '8.3.0';
-    public const int MINIMUM_PHP_VERSION_ID = 80300;
+    public const string MINIMUM_PHP_VERSION = '8.4.0';
+    public const int MINIMUM_PHP_VERSION_ID = 80400;
 
     /** 运行所必需的扩展 */
     public const array REQUIRED_EXTENSIONS = ['pcntl', 'posix', 'sockets'];
@@ -46,7 +46,7 @@ final class Version
      * 真正的多线程（ext-parallel）只能在 ZTS 构建上加载并运行；
      * 普通 NTS 构建无法启用 parallel 扩展。
      */
-    public const int IS_ZTS = \PHP_ZTS;
+    public const int IS_ZTS = \PHP_ZTS ? 1 : 0;
 
     public static function get(): string
     {

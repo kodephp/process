@@ -1,8 +1,8 @@
 # Kode Process
 
-**PHP 8.3+ 多进程编排内核 · 自研 Native 默认运行时 · Swoole / Workerman 可插拔 · 内置分布式集群能力**
+**PHP 8.4+ 多进程编排内核 · 自研 Native 默认运行时 · Swoole / Workerman 可插拔 · 内置分布式集群能力**
 
-[![PHP Version](https://img.shields.io/badge/PHP-8.3+-777BB4?style=flat-square&logo=php)](https://php.net)
+[![PHP Version](https://img.shields.io/badge/PHP-8.4+-777BB4?style=flat-square&logo=php)](https://php.net)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green?style=flat-square)](LICENSE)
 
 ## 简介
@@ -18,7 +18,7 @@ Kode Process 是一个「进程编排内核 + 多运行时兼容层」：你只�
 > **关于「自研 vs 兼容层」**：v5.0.0 起**自研 Native 运行时成为默认形态**，并补齐分布式协调能力（服务发现、分布式锁、Leader 选举、负载均衡、分布式 ID、限流、集群 RPC），
 > 同时保留 Swoole / Workerman 作为可插拔的高性能运行时。详见 [docs/runtime.md](docs/runtime.md) 与 [docs/cluster.md](docs/cluster.md)。
 
-> **最低要求 PHP 8.3**。若仍在 PHP 8.1 / 8.2 上运行，请使用旧版 `^2.9`。
+> **最低要求 PHP 8.4**。若仍在 PHP 8.1 / 8.2 上运行，请使用旧版 `^2.9`。
 
 ## 特性
 

@@ -1,10 +1,29 @@
 {
     "name": "kode/process",
-    "description": "PHP 8.3+ 进程编排内核：默认自研 Native 运行时（零扩展、master-worker 多进程），兼容 Swoole/Workerman，内置分布式集群能力（服务发现、分布式锁、Leader 选举、负载均衡、分布式 ID、限流、集群 RPC）",
+    "description": "PHP 8.4+ 进程编排内核：默认自研 Native 运行时（零扩展、master-worker 多进程），兼容 Swoole/Workerman，内置分布式集群能力（服务发现、分布式锁、Leader 选举、负载均衡、分布式 ID、限流、集群 RPC）",
     "type": "library",
-    "keywords": ["php", "process", "runtime", "native", "reactor", "event-loop", "worker", "ipc", "signal", "pool", "swoole", "workerman", "multiprocessing", "queue", "cluster", "distributed", "snowflake", "load-balancer"],
+    "keywords": [
+        "php",
+        "process",
+        "runtime",
+        "native",
+        "reactor",
+        "event-loop",
+        "worker",
+        "ipc",
+        "signal",
+        "pool",
+        "swoole",
+        "workerman",
+        "multiprocessing",
+        "queue",
+        "cluster",
+        "distributed",
+        "snowflake",
+        "load-balancer"
+    ],
     "license": "Apache-2.0",
-    "version": "5.5.1",
+    "version": "6.0.0",
     "authors": [
         {
             "name": "KodePHP Team",
@@ -12,13 +31,13 @@
         }
     ],
     "require": {
-        "php": "^8.3",
+        "php": "^8.4",
         "ext-pcntl": "*",
         "ext-posix": "*",
         "ext-sockets": "*",
-        "kode/context": "^3.1",
-        "kode/fibers": "^4.5",
-        "kode/queue": "^2.2",
+        "kode/context": "^4",
+        "kode/fibers": "^5",
+        "kode/queue": "^3",
         "psr/log": "^2.0|^3.0",
         "psr/http-message": "^1.0|^2.0",
         "workerman/workerman": "^5.0"
