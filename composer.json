@@ -23,7 +23,7 @@
         "load-balancer"
     ],
     "license": "Apache-2.0",
-    "version": "7.0.4",
+    "version": "7.0.5",
     "authors": [
         {
             "name": "KodePHP Team",
@@ -47,6 +47,7 @@
         "swoole/ide-helper": "^6.2"
     },
     "suggest": {
+        "ext-curl": "cURL 扩展 - 用于 OTLP 导出/异步 HTTP 客户端",
         "ext-event": "Reactor / Workerman 首选事件循环驱动（libevent），Linux 上吞吐显著更高",
         "ext-ev": "Reactor / Workerman 备选事件循环驱动（libev）",
         "ext-swoole": "启用 Swoole 运行时适配器（Runtime::make('swoole')），自动择优时优先于 Workerman",
@@ -56,6 +57,10 @@
         "ext-apcu": "SharedTable 零安装兜底后端（优先于 sysvshm）",
         "ext-parallel": "真多线程 Parallel 门面（需 ZTS 构建）",
         "ext-openssl": "SSL/TLS 监听"
+    },
+    "support": {
+        "issues": "https://github.com/kodephp/process/issues",
+        "source": "https://github.com/kodephp/process"
     },
     "autoload": {
         "psr-4": {
