@@ -28,6 +28,7 @@ abstract class AbstractBalancer implements BalancerInterface
     /**
      * @param list<Node> $nodes
      */
+    #[\Override]
     public function setNodes(array $nodes): static
     {
         $changed     = $this->fingerprint($nodes) !== $this->fingerprint($this->nodes);
@@ -42,16 +43,19 @@ abstract class AbstractBalancer implements BalancerInterface
     }
 
     /** @return list<Node> */
+    #[\Override]
     public function nodes(): array
     {
         return $this->nodes;
     }
 
+    #[\Override]
     public function count(): int
     {
         return count($this->nodes);
     }
 
+    #[\Override]
     public function select(?string $key = null): Node
     {
         $node = $this->trySelect($key);

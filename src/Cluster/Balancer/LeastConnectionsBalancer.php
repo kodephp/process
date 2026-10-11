@@ -46,11 +46,13 @@ final class LeastConnectionsBalancer extends AbstractBalancer
      */
     private array $inflight = [];
 
+    #[\Override]
     public function name(): string
     {
         return 'least-conn';
     }
 
+    #[\Override]
     public function trySelect(?string $key = null): ?Node
     {
         $count = count($this->nodes);
@@ -150,6 +152,7 @@ final class LeastConnectionsBalancer extends AbstractBalancer
         return $snapshot;
     }
 
+    #[\Override]
     protected function onNodesChanged(): void
     {
         // 摘除的节点不再保留计数，避免它重新上线时被历史包袱压住

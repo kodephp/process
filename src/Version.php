@@ -16,9 +16,9 @@ final class Version
 {
     public const int MAJOR = 7;
     public const int MINOR = 0;
-    public const int PATCH = 1;
-    public const string VERSION = '7.0.1';
-    public const int VERSION_ID = 70001;
+    public const int PATCH = 2;
+    public const string VERSION = '7.0.2';
+    public const int VERSION_ID = 70002;
 
     /** 本库要求的最低 PHP 版本 */
     public const string MINIMUM_PHP_VERSION = '8.4.0';
@@ -332,6 +332,7 @@ final class Version
         ];
     }
 
+    #[\Override]
     public function __toString(): string
     {
         return self::VERSION;

@@ -130,6 +130,7 @@ final class HttpResponse
         ];
     }
 
+    #[\Override]
     public function __toString(): string
     {
         return $this->body;

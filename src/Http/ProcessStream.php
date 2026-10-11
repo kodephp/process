@@ -18,6 +18,7 @@ final class ProcessStream implements StreamInterface
     {
     }
 
+    #[\Override]
     public function __toString(): string
     {
         try {
@@ -29,6 +30,7 @@ final class ProcessStream implements StreamInterface
         }
     }
 
+    #[\Override]
     public function close(): void
     {
         if (is_resource($this->resource)) {
@@ -36,6 +38,7 @@ final class ProcessStream implements StreamInterface
         }
     }
 
+    #[\Override]
     public function detach()
     {
         $res = $this->resource;
@@ -44,6 +47,7 @@ final class ProcessStream implements StreamInterface
         return $res;
     }
 
+    #[\Override]
     public function getSize(): ?int
     {
         if (!is_resource($this->resource)) {
@@ -54,6 +58,7 @@ final class ProcessStream implements StreamInterface
         return $stat !== false ? (int) $stat['size'] : null;
     }
 
+    #[\Override]
     public function tell(): int
     {
         $pos = ftell($this->resource);
@@ -64,41 +69,49 @@ final class ProcessStream implements StreamInterface
         return $pos;
     }
 
+    #[\Override]
     public function eof(): bool
     {
         return !is_resource($this->resource) || feof($this->resource);
     }
 
+    #[\Override]
     public function isSeekable(): bool
     {
         return true;
     }
 
+    #[\Override]
     public function seek($offset, $whence = SEEK_SET): void
     {
         fseek($this->resource, $offset, $whence);
     }
 
+    #[\Override]
     public function rewind(): void
     {
         rewind($this->resource);
     }
 
+    #[\Override]
     public function isWritable(): bool
     {
         return false;
     }
 
+    #[\Override]
     public function write($string): int
     {
         throw new \RuntimeException('只读流');
     }
 
+    #[\Override]
     public function isReadable(): bool
     {
         return is_resource($this->resource);
     }
 
+    #[\Override]
     public function read($length): string
     {
         $data = fread($this->resource, $length);
@@ -106,6 +119,7 @@ final class ProcessStream implements StreamInterface
         return $data === false ? '' : $data;
     }
 
+    #[\Override]
     public function getContents(): string
     {
         $data = stream_get_contents($this->resource);
@@ -113,6 +127,7 @@ final class ProcessStream implements StreamInterface
         return $data === false ? '' : $data;
     }
 
+    #[\Override]
     public function getMetadata($key = null)
     {
         if (!is_resource($this->resource)) {

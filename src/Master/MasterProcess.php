@@ -114,6 +114,7 @@ class MasterProcess implements ProcessInterface
         $this->maxRestartAttempts = (int) ($this->config['max_restart_attempts'] ?? $this->maxRestartAttempts);
     }
 
+    #[\Override]
     public function start(): void
     {
         if ($this->isRunning()) {
@@ -150,6 +151,7 @@ class MasterProcess implements ProcessInterface
         $this->runEventLoop();
     }
 
+    #[\Override]
     public function stop(bool $graceful = true): void
     {
         if (!$this->isRunning()) {
@@ -170,6 +172,7 @@ class MasterProcess implements ProcessInterface
         $this->logger->info('Master 进程已停止');
     }
 
+    #[\Override]
     public function restart(): void
     {
         $this->logger->info('Master 进程重启中...');
@@ -810,41 +813,49 @@ class MasterProcess implements ProcessInterface
         $this->callbacks['worker_exit'] = $callback;
     }
 
+    #[\Override]
     public function getState(): string
     {
         return $this->state;
     }
 
+    #[\Override]
     public function getPid(): int
     {
         return $this->pid ?: posix_getpid();
     }
 
+    #[\Override]
     public function isRunning(): bool
     {
         return $this->running && $this->state === ProcessInterface::STATE_RUNNING;
     }
 
+    #[\Override]
     public function isMaster(): bool
     {
         return true;
     }
 
+    #[\Override]
     public function isWorker(): bool
     {
         return false;
     }
 
+    #[\Override]
     public function getStartTime(): float
     {
         return $this->startTime;
     }
 
+    #[\Override]
     public function getMemoryUsage(): int
     {
         return memory_get_usage(true);
     }
 
+    #[\Override]
     public function getCpuUsage(): float
     {
         $usage = getrusage();

@@ -105,11 +105,13 @@ final class RedisStore implements StoreInterface
         $this->redis = $redis;
     }
 
+    #[\Override]
     public static function isAvailable(): bool
     {
         return extension_loaded('redis') && class_exists(Redis::class);
     }
 
+    #[\Override]
     public function name(): string
     {
         return 'redis';
@@ -126,11 +128,13 @@ final class RedisStore implements StoreInterface
         return $this->prefix . $key;
     }
 
+    #[\Override]
     public function get(string $key): mixed
     {
         return $this->decodeValue($this->call(fn (): mixed => $this->redis->get($this->k($key))));
     }
 
+    #[\Override]
     public function mget(array $keys): array
     {
         if ($keys === []) {
@@ -150,6 +154,7 @@ final class RedisStore implements StoreInterface
         return $result;
     }
 
+    #[\Override]
     public function set(string $key, mixed $value, int $ttlMs = 0): bool
     {
         $encoded = $this->encodeValue($value);
@@ -159,6 +164,7 @@ final class RedisStore implements StoreInterface
             : $this->redis->set($this->k($key), $encoded));
     }
 
+    #[\Override]
     public function setIfAbsent(string $key, mixed $value, int $ttlMs = 0): bool
     {
         $encoded = $this->encodeValue($value);
@@ -167,6 +173,7 @@ final class RedisStore implements StoreInterface
         return (bool) $this->call(fn (): mixed => $this->redis->set($this->k($key), $encoded, $opts));
     }
 
+    #[\Override]
     public function compareAndSet(string $key, mixed $expected, mixed $value, int $ttlMs = 0): bool
     {
         $result = $this->call(fn (): mixed => $this->redis->eval(
@@ -178,6 +185,7 @@ final class RedisStore implements StoreInterface
         return (int) $result === 1;
     }
 
+    #[\Override]
     public function compareAndDelete(string $key, mixed $expected): bool
     {
         $result = $this->call(fn (): mixed => $this->redis->eval(
@@ -189,6 +197,7 @@ final class RedisStore implements StoreInterface
         return (int) $result === 1;
     }
 
+    #[\Override]
     public function delete(string $key): bool
     {
         $this->call(fn (): mixed => $this->redis->del($this->k($key)));
@@ -196,11 +205,13 @@ final class RedisStore implements StoreInterface
         return true;
     }
 
+    #[\Override]
     public function exists(string $key): bool
     {
         return (int) $this->call(fn (): mixed => $this->redis->exists($this->k($key))) > 0;
     }
 
+    #[\Override]
     public function increment(string $key, int $step = 1, int $ttlMs = 0): int|false
     {
         $value = $this->call(fn (): mixed => $this->redis->eval(
@@ -213,6 +224,7 @@ final class RedisStore implements StoreInterface
         return $value === false || $value === null ? false : (int) $value;
     }
 
+    #[\Override]
     public function expire(string $key, int $ttlMs): bool
     {
         if ($ttlMs <= 0) {
@@ -222,6 +234,7 @@ final class RedisStore implements StoreInterface
         return (bool) $this->call(fn (): mixed => $this->redis->pExpire($this->k($key), $ttlMs));
     }
 
+    #[\Override]
     public function keys(string $prefix = ''): array
     {
         $pattern = $this->prefix . $prefix . '*';
@@ -246,6 +259,7 @@ final class RedisStore implements StoreInterface
         return array_values(array_unique($found));
     }
 
+    #[\Override]
     public function flush(): int
     {
         $keys = $this->keys();
@@ -256,6 +270,7 @@ final class RedisStore implements StoreInterface
         return count($keys);
     }
 
+    #[\Override]
     public function close(): void
     {
         try {

@@ -27,6 +27,7 @@ final class UploadedFile implements \Psr\Http\Message\UploadedFileInterface
     ) {
     }
 
+    #[\Override]
     public function getStream(): StreamInterface
     {
         if ($this->moved) {
@@ -41,6 +42,7 @@ final class UploadedFile implements \Psr\Http\Message\UploadedFileInterface
         return new ProcessStream($res);
     }
 
+    #[\Override]
     public function moveTo($targetPath): void
     {
         if ($this->moved) {
@@ -65,21 +67,25 @@ final class UploadedFile implements \Psr\Http\Message\UploadedFileInterface
         $this->path = (string) $targetPath;
     }
 
+    #[\Override]
     public function getSize(): ?int
     {
         return $this->size;
     }
 
+    #[\Override]
     public function getError(): int
     {
         return $this->error;
     }
 
+    #[\Override]
     public function getClientFilename(): ?string
     {
         return $this->clientFilename;
     }
 
+    #[\Override]
     public function getClientMediaType(): ?string
     {
         return $this->clientMediaType;

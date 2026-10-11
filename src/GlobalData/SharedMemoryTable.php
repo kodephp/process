@@ -103,11 +103,13 @@ final class SharedMemoryTable implements TableInterface
         return new self($key, $size);
     }
 
+    #[\Override]
     public static function isSupported(): bool
     {
         return extension_loaded('sysvshm') && extension_loaded('sysvsem');
     }
 
+    #[\Override]
     public function backend(): string
     {
         return 'sysvshm';
@@ -117,6 +119,7 @@ final class SharedMemoryTable implements TableInterface
      * 写入键值；ttl > 0 时设置秒级生存时间（惰性过期）。
      * 值以原生形式存储，无信封包裹，热路径（已存在且无 TTL）不触碰共享目录。
      */
+    #[\Override]
     public function set(string $key, mixed $value, int $ttl = 0): void
     {
         $this->assertOpen();
@@ -129,6 +132,7 @@ final class SharedMemoryTable implements TableInterface
     /**
      * 仅当键不存在时写入；存在返回 false。
      */
+    #[\Override]
     public function add(string $key, mixed $value, int $ttl = 0): bool
     {
         if ($this->exists($key)) {
@@ -141,6 +145,7 @@ final class SharedMemoryTable implements TableInterface
     /**
      * 仅当键已存在时写入；不存在返回 false。
      */
+    #[\Override]
     public function replace(string $key, mixed $value, int $ttl = 0): bool
     {
         if (!$this->exists($key)) {
@@ -154,6 +159,7 @@ final class SharedMemoryTable implements TableInterface
      * 批量写入。
      * @param array<string, mixed> $items
      */
+    #[\Override]
     public function setMultiple(array $items, int $ttl = 0): void
     {
         foreach ($items as $k => $v) {
@@ -167,6 +173,7 @@ final class SharedMemoryTable implements TableInterface
      * 注意：null 只表示「键不存在 / 已过期」。若存进去的值本身就是 false，这里会如实返回 false，
      * 需要区分「不存在」与「值为假」时请配合 {@see exists()}。
      */
+    #[\Override]
     public function get(string $key): mixed
     {
         $this->assertOpen();
@@ -192,6 +199,7 @@ final class SharedMemoryTable implements TableInterface
      * @param string[] $keys
      * @return array<string, mixed>
      */
+    #[\Override]
     public function getMultiple(array $keys): array
     {
         $out = [];
@@ -201,6 +209,7 @@ final class SharedMemoryTable implements TableInterface
         return $out;
     }
 
+    #[\Override]
     public function exists(string $key): bool
     {
         $this->assertOpen();
@@ -219,6 +228,7 @@ final class SharedMemoryTable implements TableInterface
         return true;
     }
 
+    #[\Override]
     public function delete(string $key): bool
     {
         $this->assertOpen();
@@ -245,6 +255,7 @@ final class SharedMemoryTable implements TableInterface
     /**
      * 原子自增；返回自增后的值。过期键按 0 重新计数。
      */
+    #[\Override]
     public function increment(string $key, int|float $step = 1): int|float
     {
         $this->assertOpen();
@@ -287,6 +298,7 @@ final class SharedMemoryTable implements TableInterface
         return $next;
     }
 
+    #[\Override]
     public function decrement(string $key, int|float $step = 1): int|float
     {
         return $this->increment($key, -$step);
@@ -296,6 +308,7 @@ final class SharedMemoryTable implements TableInterface
      * 比较并交换：仅当当前值等于 $oldValue 时写入 $newValue。
      * 成功返回 true，键不存在或值不匹配返回 false。
      */
+    #[\Override]
     public function cas(string $key, mixed $oldValue, mixed $newValue): bool
     {
         $this->assertOpen();
@@ -328,6 +341,7 @@ final class SharedMemoryTable implements TableInterface
     /**
      * @return string[]
      */
+    #[\Override]
     public function keys(): array
     {
         $this->assertOpen();
@@ -340,6 +354,7 @@ final class SharedMemoryTable implements TableInterface
         }
     }
 
+    #[\Override]
     public function count(): int
     {
         $this->assertOpen();
@@ -352,6 +367,7 @@ final class SharedMemoryTable implements TableInterface
         }
     }
 
+    #[\Override]
     public function clear(): void
     {
         $this->assertOpen();
@@ -375,6 +391,7 @@ final class SharedMemoryTable implements TableInterface
     /**
      * 清空数据并销毁底层共享内存段（其他进程再 attach 将得到空表）。
      */
+    #[\Override]
     public function destroy(): void
     {
         if ($this->closed) {
@@ -398,6 +415,7 @@ final class SharedMemoryTable implements TableInterface
         return $this->size;
     }
 
+    #[\Override]
     public function stats(): array
     {
         return [
@@ -409,6 +427,7 @@ final class SharedMemoryTable implements TableInterface
         ];
     }
 
+    #[\Override]
     public function close(): void
     {
         if ($this->closed) {

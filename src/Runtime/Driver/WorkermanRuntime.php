@@ -35,16 +35,19 @@ final class WorkermanRuntime extends AbstractRuntime
 
     private bool $gzipEnabled = true;
 
+    #[\Override]
     public static function isAvailable(): bool
     {
         return class_exists(self::WORKER_CLASS);
     }
 
+    #[\Override]
     public static function type(): RuntimeType
     {
         return RuntimeType::Workerman;
     }
 
+    #[\Override]
     public static function version(): ?string
     {
         if (!self::isAvailable()) {
@@ -67,11 +70,13 @@ final class WorkermanRuntime extends AbstractRuntime
         }
     }
 
+    #[\Override]
     protected function supportedSchemes(): array
     {
         return ['tcp', 'udp', 'http', 'websocket', 'ws', 'wss', 'unix', 'ssl', 'text', 'frame'];
     }
 
+    #[\Override]
     public function capabilities(): array
     {
         return [
@@ -86,6 +91,7 @@ final class WorkermanRuntime extends AbstractRuntime
         ];
     }
 
+    #[\Override]
     public function start(): void
     {
         $this->requireListener();
@@ -250,6 +256,7 @@ final class WorkermanRuntime extends AbstractRuntime
         return sprintf('%s://%s:%d', $scheme, $listener['host'], $listener['port']);
     }
 
+    #[\Override]
     public function stop(bool $graceful = true): void
     {
         $workerClass = self::WORKER_CLASS;
@@ -260,6 +267,7 @@ final class WorkermanRuntime extends AbstractRuntime
         }
     }
 
+    #[\Override]
     public function reload(): void
     {
         $workerClass = self::WORKER_CLASS;
@@ -269,6 +277,7 @@ final class WorkermanRuntime extends AbstractRuntime
         $workerClass::reloadAll();
     }
 
+    #[\Override]
     public function addTimer(float $interval, callable $callback, bool $periodic = true): int
     {
         $timerClass = '\Workerman\Timer';
@@ -296,6 +305,7 @@ final class WorkermanRuntime extends AbstractRuntime
         return $id;
     }
 
+    #[\Override]
     public function delTimer(int $timerId): bool
     {
         if (!isset($this->timers[$timerId])) {
@@ -307,6 +317,7 @@ final class WorkermanRuntime extends AbstractRuntime
         return (bool)$ok;
     }
 
+    #[\Override]
     public function workerId(): int
     {
         return $this->currentWorkerId;
@@ -317,6 +328,7 @@ final class WorkermanRuntime extends AbstractRuntime
      *
      * @return array<int, \Kode\Process\Runtime\ConnectionInterface>
      */
+    #[\Override]
     public function connections(): array
     {
         $raw = $this->currentWorker->connections ?? [];
@@ -333,6 +345,7 @@ final class WorkermanRuntime extends AbstractRuntime
         return $out;
     }
 
+    #[\Override]
     public function stats(): array
     {
         return parent::stats() + [

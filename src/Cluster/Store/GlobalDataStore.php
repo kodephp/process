@@ -75,11 +75,13 @@ final class GlobalDataStore implements StoreInterface
      * 依赖 ext-sockets（GlobalData 网络层基于 socket_* 实现）。真正的连通性
      * 在构造时探测。
      */
+    #[\Override]
     public static function isAvailable(): bool
     {
         return extension_loaded('sockets') && class_exists(Client::class);
     }
 
+    #[\Override]
     public function name(): string
     {
         return 'globaldata';
@@ -90,11 +92,13 @@ final class GlobalDataStore implements StoreInterface
         return $this->prefix . $key;
     }
 
+    #[\Override]
     public function get(string $key): mixed
     {
         return $this->decodeValue($this->client->get($this->k($key)));
     }
 
+    #[\Override]
     public function mget(array $keys): array
     {
         if ($keys === []) {
@@ -116,16 +120,19 @@ final class GlobalDataStore implements StoreInterface
         return $result;
     }
 
+    #[\Override]
     public function set(string $key, mixed $value, int $ttlMs = 0): bool
     {
         return $this->client->set($this->k($key), $this->encodeValue($value), $this->ttlToSeconds($ttlMs));
     }
 
+    #[\Override]
     public function setIfAbsent(string $key, mixed $value, int $ttlMs = 0): bool
     {
         return $this->client->add($this->k($key), $this->encodeValue($value), $this->ttlToSeconds($ttlMs));
     }
 
+    #[\Override]
     public function compareAndSet(string $key, mixed $expected, mixed $value, int $ttlMs = 0): bool
     {
         $full = $this->k($key);
@@ -137,21 +144,25 @@ final class GlobalDataStore implements StoreInterface
             : $this->client->cas($full, $old, $new);
     }
 
+    #[\Override]
     public function compareAndDelete(string $key, mixed $expected): bool
     {
         return $this->client->casDelete($this->k($key), $this->encodeValue($expected));
     }
 
+    #[\Override]
     public function delete(string $key): bool
     {
         return $this->client->delete($this->k($key));
     }
 
+    #[\Override]
     public function exists(string $key): bool
     {
         return $this->client->exists($this->k($key));
     }
 
+    #[\Override]
     public function increment(string $key, int $step = 1, int $ttlMs = 0): int|false
     {
         $value = $this->client->increment($this->k($key), $step, $this->ttlToSeconds($ttlMs));
@@ -160,11 +171,13 @@ final class GlobalDataStore implements StoreInterface
         return $value === false ? false : (int) $value;
     }
 
+    #[\Override]
     public function expire(string $key, int $ttlMs): bool
     {
         return $this->client->expire($this->k($key), $this->ttlToSeconds($ttlMs));
     }
 
+    #[\Override]
     public function keys(string $prefix = ''): array
     {
         $cut   = strlen($this->prefix);
@@ -177,6 +190,7 @@ final class GlobalDataStore implements StoreInterface
         return $found;
     }
 
+    #[\Override]
     public function flush(): int
     {
         $keys = $this->keys();
@@ -187,6 +201,7 @@ final class GlobalDataStore implements StoreInterface
         return count($keys);
     }
 
+    #[\Override]
     public function close(): void
     {
         $this->client->close();

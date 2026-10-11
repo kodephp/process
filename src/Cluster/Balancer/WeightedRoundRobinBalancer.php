@@ -38,11 +38,13 @@ final class WeightedRoundRobinBalancer extends AbstractBalancer
     /** 权重总和。 */
     private int $total = 0;
 
+    #[\Override]
     public function name(): string
     {
         return 'weighted';
     }
 
+    #[\Override]
     public function trySelect(?string $key = null): ?Node
     {
         $count = count($this->nodes);
@@ -80,6 +82,7 @@ final class WeightedRoundRobinBalancer extends AbstractBalancer
         return max(1, $node->weight);
     }
 
+    #[\Override]
     protected function onNodesChanged(): void
     {
         $this->current = [];

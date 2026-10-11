@@ -202,6 +202,7 @@ final class NativeRuntime extends AbstractRuntime
      */
     private array $pendingTimers = [];
 
+    #[\Override]
     public static function isAvailable(): bool
     {
         return PHP_SAPI === 'cli'
@@ -210,11 +211,13 @@ final class NativeRuntime extends AbstractRuntime
             && function_exists('pcntl_fork');
     }
 
+    #[\Override]
     public static function type(): RuntimeType
     {
         return RuntimeType::Native;
     }
 
+    #[\Override]
     public static function version(): ?string
     {
         return Version::VERSION;
@@ -240,6 +243,7 @@ final class NativeRuntime extends AbstractRuntime
         }
     }
 
+    #[\Override]
     protected function supportedSchemes(): array
     {
         // 内置 scheme 永远支持；已通过 ProtocolFactory::register 注册的自定义协议同样一等公民。
@@ -249,6 +253,7 @@ final class NativeRuntime extends AbstractRuntime
         ]));
     }
 
+    #[\Override]
     public function capabilities(): array
     {
         return [
@@ -265,6 +270,7 @@ final class NativeRuntime extends AbstractRuntime
     }
 
     /** 当前 worker 序号；master / 未启动时为 0 */
+    #[\Override]
     public function workerId(): int
     {
         return $this->workerId;
@@ -275,6 +281,7 @@ final class NativeRuntime extends AbstractRuntime
      *
      * @return array<int, ConnectionInterface>
      */
+    #[\Override]
     public function connections(): array
     {
         return $this->connections;
@@ -321,6 +328,7 @@ final class NativeRuntime extends AbstractRuntime
 
     // ------------------------------------------------------------- 启动
 
+    #[\Override]
     public function start(): void
     {
         $listener = $this->requireListener();
@@ -492,6 +500,7 @@ final class NativeRuntime extends AbstractRuntime
      * （见 {@see AbstractRuntime::task()}），保证同一份业务代码在三种运行时下
      * 行为一致——切换底层无需改动调用方。
      */
+    #[\Override]
     public function task(mixed $data): bool
     {
         // 无 task 进程可用 → 同步兜底，不抛异常
@@ -1726,6 +1735,7 @@ final class NativeRuntime extends AbstractRuntime
 
     // ------------------------------------------------------------ 生命周期
 
+    #[\Override]
     public function stop(bool $graceful = true): void
     {
         if ($this->isWorker || $this->isTaskWorker) {
@@ -1738,6 +1748,7 @@ final class NativeRuntime extends AbstractRuntime
         }
     }
 
+    #[\Override]
     public function reload(): void
     {
         if ($this->isWorker || $this->isTaskWorker) {
@@ -1750,6 +1761,7 @@ final class NativeRuntime extends AbstractRuntime
         $this->reloadMaster();
     }
 
+    #[\Override]
     public function addTimer(float $interval, callable $callback, bool $periodic = true): int
     {
         $id = ++$this->timerSeq;
@@ -1772,6 +1784,7 @@ final class NativeRuntime extends AbstractRuntime
         return $id;
     }
 
+    #[\Override]
     public function delTimer(int $timerId): bool
     {
         // 注意：尚未启动的定时器在 $timers 里存的是 null（待重放），
@@ -1796,6 +1809,7 @@ final class NativeRuntime extends AbstractRuntime
         return true;
     }
 
+    #[\Override]
     public function stats(): array
     {
         return parent::stats() + [

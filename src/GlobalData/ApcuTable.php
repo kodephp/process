@@ -43,6 +43,7 @@ final class ApcuTable implements TableInterface
         $this->lockTtl = max(1, $lockTtl);
     }
 
+    #[\Override]
     public static function isSupported(): bool
     {
         return extension_loaded('apcu')
@@ -51,17 +52,20 @@ final class ApcuTable implements TableInterface
             && (PHP_SAPI !== 'cli' || (bool) ini_get('apc.enable_cli'));
     }
 
+    #[\Override]
     public function backend(): string
     {
         return 'apcu';
     }
 
+    #[\Override]
     public function set(string $key, mixed $value, int $ttl = 0): void
     {
         $this->assertOpen();
         apcu_store($this->prefix . $key, $value, max(0, $ttl));
     }
 
+    #[\Override]
     public function add(string $key, mixed $value, int $ttl = 0): bool
     {
         $this->assertOpen();
@@ -69,6 +73,7 @@ final class ApcuTable implements TableInterface
         return (bool) apcu_add($this->prefix . $key, $value, max(0, $ttl));
     }
 
+    #[\Override]
     public function replace(string $key, mixed $value, int $ttl = 0): bool
     {
         $this->assertOpen();
@@ -80,6 +85,7 @@ final class ApcuTable implements TableInterface
         return true;
     }
 
+    #[\Override]
     public function setMultiple(array $items, int $ttl = 0): void
     {
         $this->assertOpen();
@@ -90,6 +96,7 @@ final class ApcuTable implements TableInterface
         apcu_store($payload, null, max(0, $ttl));
     }
 
+    #[\Override]
     public function get(string $key): mixed
     {
         $this->assertOpen();
@@ -99,6 +106,7 @@ final class ApcuTable implements TableInterface
         return $ok ? $value : null;
     }
 
+    #[\Override]
     public function getMultiple(array $keys): array
     {
         $this->assertOpen();
@@ -113,6 +121,7 @@ final class ApcuTable implements TableInterface
         return $out;
     }
 
+    #[\Override]
     public function exists(string $key): bool
     {
         $this->assertOpen();
@@ -120,6 +129,7 @@ final class ApcuTable implements TableInterface
         return (bool) apcu_exists($this->prefix . $key);
     }
 
+    #[\Override]
     public function delete(string $key): bool
     {
         $this->assertOpen();
@@ -127,6 +137,7 @@ final class ApcuTable implements TableInterface
         return (bool) apcu_delete($this->prefix . $key);
     }
 
+    #[\Override]
     public function increment(string $key, int|float $step = 1): int|float
     {
         $this->assertOpen();
@@ -154,11 +165,13 @@ final class ApcuTable implements TableInterface
         });
     }
 
+    #[\Override]
     public function decrement(string $key, int|float $step = 1): int|float
     {
         return $this->increment($key, -$step);
     }
 
+    #[\Override]
     public function cas(string $key, mixed $oldValue, mixed $newValue): bool
     {
         $this->assertOpen();
@@ -180,6 +193,7 @@ final class ApcuTable implements TableInterface
         });
     }
 
+    #[\Override]
     public function keys(): array
     {
         $this->assertOpen();
@@ -191,6 +205,7 @@ final class ApcuTable implements TableInterface
         return $keys;
     }
 
+    #[\Override]
     public function count(): int
     {
         $this->assertOpen();
@@ -198,6 +213,7 @@ final class ApcuTable implements TableInterface
         return count($this->scan());
     }
 
+    #[\Override]
     public function clear(): void
     {
         $this->assertOpen();
@@ -206,6 +222,7 @@ final class ApcuTable implements TableInterface
         }
     }
 
+    #[\Override]
     public function destroy(): void
     {
         if ($this->closed) {
@@ -215,6 +232,7 @@ final class ApcuTable implements TableInterface
         $this->closed = true;
     }
 
+    #[\Override]
     public function stats(): array
     {
         $info = function_exists('apcu_sma_info') ? apcu_sma_info(true) : [];
@@ -228,6 +246,7 @@ final class ApcuTable implements TableInterface
         ];
     }
 
+    #[\Override]
     public function close(): void
     {
         $this->closed = true;

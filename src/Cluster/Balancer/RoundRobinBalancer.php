@@ -17,11 +17,13 @@ final class RoundRobinBalancer extends AbstractBalancer
 {
     private int $cursor = 0;
 
+    #[\Override]
     public function name(): string
     {
         return 'round-robin';
     }
 
+    #[\Override]
     public function trySelect(?string $key = null): ?Node
     {
         $count = count($this->nodes);
@@ -37,6 +39,7 @@ final class RoundRobinBalancer extends AbstractBalancer
         return $node;
     }
 
+    #[\Override]
     protected function onNodesChanged(): void
     {
         $this->cursor = 0;

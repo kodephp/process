@@ -42,6 +42,7 @@ final class SwooleConnection implements ConnectionInterface
     ) {
     }
 
+    #[\Override]
     public function id(): int
     {
         return $this->fd;
@@ -60,6 +61,7 @@ final class SwooleConnection implements ConnectionInterface
         $this->chunkStarted = false;
     }
 
+    #[\Override]
     public function send(string $data, bool $raw = false): bool
     {
         if ($this->response !== null) {
@@ -90,6 +92,7 @@ final class SwooleConnection implements ConnectionInterface
         return (bool)$this->server->send($this->fd, $data);
     }
 
+    #[\Override]
     public function sendResponse(ResponseInterface $response, bool $autoGzip = true): bool
     {
         if ($this->response !== null) {
@@ -139,16 +142,19 @@ final class SwooleConnection implements ConnectionInterface
         return $this->send(Psr7Response::toHttp11($response), true);
     }
 
+    #[\Override]
     public function isGzipAuto(): bool
     {
         return $this->gzipAuto;
     }
 
+    #[\Override]
     public function setGzipAuto(bool $enabled): void
     {
         $this->gzipAuto = $enabled;
     }
 
+    #[\Override]
     public function gzip(string $data, int $status = 200, array $headers = []): bool
     {
         if ($this->response !== null) {
@@ -171,11 +177,13 @@ final class SwooleConnection implements ConnectionInterface
         return $this->send($data);
     }
 
+    #[\Override]
     public function isChunkStarted(): bool
     {
         return $this->chunkStarted;
     }
 
+    #[\Override]
     public function beginChunked(int $status = 200, array $headers = []): bool
     {
         if ($this->response !== null) {
@@ -198,6 +206,7 @@ final class SwooleConnection implements ConnectionInterface
         return true;
     }
 
+    #[\Override]
     public function chunk(string $data): bool
     {
         if ($this->response !== null) {
@@ -223,6 +232,7 @@ final class SwooleConnection implements ConnectionInterface
         return $this->send($frame, true);
     }
 
+    #[\Override]
     public function endChunk(): bool
     {
         if ($this->response !== null) {
@@ -245,6 +255,7 @@ final class SwooleConnection implements ConnectionInterface
         return true;
     }
 
+    #[\Override]
     public function close(?string $data = null): void
     {
         if ($data !== null && $data !== '') {
@@ -260,6 +271,7 @@ final class SwooleConnection implements ConnectionInterface
         $this->server->close($this->fd);
     }
 
+    #[\Override]
     public function remoteAddress(): string
     {
         $info = $this->info();
@@ -269,6 +281,7 @@ final class SwooleConnection implements ConnectionInterface
         return sprintf('%s:%d', $info['remote_ip'] ?? '', $info['remote_port'] ?? 0);
     }
 
+    #[\Override]
     public function localAddress(): string
     {
         $info = $this->info();
@@ -306,6 +319,7 @@ final class SwooleConnection implements ConnectionInterface
         $this->response->end($data);
     }
 
+    #[\Override]
     public function isAlive(): bool
     {
         if ($this->response !== null) {
@@ -314,16 +328,19 @@ final class SwooleConnection implements ConnectionInterface
         return method_exists($this->server, 'exists') && (bool)$this->server->exists($this->fd);
     }
 
+    #[\Override]
     public function native(): mixed
     {
         return $this->response ?? $this->fd;
     }
 
+    #[\Override]
     public function setContext(string $key, mixed $value): void
     {
         $this->context[$key] = $value;
     }
 
+    #[\Override]
     public function getContext(string $key, mixed $default = null): mixed
     {
         return $this->context[$key] ?? $default;

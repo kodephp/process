@@ -67,6 +67,7 @@ class SocketIPC implements IPCInterface
         $this->workerSocket = $socket;
     }
 
+    #[\Override]
     public function send(mixed $message, int $targetPid = 0): bool
     {
         if ($this->closed) {
@@ -104,6 +105,7 @@ class SocketIPC implements IPCInterface
         return true;
     }
 
+    #[\Override]
     public function receive(?float $timeout = null): mixed
     {
         if ($this->closed) {
@@ -159,16 +161,19 @@ class SocketIPC implements IPCInterface
         }
     }
 
+    #[\Override]
     public function broadcast(mixed $message): bool
     {
         return $this->send($message, 0);
     }
 
+    #[\Override]
     public function sendTo(int $targetPid, mixed $message): bool
     {
         return $this->send($message, $targetPid);
     }
 
+    #[\Override]
     public function receiveFrom(int $sourcePid, ?float $timeout = null): mixed
     {
         $this->sourcePid = $sourcePid;
@@ -176,26 +181,31 @@ class SocketIPC implements IPCInterface
         return $this->receive($timeout);
     }
 
+    #[\Override]
     public function getType(): string
     {
         return IPCInterface::TYPE_SOCKET;
     }
 
+    #[\Override]
     public function getBufferSize(): int
     {
         return $this->bufferSize;
     }
 
+    #[\Override]
     public function setBufferSize(int $size): void
     {
         $this->bufferSize = $size;
     }
 
+    #[\Override]
     public function flush(): void
     {
         $this->buffer = '';
     }
 
+    #[\Override]
     public function close(): void
     {
         if ($this->closed) {
@@ -214,6 +224,7 @@ class SocketIPC implements IPCInterface
         $this->logger->debug('IPC 通道已关闭');
     }
 
+    #[\Override]
     public function isClosed(): bool
     {
         return $this->closed;

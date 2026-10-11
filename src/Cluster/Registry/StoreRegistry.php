@@ -53,6 +53,7 @@ final class StoreRegistry implements RegistryInterface
     ) {
     }
 
+    #[\Override]
     public function ttl(): float
     {
         return $this->ttl;
@@ -74,6 +75,7 @@ final class StoreRegistry implements RegistryInterface
         return (int) round($this->ttl * 2 * 1000);
     }
 
+    #[\Override]
     public function register(Node $node): Node
     {
         $now = microtime(true);
@@ -95,11 +97,13 @@ final class StoreRegistry implements RegistryInterface
         return $stored;
     }
 
+    #[\Override]
     public function deregister(string $id, string $service = 'default'): bool
     {
         return $this->store->delete($this->key($service, $id));
     }
 
+    #[\Override]
     public function heartbeat(string $id, string $service = 'default'): bool
     {
         $key = $this->key($service, $id);
@@ -116,6 +120,7 @@ final class StoreRegistry implements RegistryInterface
         return $this->store->set($key, $raw, $this->storeTtlMs());
     }
 
+    #[\Override]
     public function nodes(?string $service = null, bool $healthyOnly = true): array
     {
         $prefix = self::PREFIX . ($service !== null ? $service . '/' : '');
@@ -153,6 +158,7 @@ final class StoreRegistry implements RegistryInterface
         return $nodes;
     }
 
+    #[\Override]
     public function find(string $id, string $service = 'default'): ?Node
     {
         $raw = $this->store->get($this->key($service, $id));
@@ -166,6 +172,7 @@ final class StoreRegistry implements RegistryInterface
         return $status === NodeStatus::Down ? null : $node->withStatus($status);
     }
 
+    #[\Override]
     public function services(): array
     {
         $services = [];
@@ -184,6 +191,7 @@ final class StoreRegistry implements RegistryInterface
         return $names;
     }
 
+    #[\Override]
     public function diff(?string $service = null): array
     {
         $bucket  = $service ?? '*';

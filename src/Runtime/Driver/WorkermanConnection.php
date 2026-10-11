@@ -30,11 +30,13 @@ final class WorkermanConnection implements ConnectionInterface
     {
     }
 
+    #[\Override]
     public function id(): int
     {
         return (int)($this->conn->id ?? 0);
     }
 
+    #[\Override]
     public function send(string $data, bool $raw = false): bool
     {
         // 自动 gzip：仅 HTTP 连接、未分块、字符串响应体达阈值时拼完整压缩报文（raw 发送）
@@ -53,16 +55,19 @@ final class WorkermanConnection implements ConnectionInterface
         return (bool)$this->conn->send($data, $raw);
     }
 
+    #[\Override]
     public function isGzipAuto(): bool
     {
         return $this->gzipAuto;
     }
 
+    #[\Override]
     public function setGzipAuto(bool $enabled): void
     {
         $this->gzipAuto = $enabled;
     }
 
+    #[\Override]
     public function gzip(string $data, int $status = 200, array $headers = []): bool
     {
         $compressed = HttpProtocol::encodeCompressed(['status' => $status, 'headers' => $headers, 'body' => $data]);
@@ -72,6 +77,7 @@ final class WorkermanConnection implements ConnectionInterface
         return (bool)$this->conn->send($compressed, true);
     }
 
+    #[\Override]
     public function sendResponse(ResponseInterface $response, bool $autoGzip = true): bool
     {
         $doGzip = $autoGzip
@@ -84,11 +90,13 @@ final class WorkermanConnection implements ConnectionInterface
         return (bool)$this->conn->send($bytes, true);
     }
 
+    #[\Override]
     public function isChunkStarted(): bool
     {
         return $this->chunkStarted;
     }
 
+    #[\Override]
     public function beginChunked(int $status = 200, array $headers = []): bool
     {
         if ($this->chunkStarted) {
@@ -101,6 +109,7 @@ final class WorkermanConnection implements ConnectionInterface
         return true;
     }
 
+    #[\Override]
     public function chunk(string $data): bool
     {
         if (!$this->chunkStarted) {
@@ -116,6 +125,7 @@ final class WorkermanConnection implements ConnectionInterface
         return (bool)$this->conn->send($frame, true);
     }
 
+    #[\Override]
     public function endChunk(): bool
     {
         if (!$this->chunkStarted) {
@@ -128,11 +138,13 @@ final class WorkermanConnection implements ConnectionInterface
         return true;
     }
 
+    #[\Override]
     public function close(?string $data = null): void
     {
         $data === null ? $this->conn->close() : $this->conn->close($data);
     }
 
+    #[\Override]
     public function remoteAddress(): string
     {
         return method_exists($this->conn, 'getRemoteAddress')
@@ -140,6 +152,7 @@ final class WorkermanConnection implements ConnectionInterface
             : '';
     }
 
+    #[\Override]
     public function localAddress(): string
     {
         return method_exists($this->conn, 'getLocalAddress')
@@ -147,6 +160,7 @@ final class WorkermanConnection implements ConnectionInterface
             : '';
     }
 
+    #[\Override]
     public function isAlive(): bool
     {
         // Workerman TcpConnection::STATUS_CLOSED = 8
@@ -154,16 +168,19 @@ final class WorkermanConnection implements ConnectionInterface
         return $status !== 8 && $status !== 'CLOSED';
     }
 
+    #[\Override]
     public function native(): mixed
     {
         return $this->conn;
     }
 
+    #[\Override]
     public function setContext(string $key, mixed $value): void
     {
         $this->context[$key] = $value;
     }
 
+    #[\Override]
     public function getContext(string $key, mixed $default = null): mixed
     {
         return $this->context[$key] ?? $default;

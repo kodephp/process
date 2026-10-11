@@ -149,6 +149,7 @@ class SharedMemoryIPC implements IPCInterface
         return self::FIRST_SLOT + $index;
     }
 
+    #[\Override]
     public function send(mixed $message, int $targetPid = 0): bool
     {
         if ($this->closed) {
@@ -186,6 +187,7 @@ class SharedMemoryIPC implements IPCInterface
         return true;
     }
 
+    #[\Override]
     public function receive(?float $timeout = null): mixed
     {
         if ($this->closed) {
@@ -222,31 +224,37 @@ class SharedMemoryIPC implements IPCInterface
         }
     }
 
+    #[\Override]
     public function broadcast(mixed $message): bool
     {
         return $this->send($message, 0);
     }
 
+    #[\Override]
     public function sendTo(int $targetPid, mixed $message): bool
     {
         return $this->send($message, $targetPid);
     }
 
+    #[\Override]
     public function receiveFrom(int $sourcePid, ?float $timeout = null): mixed
     {
         return $this->receive($timeout);
     }
 
+    #[\Override]
     public function getType(): string
     {
         return IPCInterface::TYPE_SHARED_MEMORY;
     }
 
+    #[\Override]
     public function getBufferSize(): int
     {
         return $this->bufferSize;
     }
 
+    #[\Override]
     public function setBufferSize(int $size): void
     {
         $this->bufferSize = min($size, self::MAX_SEGMENT);
@@ -259,6 +267,7 @@ class SharedMemoryIPC implements IPCInterface
         return $this->capacity;
     }
 
+    #[\Override]
     public function flush(): void
     {
         $this->lock();
@@ -273,6 +282,7 @@ class SharedMemoryIPC implements IPCInterface
         }
     }
 
+    #[\Override]
     public function close(): void
     {
         if ($this->closed) {
@@ -298,6 +308,7 @@ class SharedMemoryIPC implements IPCInterface
         }
     }
 
+    #[\Override]
     public function isClosed(): bool
     {
         return $this->closed;

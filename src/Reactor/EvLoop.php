@@ -45,21 +45,25 @@ final class EvLoop implements LoopInterface
         }
     }
 
+    #[\Override]
     public static function isSupported(): bool
     {
         return \extension_loaded('ev') && \class_exists(Ev::class);
     }
 
+    #[\Override]
     public static function name(): string
     {
         return 'ev';
     }
 
+    #[\Override]
     public static function priority(): int
     {
         return 90;
     }
 
+    #[\Override]
     public function onReadable($stream, callable $callback): void
     {
         $id = (int)$stream;
@@ -73,6 +77,7 @@ final class EvLoop implements LoopInterface
         });
     }
 
+    #[\Override]
     public function offReadable($stream): void
     {
         $id = (int)$stream;
@@ -82,6 +87,7 @@ final class EvLoop implements LoopInterface
         }
     }
 
+    #[\Override]
     public function onWritable($stream, callable $callback): void
     {
         $id = (int)$stream;
@@ -95,6 +101,7 @@ final class EvLoop implements LoopInterface
         });
     }
 
+    #[\Override]
     public function offWritable($stream): void
     {
         $id = (int)$stream;
@@ -104,6 +111,7 @@ final class EvLoop implements LoopInterface
         }
     }
 
+    #[\Override]
     public function onSignal(int $signal, callable $callback): void
     {
         $this->offSignal($signal);
@@ -116,6 +124,7 @@ final class EvLoop implements LoopInterface
         });
     }
 
+    #[\Override]
     public function offSignal(int $signal): void
     {
         if (isset($this->signalWatchers[$signal])) {
@@ -124,6 +133,7 @@ final class EvLoop implements LoopInterface
         }
     }
 
+    #[\Override]
     public function addTimer(float $interval, callable $callback, bool $periodic = false): int
     {
         $interval = max(0.0, $interval);
@@ -148,6 +158,7 @@ final class EvLoop implements LoopInterface
         return $id;
     }
 
+    #[\Override]
     public function delTimer(int $timerId): bool
     {
         if (!isset($this->timerWatchers[$timerId])) {
@@ -158,6 +169,7 @@ final class EvLoop implements LoopInterface
         return true;
     }
 
+    #[\Override]
     public function defer(callable $callback): void
     {
         $this->deferred[] = $callback;
@@ -178,6 +190,7 @@ final class EvLoop implements LoopInterface
         });
     }
 
+    #[\Override]
     public function run(): void
     {
         $this->running = true;
@@ -185,17 +198,20 @@ final class EvLoop implements LoopInterface
         $this->running = false;
     }
 
+    #[\Override]
     public function stop(): void
     {
         $this->running = false;
         Ev::stop(Ev::BREAK_ALL);
     }
 
+    #[\Override]
     public function isRunning(): bool
     {
         return $this->running;
     }
 
+    #[\Override]
     public function destroy(): void
     {
         foreach ($this->readWatchers as $w) {
@@ -222,6 +238,7 @@ final class EvLoop implements LoopInterface
         $this->stop();
     }
 
+    #[\Override]
     public function stats(): array
     {
         return [

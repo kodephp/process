@@ -135,11 +135,13 @@ final class NativeConnection implements ConnectionInterface
         self::$clock = $now;
     }
 
+    #[\Override]
     public function id(): int
     {
         return $this->connId;
     }
 
+    #[\Override]
     public function send(string $data, bool $raw = false): bool
     {
         if ($this->closed) {
@@ -181,6 +183,7 @@ final class NativeConnection implements ConnectionInterface
         return 0;
     }
 
+    #[\Override]
     public function isGzipAuto(): bool
     {
         return $this->gzipAuto;
@@ -192,12 +195,14 @@ final class NativeConnection implements ConnectionInterface
         return $this->gzipAutoResolved;
     }
 
+    #[\Override]
     public function setGzipAuto(bool $enabled): void
     {
         $this->gzipAuto = $enabled;
         $this->gzipAutoResolved = true;
     }
 
+    #[\Override]
     public function gzip(string $data, int $status = 200, array $headers = []): bool
     {
         if ($this->closed) {
@@ -214,6 +219,7 @@ final class NativeConnection implements ConnectionInterface
         );
     }
 
+    #[\Override]
     public function sendResponse(ResponseInterface $response, bool $autoGzip = true): bool
     {
         if ($this->closed) {
@@ -237,11 +243,13 @@ final class NativeConnection implements ConnectionInterface
 
     // ------------------------------------------------------- HTTP 分块流式
 
+    #[\Override]
     public function isChunkStarted(): bool
     {
         return $this->httpChunkStarted;
     }
 
+    #[\Override]
     public function beginChunked(int $status = 200, array $headers = []): bool
     {
         if ($this->closed || $this->httpChunkStarted) {
@@ -254,6 +262,7 @@ final class NativeConnection implements ConnectionInterface
         return true;
     }
 
+    #[\Override]
     public function chunk(string $data): bool
     {
         if ($this->closed) {
@@ -283,6 +292,7 @@ final class NativeConnection implements ConnectionInterface
         return $this->write($frame);
     }
 
+    #[\Override]
     public function endChunk(): bool
     {
         if (!$this->httpChunkStarted || $this->httpChunkEnded) {
@@ -411,6 +421,7 @@ final class NativeConnection implements ConnectionInterface
         $this->closeAfterFlush = true;
     }
 
+    #[\Override]
     public function close(?string $data = null): void
     {
         if ($this->closed) {
@@ -431,6 +442,7 @@ final class NativeConnection implements ConnectionInterface
         }
     }
 
+    #[\Override]
     public function remoteAddress(): string
     {
         if ($this->udpPeer !== null) {
@@ -462,6 +474,7 @@ final class NativeConnection implements ConnectionInterface
         return $this->remoteIp ??= Request::ipOf($this->remoteAddress());
     }
 
+    #[\Override]
     public function localAddress(): string
     {
         if (is_resource($this->socket)) {
@@ -473,6 +486,7 @@ final class NativeConnection implements ConnectionInterface
         return '';
     }
 
+    #[\Override]
     public function isAlive(): bool
     {
         if ($this->closed || !is_resource($this->socket)) {
@@ -494,6 +508,7 @@ final class NativeConnection implements ConnectionInterface
         return $this->closed;
     }
 
+    #[\Override]
     public function native(): mixed
     {
         return $this->socket;
@@ -751,11 +766,13 @@ final class NativeConnection implements ConnectionInterface
         ];
     }
 
+    #[\Override]
     public function setContext(string $key, mixed $value): void
     {
         $this->context[$key] = $value;
     }
 
+    #[\Override]
     public function getContext(string $key, mixed $default = null): mixed
     {
         return $this->context[$key] ?? $default;

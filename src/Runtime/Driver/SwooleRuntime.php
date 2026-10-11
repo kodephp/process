@@ -32,6 +32,7 @@ final class SwooleRuntime extends AbstractRuntime
 
     private bool $gzipEnabled = true;
 
+    #[\Override]
     public static function isAvailable(): bool
     {
         if (!extension_loaded('swoole')) {
@@ -50,11 +51,13 @@ final class SwooleRuntime extends AbstractRuntime
         return true;
     }
 
+    #[\Override]
     public static function type(): RuntimeType
     {
         return RuntimeType::Swoole;
     }
 
+    #[\Override]
     public static function version(): ?string
     {
         if (!self::isAvailable()) {
@@ -74,11 +77,13 @@ final class SwooleRuntime extends AbstractRuntime
         }
     }
 
+    #[\Override]
     protected function supportedSchemes(): array
     {
         return ['tcp', 'udp', 'http', 'websocket', 'ws', 'unix', 'ssl'];
     }
 
+    #[\Override]
     public function capabilities(): array
     {
         return [
@@ -96,6 +101,7 @@ final class SwooleRuntime extends AbstractRuntime
         ];
     }
 
+    #[\Override]
     public function start(): void
     {
         $listener = $this->requireListener();
@@ -254,6 +260,7 @@ final class SwooleRuntime extends AbstractRuntime
         }
     }
 
+    #[\Override]
     public function stop(bool $graceful = true): void
     {
         $this->running = false;
@@ -263,6 +270,7 @@ final class SwooleRuntime extends AbstractRuntime
         $graceful ? $this->server->shutdown() : $this->server->stop();
     }
 
+    #[\Override]
     public function reload(): void
     {
         if ($this->server === null) {
@@ -271,6 +279,7 @@ final class SwooleRuntime extends AbstractRuntime
         $this->server->reload();
     }
 
+    #[\Override]
     public function addTimer(float $interval, callable $callback, bool $periodic = true): int
     {
         $ms = max(1, (int)round($interval * 1000));
@@ -297,6 +306,7 @@ final class SwooleRuntime extends AbstractRuntime
         return $id;
     }
 
+    #[\Override]
     public function delTimer(int $timerId): bool
     {
         if (!isset($this->timers[$timerId])) {
@@ -313,6 +323,7 @@ final class SwooleRuntime extends AbstractRuntime
         return $this->server;
     }
 
+    #[\Override]
     public function workerId(): int
     {
         return $this->currentWorkerId;
@@ -323,6 +334,7 @@ final class SwooleRuntime extends AbstractRuntime
      *
      * @return array<int, \Kode\Process\Runtime\ConnectionInterface>
      */
+    #[\Override]
     public function connections(): array
     {
         if ($this->server === null || !isset($this->server->connections)) {
@@ -339,6 +351,7 @@ final class SwooleRuntime extends AbstractRuntime
     /**
      * 配置了 taskWorkers 时投递到 Swoole Task 进程，否则降级为进程内同步执行。
      */
+    #[\Override]
     public function task(mixed $data): bool
     {
         if ($this->taskWorkerCount > 0 && $this->server !== null && method_exists($this->server, 'task')) {
@@ -347,6 +360,7 @@ final class SwooleRuntime extends AbstractRuntime
         return parent::task($data);
     }
 
+    #[\Override]
     public function stats(): array
     {
         $base = parent::stats() + [

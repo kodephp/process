@@ -27,11 +27,13 @@ final class Future implements FutureInterface
         $this->runtime = $runtime;
     }
 
+    #[\Override]
     public function done(): bool
     {
         return $this->future->done();
     }
 
+    #[\Override]
     public function value(): mixed
     {
         if (!$this->resolved) {
@@ -52,16 +54,19 @@ final class Future implements FutureInterface
         return $this->result;
     }
 
+    #[\Override]
     public function isSuccessful(): bool
     {
         return $this->resolved && $this->error === null;
     }
 
+    #[\Override]
     public function isFailed(): bool
     {
         return $this->resolved && $this->error !== null;
     }
 
+    #[\Override]
     public function getException(): ?\Throwable
     {
         return $this->error;

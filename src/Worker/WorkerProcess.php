@@ -70,6 +70,7 @@ class WorkerProcess implements WorkerInterface
         $this->parentPid = posix_getppid();
     }
 
+    #[\Override]
     public function start(): void
     {
         if ($this->isRunning()) {
@@ -227,6 +228,7 @@ class WorkerProcess implements WorkerInterface
         $this->logger->info('Worker 进程清理完成', ['worker_id' => $this->id]);
     }
 
+    #[\Override]
     public function stop(bool $graceful = true): void
     {
         if (!$this->running) {
@@ -320,6 +322,7 @@ class WorkerProcess implements WorkerInterface
         return @pcntl_waitpid($pid, $status, WNOHANG) === $pid;
     }
 
+    #[\Override]
     public function restart(): void
     {
         $this->stop(true);
@@ -377,41 +380,49 @@ class WorkerProcess implements WorkerInterface
         $this->ipcChannels[] = $channel;
     }
 
+    #[\Override]
     public function getId(): int
     {
         return $this->id;
     }
 
+    #[\Override]
     public function getStatus(): string
     {
         return $this->status;
     }
 
+    #[\Override]
     public function getProcessedCount(): int
     {
         return $this->processedCount;
     }
 
+    #[\Override]
     public function getErrorCount(): int
     {
         return $this->errorCount;
     }
 
+    #[\Override]
     public function getCurrentTask(): ?string
     {
         return $this->currentTask;
     }
 
+    #[\Override]
     public function getMaxConnections(): int
     {
         return $this->maxConnections;
     }
 
+    #[\Override]
     public function getCurrentConnections(): int
     {
         return $this->currentConnections;
     }
 
+    #[\Override]
     public function getLoad(): float
     {
         return $this->load;
@@ -424,6 +435,7 @@ class WorkerProcess implements WorkerInterface
      * processedCount/lastHeartbeat 不会跨进程同步，启动超过 heartbeatTimeout 后
      * 'overdue' 会恒为 true。真实心跳需子进程经 IPC/共享内存上报，勿据此直接杀进程。
      */
+    #[\Override]
     public function heartbeat(): array
     {
         $now = microtime(true);
@@ -449,6 +461,7 @@ class WorkerProcess implements WorkerInterface
      * 重要：回调在「调用方进程」里直接跑——在 master 侧代理对象上调用即在 master
      * 事件循环内阻塞执行，并不会投递给已 fork 的子进程。真正的跨进程派单需走 IPC。
      */
+    #[\Override]
     public function assignTask(string $taskId, array $data): void
     {
         if ($this->status !== WorkerInterface::STATUS_FREE) {
@@ -477,6 +490,7 @@ class WorkerProcess implements WorkerInterface
         }
     }
 
+    #[\Override]
     public function completeTask(string $taskId, mixed $result): void
     {
         $this->processedCount++;
@@ -489,6 +503,7 @@ class WorkerProcess implements WorkerInterface
         ]);
     }
 
+    #[\Override]
     public function failTask(string $taskId, \Throwable $error): void
     {
         $this->errorCount++;
@@ -502,16 +517,19 @@ class WorkerProcess implements WorkerInterface
         ]);
     }
 
+    #[\Override]
     public function getState(): string
     {
         return $this->state;
     }
 
+    #[\Override]
     public function getPid(): int
     {
         return $this->pid ?: posix_getpid();
     }
 
+    #[\Override]
     public function isRunning(): bool
     {
         if ($this->pid === 0) {
@@ -525,26 +543,31 @@ class WorkerProcess implements WorkerInterface
         return @posix_kill($this->pid, 0);
     }
 
+    #[\Override]
     public function isMaster(): bool
     {
         return false;
     }
 
+    #[\Override]
     public function isWorker(): bool
     {
         return true;
     }
 
+    #[\Override]
     public function getStartTime(): float
     {
         return $this->startTime;
     }
 
+    #[\Override]
     public function getMemoryUsage(): int
     {
         return memory_get_usage(true);
     }
 
+    #[\Override]
     public function getCpuUsage(): float
     {
         $usage = getrusage();

@@ -46,21 +46,25 @@ final class SelectLoop implements LoopInterface
 
     private bool $signalsEnabled = false;
 
+    #[\Override]
     public static function isSupported(): bool
     {
         return true; // 永远可用，作为兜底
     }
 
+    #[\Override]
     public static function name(): string
     {
         return 'select';
     }
 
+    #[\Override]
     public static function priority(): int
     {
         return 0;
     }
 
+    #[\Override]
     public function onReadable($stream, callable $callback): void
     {
         $id = (int)$stream;
@@ -69,12 +73,14 @@ final class SelectLoop implements LoopInterface
         $this->readCallbacks[$id] = $callback;
     }
 
+    #[\Override]
     public function offReadable($stream): void
     {
         $id = (int)$stream;
         unset($this->readStreams[$id], $this->readCallbacks[$id]);
     }
 
+    #[\Override]
     public function onWritable($stream, callable $callback): void
     {
         $id = (int)$stream;
@@ -83,12 +89,14 @@ final class SelectLoop implements LoopInterface
         $this->writeCallbacks[$id] = $callback;
     }
 
+    #[\Override]
     public function offWritable($stream): void
     {
         $id = (int)$stream;
         unset($this->writeStreams[$id], $this->writeCallbacks[$id]);
     }
 
+    #[\Override]
     public function onSignal(int $signal, callable $callback): void
     {
         if (!\function_exists('pcntl_signal')) {
@@ -108,6 +116,7 @@ final class SelectLoop implements LoopInterface
         });
     }
 
+    #[\Override]
     public function offSignal(int $signal): void
     {
         unset($this->signalCallbacks[$signal]);
@@ -124,6 +133,7 @@ final class SelectLoop implements LoopInterface
         }
     }
 
+    #[\Override]
     public function addTimer(float $interval, callable $callback, bool $periodic = false): int
     {
         $interval = max(0.0, $interval);
@@ -137,6 +147,7 @@ final class SelectLoop implements LoopInterface
         return $id;
     }
 
+    #[\Override]
     public function delTimer(int $timerId): bool
     {
         if (!isset($this->timers[$timerId])) {
@@ -146,11 +157,13 @@ final class SelectLoop implements LoopInterface
         return true;
     }
 
+    #[\Override]
     public function defer(callable $callback): void
     {
         $this->deferred[] = $callback;
     }
 
+    #[\Override]
     public function run(): void
     {
         $this->running = true;
@@ -392,16 +405,19 @@ final class SelectLoop implements LoopInterface
         return \hrtime(true) / 1e9;
     }
 
+    #[\Override]
     public function stop(): void
     {
         $this->running = false;
     }
 
+    #[\Override]
     public function isRunning(): bool
     {
         return $this->running;
     }
 
+    #[\Override]
     public function destroy(): void
     {
         $this->stop();
@@ -416,6 +432,7 @@ final class SelectLoop implements LoopInterface
         $this->deferred       = [];
     }
 
+    #[\Override]
     public function stats(): array
     {
         return [

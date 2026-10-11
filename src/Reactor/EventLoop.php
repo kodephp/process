@@ -51,16 +51,19 @@ final class EventLoop implements LoopInterface
         $this->base = new EventBase();
     }
 
+    #[\Override]
     public static function isSupported(): bool
     {
         return \extension_loaded('event') && \class_exists(EventBase::class);
     }
 
+    #[\Override]
     public static function name(): string
     {
         return 'event';
     }
 
+    #[\Override]
     public static function priority(): int
     {
         return 100;
@@ -72,6 +75,7 @@ final class EventLoop implements LoopInterface
         return $this->base;
     }
 
+    #[\Override]
     public function onReadable($stream, callable $callback): void
     {
         $id = (int)$stream;
@@ -93,6 +97,7 @@ final class EventLoop implements LoopInterface
         $this->readEvents[$id] = $event;
     }
 
+    #[\Override]
     public function offReadable($stream): void
     {
         $id = (int)$stream;
@@ -102,6 +107,7 @@ final class EventLoop implements LoopInterface
         }
     }
 
+    #[\Override]
     public function onWritable($stream, callable $callback): void
     {
         $id = (int)$stream;
@@ -123,6 +129,7 @@ final class EventLoop implements LoopInterface
         $this->writeEvents[$id] = $event;
     }
 
+    #[\Override]
     public function offWritable($stream): void
     {
         $id = (int)$stream;
@@ -132,6 +139,7 @@ final class EventLoop implements LoopInterface
         }
     }
 
+    #[\Override]
     public function onSignal(int $signal, callable $callback): void
     {
         $this->offSignal($signal);
@@ -147,6 +155,7 @@ final class EventLoop implements LoopInterface
         $this->signalEvents[$signal] = $event;
     }
 
+    #[\Override]
     public function offSignal(int $signal): void
     {
         if (isset($this->signalEvents[$signal])) {
@@ -155,6 +164,7 @@ final class EventLoop implements LoopInterface
         }
     }
 
+    #[\Override]
     public function addTimer(float $interval, callable $callback, bool $periodic = false): int
     {
         $interval = max(0.0, $interval);
@@ -177,6 +187,7 @@ final class EventLoop implements LoopInterface
         return $id;
     }
 
+    #[\Override]
     public function delTimer(int $timerId): bool
     {
         if (!isset($this->timerEvents[$timerId])) {
@@ -187,6 +198,7 @@ final class EventLoop implements LoopInterface
         return true;
     }
 
+    #[\Override]
     public function defer(callable $callback): void
     {
         $this->deferred[] = $callback;
@@ -210,6 +222,7 @@ final class EventLoop implements LoopInterface
         $this->deferTimer->add(0.0);
     }
 
+    #[\Override]
     public function run(): void
     {
         $this->running = true;
@@ -217,17 +230,20 @@ final class EventLoop implements LoopInterface
         $this->running = false;
     }
 
+    #[\Override]
     public function stop(): void
     {
         $this->running = false;
         $this->base->exit();
     }
 
+    #[\Override]
     public function isRunning(): bool
     {
         return $this->running;
     }
 
+    #[\Override]
     public function destroy(): void
     {
         foreach ($this->readEvents as $e) {
@@ -254,6 +270,7 @@ final class EventLoop implements LoopInterface
         $this->stop();
     }
 
+    #[\Override]
     public function stats(): array
     {
         return [

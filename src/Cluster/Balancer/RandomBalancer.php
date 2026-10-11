@@ -25,11 +25,13 @@ final class RandomBalancer extends AbstractBalancer
 
     private int $total = 0;
 
+    #[\Override]
     public function name(): string
     {
         return 'random';
     }
 
+    #[\Override]
     public function trySelect(?string $key = null): ?Node
     {
         $count = count($this->nodes);
@@ -58,6 +60,7 @@ final class RandomBalancer extends AbstractBalancer
         return $this->nodes[$lo];
     }
 
+    #[\Override]
     protected function onNodesChanged(): void
     {
         $this->cumulative = [];

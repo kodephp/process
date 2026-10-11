@@ -726,6 +726,7 @@ final class Request implements \ArrayAccess, \IteratorAggregate, \Countable, \Js
         return $this->native;
     }
 
+    #[\Override]
     public function __toString(): string
     {
         return $this->method() . ' ' . $this->uri() . ' ' . $this->protocol();
@@ -733,12 +734,14 @@ final class Request implements \ArrayAccess, \IteratorAggregate, \Countable, \Js
 
     // -------------------------------------------------- 接口：数组式访问
 
+    #[\Override]
     public function offsetExists(mixed $offset): bool
     {
         $key = (string)$offset;
         return isset(self::RESERVED[$key]) || isset($this->attributes[$key]);
     }
 
+    #[\Override]
     public function offsetGet(mixed $offset): mixed
     {
         return match ((string)$offset) {
@@ -758,6 +761,7 @@ final class Request implements \ArrayAccess, \IteratorAggregate, \Countable, \Js
         };
     }
 
+    #[\Override]
     public function offsetSet(mixed $offset, mixed $value): void
     {
         if ($offset === null) {
@@ -766,22 +770,26 @@ final class Request implements \ArrayAccess, \IteratorAggregate, \Countable, \Js
         $this->attributes[(string)$offset] = $value;
     }
 
+    #[\Override]
     public function offsetUnset(mixed $offset): void
     {
         unset($this->attributes[(string)$offset]);
     }
 
+    #[\Override]
     public function getIterator(): \Traversable
     {
         return new \ArrayIterator($this->toArray());
     }
 
+    #[\Override]
     public function count(): int
     {
         return count($this->toArray());
     }
 
     /** @return array<string, mixed> */
+    #[\Override]
     public function jsonSerialize(): array
     {
         return $this->toArray();

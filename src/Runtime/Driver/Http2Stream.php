@@ -53,6 +53,7 @@ final class Http2Stream implements ConnectionInterface
         $this->connId = ++self::$seq;
     }
 
+    #[\Override]
     public function id(): int
     {
         return $this->connId;
@@ -70,6 +71,7 @@ final class Http2Stream implements ConnectionInterface
         return $this->parent;
     }
 
+    #[\Override]
     public function send(string $data, bool $raw = false): bool
     {
         if ($this->closed || $this->responded) {
@@ -138,6 +140,7 @@ final class Http2Stream implements ConnectionInterface
 
     // ------------------------------------------------------------ 流式响应
 
+    #[\Override]
     public function chunk(string $data): bool
     {
         if ($this->closed) {
@@ -155,6 +158,7 @@ final class Http2Stream implements ConnectionInterface
      * HTTP/2 没有 chunked 传输编码——分块语义天然由 DATA 帧承载，
      * 因此这里只发响应头，后续 {@see chunk()} 直接追加 DATA。
      */
+    #[\Override]
     public function beginChunked(int $status = 200, array $headers = []): bool
     {
         if ($this->closed || $this->headersSent) {
@@ -170,6 +174,7 @@ final class Http2Stream implements ConnectionInterface
         return $this->parent->flushHttp2();
     }
 
+    #[\Override]
     public function endChunk(): bool
     {
         if ($this->closed || !$this->headersSent || $this->responded) {
@@ -181,11 +186,13 @@ final class Http2Stream implements ConnectionInterface
         return $this->parent->flushHttp2();
     }
 
+    #[\Override]
     public function isChunkStarted(): bool
     {
         return $this->headersSent && !$this->responded;
     }
 
+    #[\Override]
     public function gzip(string $data, int $status = 200, array $headers = []): bool
     {
         if ($this->closed || $this->responded) {
@@ -208,16 +215,19 @@ final class Http2Stream implements ConnectionInterface
         return $this->parent->flushHttp2();
     }
 
+    #[\Override]
     public function setGzipAuto(bool $enabled): void
     {
         $this->gzipAuto = $enabled;
     }
 
+    #[\Override]
     public function isGzipAuto(): bool
     {
         return $this->gzipAuto;
     }
 
+    #[\Override]
     public function sendResponse(ResponseInterface $response, bool $autoGzip = true): bool
     {
         if ($this->closed || $this->responded) {
@@ -258,6 +268,7 @@ final class Http2Stream implements ConnectionInterface
      * 结束本流。注意关的是**流**而非 TCP 连接——其它流不受影响，
      * 这正是 HTTP/2 与 HTTP/1.1 的关键差异。
      */
+    #[\Override]
     public function close(?string $data = null): void
     {
         if ($this->closed) {
@@ -274,31 +285,37 @@ final class Http2Stream implements ConnectionInterface
         $this->closed = true;
     }
 
+    #[\Override]
     public function remoteAddress(): string
     {
         return $this->parent->remoteAddress();
     }
 
+    #[\Override]
     public function localAddress(): string
     {
         return $this->parent->localAddress();
     }
 
+    #[\Override]
     public function isAlive(): bool
     {
         return !$this->closed && $this->parent->isAlive();
     }
 
+    #[\Override]
     public function native(): mixed
     {
         return $this->parent->native();
     }
 
+    #[\Override]
     public function setContext(string $key, mixed $value): void
     {
         $this->context[$key] = $value;
     }
 
+    #[\Override]
     public function getContext(string $key, mixed $default = null): mixed
     {
         return $this->context[$key] ?? $default;

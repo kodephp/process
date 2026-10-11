@@ -69,6 +69,7 @@ class MessageQueue implements IPCInterface
         $this->logger->debug('消息队列 IPC 已初始化', ['key' => $this->key]);
     }
 
+    #[\Override]
     public function send(mixed $message, int $targetPid = 0): bool
     {
         if ($this->closed) {
@@ -114,6 +115,7 @@ class MessageQueue implements IPCInterface
         return true;
     }
 
+    #[\Override]
     public function receive(?float $timeout = null): mixed
     {
         if ($this->closed) {
@@ -210,36 +212,43 @@ class MessageQueue implements IPCInterface
         ]);
     }
 
+    #[\Override]
     public function broadcast(mixed $message): bool
     {
         return $this->send($message, 0);
     }
 
+    #[\Override]
     public function sendTo(int $targetPid, mixed $message): bool
     {
         return $this->send($message, $targetPid);
     }
 
+    #[\Override]
     public function receiveFrom(int $sourcePid, ?float $timeout = null): mixed
     {
         return $this->receive($timeout);
     }
 
+    #[\Override]
     public function getType(): string
     {
         return IPCInterface::TYPE_MESSAGE_QUEUE;
     }
 
+    #[\Override]
     public function getBufferSize(): int
     {
         return $this->bufferSize;
     }
 
+    #[\Override]
     public function setBufferSize(int $size): void
     {
         $this->bufferSize = $size;
     }
 
+    #[\Override]
     public function flush(): void
     {
         if ($this->queueId !== null) {
@@ -270,6 +279,7 @@ class MessageQueue implements IPCInterface
      * 由 __destruct 触发的 msg_remove_queue 会把队列连同其他进程的在途消息一起销毁。
      * 需要真正回收内核对象时请显式调用 {@see destroy()}。
      */
+    #[\Override]
     public function close(): void
     {
         if ($this->closed) {
@@ -294,6 +304,7 @@ class MessageQueue implements IPCInterface
         $this->logger->debug('消息队列已销毁', ['key' => $this->key]);
     }
 
+    #[\Override]
     public function isClosed(): bool
     {
         return $this->closed;

@@ -55,6 +55,7 @@ final class ConsistentHashBalancer extends AbstractBalancer
         parent::__construct($nodes);
     }
 
+    #[\Override]
     public function name(): string
     {
         return 'hash';
@@ -66,6 +67,7 @@ final class ConsistentHashBalancer extends AbstractBalancer
         return count($this->positions);
     }
 
+    #[\Override]
     public function trySelect(?string $key = null): ?Node
     {
         $count = count($this->nodes);
@@ -130,6 +132,7 @@ final class ConsistentHashBalancer extends AbstractBalancer
         return $this->trySelect($key);
     }
 
+    #[\Override]
     protected function onNodesChanged(): void
     {
         $this->ring      = [];

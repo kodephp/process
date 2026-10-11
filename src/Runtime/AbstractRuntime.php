@@ -40,6 +40,7 @@ abstract class AbstractRuntime implements RuntimeInterface
 
     protected int $timerSeq = 0;
 
+    #[\Override]
     public function on(string $event, callable $handler): static
     {
         if (!in_array($event, self::EVENTS, true)) {
@@ -53,6 +54,7 @@ abstract class AbstractRuntime implements RuntimeInterface
         return $this;
     }
 
+    #[\Override]
     public function listen(string $address, array $options = []): static
     {
         $parsed = self::parseAddress($address);
@@ -127,16 +129,19 @@ abstract class AbstractRuntime implements RuntimeInterface
      */
     abstract protected function supportedSchemes(): array;
 
+    #[\Override]
     public function supports(Capability $capability): bool
     {
         return in_array($capability, $this->capabilities(), true);
     }
 
+    #[\Override]
     public function isRunning(): bool
     {
         return $this->running;
     }
 
+    #[\Override]
     public function reload(): void
     {
         throw RuntimeNotSupportedException::capability(static::type(), Capability::HotReload);
@@ -230,6 +235,7 @@ abstract class AbstractRuntime implements RuntimeInterface
     /**
      * 当前 worker 序号。未运行或运行时无此概念时返回 0。
      */
+    #[\Override]
     public function workerId(): int
     {
         return 0;
@@ -242,6 +248,7 @@ abstract class AbstractRuntime implements RuntimeInterface
      *
      * @return array<int, ConnectionInterface>
      */
+    #[\Override]
     public function connections(): array
     {
         return [];
@@ -252,6 +259,7 @@ abstract class AbstractRuntime implements RuntimeInterface
      *
      * @return int 实际投递成功的连接数
      */
+    #[\Override]
     public function broadcast(string $data, bool $raw = false): int
     {
         $sent = 0;
@@ -272,6 +280,7 @@ abstract class AbstractRuntime implements RuntimeInterface
      *
      * @throws RuntimeNotSupportedException 未注册 task 回调且运行时不支持任务进程
      */
+    #[\Override]
     public function task(mixed $data): bool
     {
         if (!$this->hasHandler('task')) {
@@ -286,6 +295,7 @@ abstract class AbstractRuntime implements RuntimeInterface
         return true;
     }
 
+    #[\Override]
     public function stats(): array
     {
         return [

@@ -69,12 +69,14 @@ class ProcessMonitor implements MonitorInterface
         $this->logger = $logger ?? new NullLogger();
     }
 
+    #[\Override]
     public function start(): void
     {
         $this->running = true;
         $this->logger->info('进程监控器已启动');
     }
 
+    #[\Override]
     public function stop(): void
     {
         $this->running = false;
@@ -105,6 +107,7 @@ class ProcessMonitor implements MonitorInterface
         $this->logger->debug('进程已从监控器移除', ['pid' => $pid]);
     }
 
+    #[\Override]
     public function check(int $pid): array
     {
         if (!isset($this->processes[$pid])) {
@@ -169,6 +172,7 @@ class ProcessMonitor implements MonitorInterface
         ];
     }
 
+    #[\Override]
     public function checkAll(): array
     {
         $results = [];
@@ -299,11 +303,13 @@ class ProcessMonitor implements MonitorInterface
         }
     }
 
+    #[\Override]
     public function getHealth(): string
     {
         return $this->health;
     }
 
+    #[\Override]
     public function getMetrics(): array
     {
         return $this->metrics;
@@ -320,21 +326,25 @@ class ProcessMonitor implements MonitorInterface
         return array_slice(array_reverse($history), 0, $limit);
     }
 
+    #[\Override]
     public function setHeartbeatInterval(float $seconds): void
     {
         $this->heartbeatInterval = $seconds;
     }
 
+    #[\Override]
     public function setMaxMemoryUsage(int $bytes): void
     {
         $this->maxMemoryUsage = $bytes;
     }
 
+    #[\Override]
     public function setMaxCpuUsage(float $percent): void
     {
         $this->maxCpuUsage = $percent;
     }
 
+    #[\Override]
     public function setMaxResponseTime(float $seconds): void
     {
         $this->maxResponseTime = $seconds;
@@ -345,11 +355,13 @@ class ProcessMonitor implements MonitorInterface
         $this->maxRestartAttempts = $attempts;
     }
 
+    #[\Override]
     public function onUnhealthy(callable $callback): void
     {
         $this->unhealthyCallbacks[] = $callback;
     }
 
+    #[\Override]
     public function onRestart(callable $callback): void
     {
         $this->restartCallbacks[] = $callback;

@@ -48,11 +48,13 @@ final class FileStore implements StoreInterface
         }
     }
 
+    #[\Override]
     public static function isAvailable(): bool
     {
         return function_exists('flock');
     }
 
+    #[\Override]
     public function name(): string
     {
         return 'file';
@@ -159,6 +161,7 @@ final class FileStore implements StoreInterface
         return ['k' => (string) ($record['k'] ?? ''), 'v' => $record['v'], 'e' => $expire];
     }
 
+    #[\Override]
     public function get(string $key): mixed
     {
         return $this->locked($key, fn (?array $r): array => [
@@ -167,6 +170,7 @@ final class FileStore implements StoreInterface
         ]);
     }
 
+    #[\Override]
     public function mget(array $keys): array
     {
         $result = [];
@@ -180,6 +184,7 @@ final class FileStore implements StoreInterface
         return $result;
     }
 
+    #[\Override]
     public function set(string $key, mixed $value, int $ttlMs = 0): bool
     {
         return $this->locked($key, static fn (?array $r): array => [
@@ -188,6 +193,7 @@ final class FileStore implements StoreInterface
         ]);
     }
 
+    #[\Override]
     public function setIfAbsent(string $key, mixed $value, int $ttlMs = 0): bool
     {
         return $this->locked($key, static fn (?array $r): array => $r === null
@@ -195,6 +201,7 @@ final class FileStore implements StoreInterface
             : [['keep' => true], false]);
     }
 
+    #[\Override]
     public function compareAndSet(string $key, mixed $expected, mixed $value, int $ttlMs = 0): bool
     {
         return $this->locked($key, function (?array $r) use ($expected, $value, $ttlMs): array {
@@ -211,6 +218,7 @@ final class FileStore implements StoreInterface
         });
     }
 
+    #[\Override]
     public function compareAndDelete(string $key, mixed $expected): bool
     {
         return $this->locked($key, function (?array $r) use ($expected): array {
@@ -222,16 +230,19 @@ final class FileStore implements StoreInterface
         });
     }
 
+    #[\Override]
     public function delete(string $key): bool
     {
         return $this->locked($key, static fn (?array $r): array => [['delete' => true], true]);
     }
 
+    #[\Override]
     public function exists(string $key): bool
     {
         return $this->locked($key, static fn (?array $r): array => [['keep' => true], $r !== null]);
     }
 
+    #[\Override]
     public function increment(string $key, int $step = 1, int $ttlMs = 0): int
     {
         return $this->locked($key, function (?array $r) use ($step, $ttlMs): array {
@@ -247,6 +258,7 @@ final class FileStore implements StoreInterface
         });
     }
 
+    #[\Override]
     public function expire(string $key, int $ttlMs): bool
     {
         return $this->locked($key, function (?array $r) use ($ttlMs): array {
@@ -259,6 +271,7 @@ final class FileStore implements StoreInterface
         });
     }
 
+    #[\Override]
     public function keys(string $prefix = ''): array
     {
         $found = [];
@@ -288,6 +301,7 @@ final class FileStore implements StoreInterface
         return $found;
     }
 
+    #[\Override]
     public function flush(): int
     {
         $count = 0;
@@ -300,6 +314,7 @@ final class FileStore implements StoreInterface
         return $count;
     }
 
+    #[\Override]
     public function close(): void
     {
         // 文件后端无长连接，无需释放

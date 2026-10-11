@@ -45,6 +45,7 @@ class WorkerPool implements PoolInterface
         $this->logger = $logger ?? new NullLogger();
     }
 
+    #[\Override]
     public function start(int $workerCount = 0): void
     {
         $count = $workerCount > 0 ? $workerCount : $this->initialCount;
@@ -68,6 +69,7 @@ class WorkerPool implements PoolInterface
         $this->logger->info('Worker 池已启动', ['total' => count($this->workers)]);
     }
 
+    #[\Override]
     public function stop(bool $graceful = true): void
     {
         $this->logger->info('停止 Worker 池', ['graceful' => $graceful]);
@@ -83,6 +85,7 @@ class WorkerPool implements PoolInterface
         $this->logger->info('Worker 池已停止');
     }
 
+    #[\Override]
     public function restart(): void
     {
         $this->logger->info('重启 Worker 池');
@@ -94,6 +97,7 @@ class WorkerPool implements PoolInterface
         $this->start();
     }
 
+    #[\Override]
     public function reload(): void
     {
         $this->logger->info('重新加载 Worker 池');
@@ -103,6 +107,7 @@ class WorkerPool implements PoolInterface
         }
     }
 
+    #[\Override]
     public function scale(int $targetCount): void
     {
         $currentCount = count($this->workers);
@@ -162,11 +167,13 @@ class WorkerPool implements PoolInterface
         }
     }
 
+    #[\Override]
     public function getWorkerCount(): int
     {
         return count($this->workers);
     }
 
+    #[\Override]
     public function getActiveWorkerCount(): int
     {
         $count = 0;
@@ -180,6 +187,7 @@ class WorkerPool implements PoolInterface
         return $count;
     }
 
+    #[\Override]
     public function getIdleWorkerCount(): int
     {
         $count = 0;
@@ -193,16 +201,19 @@ class WorkerPool implements PoolInterface
         return $count;
     }
 
+    #[\Override]
     public function getWorkers(): array
     {
         return $this->workers;
     }
 
+    #[\Override]
     public function getWorker(int $id): ?WorkerInterface
     {
         return $this->workers[$id] ?? null;
     }
 
+    #[\Override]
     public function selectWorker(string $strategy = PoolInterface::STRATEGY_ROUND_ROBIN): ?WorkerInterface
     {
         if (empty($this->workers)) {
@@ -301,6 +312,7 @@ class WorkerPool implements PoolInterface
         return $this->selectRoundRobin();
     }
 
+    #[\Override]
     public function getTotalProcessed(): int
     {
         $total = 0;
@@ -312,6 +324,7 @@ class WorkerPool implements PoolInterface
         return $total;
     }
 
+    #[\Override]
     public function getTotalErrors(): int
     {
         $total = 0;
@@ -323,6 +336,7 @@ class WorkerPool implements PoolInterface
         return $total;
     }
 
+    #[\Override]
     public function getAverageLoad(): float
     {
         if (empty($this->workers)) {
@@ -338,11 +352,13 @@ class WorkerPool implements PoolInterface
         return $totalLoad / count($this->workers);
     }
 
+    #[\Override]
     public function setStrategy(string $strategy): void
     {
         $this->strategy = $strategy;
     }
 
+    #[\Override]
     public function getStrategy(): string
     {
         return $this->strategy;
