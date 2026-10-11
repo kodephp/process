@@ -43,7 +43,7 @@ final class RpcClient
      */
     public function __construct(
         private readonly float $timeout = 3.0,
-        private readonly ?string $token = null,
+        #[\SensitiveParameter] private readonly ?string $token = null,
         private readonly bool $persistent = true,
     ) {
     }

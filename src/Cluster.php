@@ -478,13 +478,13 @@ final class Cluster
     }
 
     /** 创建集群 RPC 客户端。 */
-    public static function rpc(float $timeout = 3.0, ?string $token = null): RpcClient
+    public static function rpc(float $timeout = 3.0, #[\SensitiveParameter] ?string $token = null): RpcClient
     {
         return new RpcClient($timeout, $token);
     }
 
     /** 创建集群 RPC 服务端。 */
-    public static function server(?string $token = null): RpcServer
+    public static function server(#[\SensitiveParameter] ?string $token = null): RpcServer
     {
         return new RpcServer($token);
     }

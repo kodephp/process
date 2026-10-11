@@ -55,7 +55,7 @@ final class RpcServer
     /**
      * @param string|null $token 非空时，请求需在 params 中带上 `_token` 且匹配
      */
-    public function __construct(private readonly ?string $token = null)
+    public function __construct(#[\SensitiveParameter] private readonly ?string $token = null)
     {
     }
 

@@ -23,7 +23,7 @@ final class Client
     /**
      * @param string|null $token 与服务端 `token` 对应的鉴权串；服务端未开启鉴权时留空
      */
-    public function __construct(string $address = '127.0.0.1:2207', ?string $token = null)
+    public function __construct(string $address = '127.0.0.1:2207', #[\SensitiveParameter] ?string $token = null)
     {
         $parts = explode(':', $address);
         $this->host = $parts[0] ?? '127.0.0.1';

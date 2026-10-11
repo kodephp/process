@@ -117,7 +117,7 @@ final class RateLimiter
      * @param  int   $tokens          本次取用的令牌数
      * @return bool  true=放行
      */
-    public function consume(string $key, int $capacity, float $refillPerSecond, int $tokens = 1): bool
+    public function consume(string $key, int $capacity, float $refillPerSecond, #[\SensitiveParameter] int $tokens = 1): bool
     {
         if ($capacity <= 0 || $refillPerSecond <= 0.0 || $tokens <= 0) {
             return false;

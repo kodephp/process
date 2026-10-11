@@ -99,7 +99,7 @@ final class QueueManager
     public static function useRedis(
         string $host = '127.0.0.1',
         int $port = 6379,
-        ?string $password = null,
+        #[\SensitiveParameter] ?string $password = null,
         int $database = 0,
         array $options = [],
     ): self {

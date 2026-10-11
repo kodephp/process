@@ -41,7 +41,7 @@ final class Server
     /**
      * @param string|null $token 非空时，请求需带上 `_token` 字段且匹配；为 null 时不鉴权
      */
-    public function __construct(string $host = '127.0.0.1', int $port = 2207, ?string $token = null)
+    public function __construct(string $host = '127.0.0.1', int $port = 2207, #[\SensitiveParameter] ?string $token = null)
     {
         $this->host = $host;
         $this->port = $port;

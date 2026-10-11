@@ -325,13 +325,13 @@ final class Kode
     }
 
     /** 创建集群 RPC 客户端（节点间方法调用 / 广播）。 */
-    public static function rpc(float $timeout = 3.0, ?string $token = null): Cluster\Rpc\RpcClient
+    public static function rpc(float $timeout = 3.0, #[\SensitiveParameter] ?string $token = null): Cluster\Rpc\RpcClient
     {
         return Cluster::rpc($timeout, $token);
     }
 
     /** 创建集群 RPC 服务端（让本节点可被其它节点调用）。 */
-    public static function rpcServer(?string $token = null): Cluster\Rpc\RpcServer
+    public static function rpcServer(#[\SensitiveParameter] ?string $token = null): Cluster\Rpc\RpcServer
     {
         return Cluster::server($token);
     }
