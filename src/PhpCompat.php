@@ -92,7 +92,7 @@ final class PhpCompat
      */
     public static function hasArrayFind(): bool
     {
-        return function_exists('array_find');
+        return true;
     }
 
     public static function hasFpow(): bool
@@ -110,17 +110,7 @@ final class PhpCompat
      */
     public static function arrayFind(array $array, callable $callback): mixed
     {
-        if (function_exists('array_find')) {
-            return \array_find($array, $callback);
-        }
-
-        foreach ($array as $key => $value) {
-            if ($callback($value, $key)) {
-                return $value;
-            }
-        }
-
-        return null;
+        return \array_find($array, $callback);
     }
 
     /**
@@ -128,17 +118,7 @@ final class PhpCompat
      */
     public static function arrayFindKey(array $array, callable $callback): int|string|null
     {
-        if (function_exists('array_find_key')) {
-            return \array_find_key($array, $callback);
-        }
-
-        foreach ($array as $key => $value) {
-            if ($callback($value, $key)) {
-                return $key;
-            }
-        }
-
-        return null;
+        return \array_find_key($array, $callback);
     }
 
     /**
@@ -146,17 +126,7 @@ final class PhpCompat
      */
     public static function arrayAny(array $array, callable $callback): bool
     {
-        if (function_exists('array_any')) {
-            return \array_any($array, $callback);
-        }
-
-        foreach ($array as $key => $value) {
-            if ($callback($value, $key)) {
-                return true;
-            }
-        }
-
-        return false;
+        return \array_any($array, $callback);
     }
 
     /**
@@ -164,17 +134,7 @@ final class PhpCompat
      */
     public static function arrayAll(array $array, callable $callback): bool
     {
-        if (function_exists('array_all')) {
-            return \array_all($array, $callback);
-        }
-
-        foreach ($array as $key => $value) {
-            if (!$callback($value, $key)) {
-                return false;
-            }
-        }
-
-        return true;
+        return \array_all($array, $callback);
     }
 
     public static function fpow(float $base, float $exponent): float
