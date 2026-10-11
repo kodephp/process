@@ -215,6 +215,6 @@ class SignalDispatcher
 
     public function __call(string $method, array $args): mixed
     {
-        return call_user_func_array([$this->handler, $method], $args);
+        return ($this->handler->{$method})(...$args);
     }
 }
