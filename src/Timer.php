@@ -517,13 +517,7 @@ final class Timer
         }
 
         if (str_contains($part, ',')) {
-            foreach (explode(',', $part) as $sub) {
-                if (self::matchCronPart($sub, $value)) {
-                    return true;
-                }
-            }
-
-            return false;
+            return array_any(explode(',', $part), fn($sub) => self::matchCronPart($sub, $value));
         }
 
         if (str_contains($part, '/')) {

@@ -124,13 +124,7 @@ final class GlobalProcessManager
     {
         $currentPid = Process::getPid();
 
-        foreach ($this->workers as $worker) {
-            if ($worker->getPid() === $currentPid) {
-                return $worker;
-            }
-        }
-
-        return null;
+        return array_find($this->workers, fn($worker) => $worker->getPid() === $currentPid);
     }
 
     public function registerProcess(ProcessInterface $process): self

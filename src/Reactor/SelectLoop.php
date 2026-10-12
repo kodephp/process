@@ -346,17 +346,8 @@ final class SelectLoop implements LoopInterface
      */
     private function hasFdAtOrAboveSetSize(): bool
     {
-        foreach ($this->readStreams as $id => $_) {
-            if ($id >= 1024) {
-                return true;
-            }
-        }
-        foreach ($this->writeStreams as $id => $_) {
-            if ($id >= 1024) {
-                return true;
-            }
-        }
-        return false;
+        return array_any($this->readStreams, fn($_, $id) => $id >= 1024)
+            || array_any($this->writeStreams, fn($_, $id) => $id >= 1024);
     }
 
     private function guardFdLimit(int $fd): void
