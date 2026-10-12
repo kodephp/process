@@ -16,9 +16,9 @@ final class Version
 {
     public const int MAJOR = 7;
     public const int MINOR = 0;
-    public const int PATCH = 6;
-    public const string VERSION = '7.0.6';
-    public const int VERSION_ID = 70006;
+    public const int PATCH = 7;
+    public const string VERSION = '7.0.7';
+    public const int VERSION_ID = 70007;
 
     /** 本库要求的最低 PHP 版本 */
     public const string MINIMUM_PHP_VERSION = '8.4.0';

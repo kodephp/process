@@ -615,8 +615,16 @@ final class NativeRuntime extends AbstractRuntime
             if (strlen($buffer) < 4 + $len) {
                 break;
             }
-            $out[]  = unserialize(substr($buffer, 4, $len));
+            $msg   = substr($buffer, 4, $len);
             $buffer = substr($buffer, 4 + $len);
+
+            // 与 TcpProtocol/LengthPrefix 同一坏帧策略：抑制告警、跳过损坏报文、
+            // 保留 'b:0;' 的合法 false 语义。载荷是本应用 fork 子进程的 task
+            // 数据/结果（同信任域），维持不限制类以保持对象往返的 BC。
+            $value = @unserialize($msg);
+            if ($value !== false || $msg === 'b:0;') {
+                $out[] = $value;
+            }
         }
         $this->pipeBuffers[$key] = $buffer;
 
