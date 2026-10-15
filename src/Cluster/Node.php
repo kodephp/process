@@ -40,11 +40,11 @@ final readonly class Node implements JsonSerializable
         public string $service = 'default',
         public string $host = '127.0.0.1',
         public int $port = 0,
-        public int $weight = 100,
+        public private(set) int $weight = 100,
         public array $meta = [],
         public NodeStatus $status = NodeStatus::Up,
-        public float $registeredAt = 0.0,
-        public float $heartbeatAt = 0.0,
+        public private(set) float $registeredAt = 0.0,
+        public private(set) float $heartbeatAt = 0.0,
     ) {
     }
 

@@ -15,10 +15,10 @@ use Kode\Process\Exceptions\ProcessException;
 final class Version
 {
     public const int MAJOR = 7;
-    public const int MINOR = 0;
-    public const int PATCH = 8;
-    public const string VERSION = '7.0.8';
-    public const int VERSION_ID = 70008;
+    public const int MINOR = 1;
+    public const int PATCH = 0;
+    public const string VERSION = '7.1.0';
+    public const int VERSION_ID = 70100;
 
     /** 本库要求的最低 PHP 版本 */
     public const string MINIMUM_PHP_VERSION = '8.4.0';
