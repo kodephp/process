@@ -318,7 +318,7 @@ class SharedMemoryIPC implements IPCInterface
     {
         try {
             return serialize($data);
-        } catch (\Throwable $e) {
+        } catch (\Throwable $e) { // @phpstan-ignore catch.neverThrown (防御 unserialize 潜在异常，运行期不触发无害)
             throw IPCException::serializationFailed($data, $e->getMessage());
         }
     }
@@ -329,7 +329,7 @@ class SharedMemoryIPC implements IPCInterface
             // allowed_classes => false：IPC 报文只承载数据，禁止实例化任意类，
             // 避免本地攻击者写入共享内存段触发反序列化利用链。
             return @unserialize($data, ['allowed_classes' => false]);
-        } catch (\Throwable $e) {
+        } catch (\Throwable $e) { // @phpstan-ignore catch.neverThrown (防御 unserialize 潜在异常，运行期不触发无害)
             throw IPCException::serializationFailed($data, $e->getMessage());
         }
     }

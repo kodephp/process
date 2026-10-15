@@ -40,6 +40,7 @@ use Psr\Log\NullLogger;
 final class Daemon
 {
     /** 用户任务（每周期执行） */
+    /** @var null|callable */
     private $task = null;
 
     /** 透传给任务的参数 */

@@ -32,7 +32,7 @@ abstract class AbstractBalancer implements BalancerInterface
     public function setNodes(array $nodes): static
     {
         $changed     = $this->fingerprint($nodes) !== $this->fingerprint($this->nodes);
-        $this->nodes = array_values($nodes);
+        $this->nodes = $nodes;
 
         // 节点集合真的变了才重建内部状态，避免每次刷新都打乱轮询游标
         if ($changed) {

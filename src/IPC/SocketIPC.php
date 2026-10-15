@@ -16,8 +16,10 @@ use Psr\Log\NullLogger;
  */
 class SocketIPC implements IPCInterface
 {
+    /** @var \Socket|null */
     private $masterSocket;
 
+    /** @var \Socket|null */
     private $workerSocket;
 
     private int $bufferSize = 65536;
@@ -57,11 +59,13 @@ class SocketIPC implements IPCInterface
         return [$a, $b];
     }
 
+    /** @param \Socket $socket */
     public function setSocket($socket): void
     {
         $this->masterSocket = $socket;
     }
 
+    /** @param \Socket $socket */
     public function setWorkerSocket($socket): void
     {
         $this->workerSocket = $socket;
@@ -76,7 +80,7 @@ class SocketIPC implements IPCInterface
 
         $socket = $this->workerSocket ?? $this->masterSocket;
 
-        if (!is_resource($socket) && !($socket instanceof \Socket)) {
+        if ($socket === null) {
             throw IPCException::connectionFailed(IPCInterface::TYPE_SOCKET, '套接字未初始化');
         }
 
@@ -114,7 +118,7 @@ class SocketIPC implements IPCInterface
 
         $socket = $this->workerSocket ?? $this->masterSocket;
 
-        if (!is_object($socket) && !is_resource($socket)) {
+        if ($socket === null) {
             throw IPCException::connectionFailed(IPCInterface::TYPE_SOCKET, '套接字未初始化');
         }
 
@@ -234,7 +238,7 @@ class SocketIPC implements IPCInterface
     {
         try {
             return serialize($data);
-        } catch (\Throwable $e) {
+        } catch (\Throwable $e) { // @phpstan-ignore catch.neverThrown (防御 unserialize 潜在异常，运行期不触发无害)
             throw IPCException::serializationFailed($data, $e->getMessage());
         }
     }
@@ -244,7 +248,7 @@ class SocketIPC implements IPCInterface
         try {
             // allowed_classes => false：IPC 报文只承载数据，禁止实例化任意类
             return @unserialize($data, ['allowed_classes' => false]);
-        } catch (\Throwable $e) {
+        } catch (\Throwable $e) { // @phpstan-ignore catch.neverThrown (防御 unserialize 潜在异常，运行期不触发无害)
             throw IPCException::serializationFailed($data, $e->getMessage());
         }
     }

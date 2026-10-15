@@ -14,6 +14,7 @@ final class HotReloader
     private int $maxRequests;
     private int $requestCount = 0;
     private bool $enabled = true;
+    /** @var null|callable */
     private $onReload = null;
     private static ?self $instance = null;
 

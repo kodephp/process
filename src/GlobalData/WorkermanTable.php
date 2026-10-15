@@ -51,7 +51,6 @@ final class WorkermanTable implements TableInterface
         $this->valueSize = $valueSize;
         $this->allowedClasses = $allowedClasses;
 
-        /** @var class-string $tableClass */
         $tableClass = '\Workerman\Table';
         $table = new $tableClass($rows);
         $table->column('v', $tableClass::TYPE_STRING, $valueSize);
@@ -361,7 +360,6 @@ final class WorkermanTable implements TableInterface
      * 是否「真实存在且未过期」。过期行在此被惰性删除并返回 false，
      * 使 exists / add / replace 与 get 的 TTL 语义一致（过期键视为不存在）。
      *
-     * @param array<string, mixed> $row
      */
     private function existsUnlocked(string $key): bool
     {

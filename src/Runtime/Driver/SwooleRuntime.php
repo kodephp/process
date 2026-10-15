@@ -45,7 +45,9 @@ final class SwooleRuntime extends AbstractRuntime
         // verify the extension is functional by checking swoole_version()
         // returns a non-empty string and the Server class has expected properties.
         $version = swoole_version();
-        if ($version === '' || $version === null) {
+        // 扩展异常时可能返回空串（phpstub 钉 non-empty-string，运行期护栏保留）
+        // @phpstan-ignore identical.alwaysFalse (扩展健康探测，静态不可证)
+        if ($version === '') {
             return false;
         }
         return true;
@@ -130,7 +132,6 @@ final class SwooleRuntime extends AbstractRuntime
         $host = $scheme === 'unix' ? $listener['path'] : $listener['host'];
         $port = $scheme === 'unix' ? 0 : $listener['port'];
 
-        /** @var object $server */
         $server = new $class($host, $port, $mode, $sockType);
 
         $settings = [

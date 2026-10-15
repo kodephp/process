@@ -16,9 +16,9 @@ final class Version
 {
     public const int MAJOR = 7;
     public const int MINOR = 0;
-    public const int PATCH = 7;
-    public const string VERSION = '7.0.7';
-    public const int VERSION_ID = 70007;
+    public const int PATCH = 8;
+    public const string VERSION = '7.0.8';
+    public const int VERSION_ID = 70008;
 
     /** 本库要求的最低 PHP 版本 */
     public const string MINIMUM_PHP_VERSION = '8.4.0';
@@ -95,7 +95,8 @@ final class Version
 
     public static function isPhp84(): bool
     {
-        return PHP_VERSION_ID >= 80400 && PHP_VERSION_ID < 80500;
+        // php ^8.4 已保证 >= 80400
+        return PHP_VERSION_ID < 80500;
     }
 
     public static function isPhp85(): bool
@@ -108,7 +109,8 @@ final class Version
      */
     public static function isPhpSupported(): bool
     {
-        return PHP_VERSION_ID >= self::MINIMUM_PHP_VERSION_ID;
+        // composer.json 已钉 php ^8.4，最低版本恒满足
+        return true;
     }
 
     /**

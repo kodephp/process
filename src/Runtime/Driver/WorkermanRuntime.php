@@ -110,7 +110,6 @@ final class WorkermanRuntime extends AbstractRuntime
                 $context['socket']['backlog'] = (int)$opts['backlog'];
             }
 
-            /** @var object $worker */
             $worker        = new $workerClass($address, $context);
             $worker->count = (int)($opts['workers'] ?? 4);
             $worker->name  = (string)($opts['name'] ?? 'kode-process');
@@ -119,6 +118,7 @@ final class WorkermanRuntime extends AbstractRuntime
                 $worker->reusePort = true;
             }
             if (!empty($opts['maxRequest'])) {
+                // @phpstan-ignore property.notFound (Workerman Worker 公开魔术属性，版本差异静态不可证)
                 $worker->maxRequest = (int)$opts['maxRequest'];
             }
             if (isset($opts['ssl'])) {

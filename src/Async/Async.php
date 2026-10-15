@@ -58,6 +58,7 @@ final class Async
      * `queueMicrotask(fn() => $cb($v))`）。Promise 决议热路径借此消除每轮闭包分配，
      * 与 {@see Promise} 的 subscribe 优化互补。不定参时行为与旧版完全一致。
      */
+    /** @param mixed ...$args 透传给 $callback 的附加参数 */
     public static function queueMicrotask(callable $callback, ...$args): void
     {
         self::$microtasks[] = [$callback, $args];
@@ -483,7 +484,7 @@ final class Async
 
                     if ($result instanceof Promise) {
                         $result->then(
-                            function ($value) use ($key, &$results, &$pending, $total, $resolve, &$process) {
+                            function ($value) use ($key, &$results, &$pending, &$process) {
                                 $results[$key] = $value;
                                 $pending--;
                                 $process();

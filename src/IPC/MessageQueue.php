@@ -344,7 +344,7 @@ class MessageQueue implements IPCInterface
     {
         try {
             return serialize($data);
-        } catch (\Throwable $e) {
+        } catch (\Throwable $e) { // @phpstan-ignore catch.neverThrown (防御 unserialize 潜在异常，运行期不触发无害)
             throw IPCException::serializationFailed($data, $e->getMessage());
         }
     }
@@ -355,7 +355,7 @@ class MessageQueue implements IPCInterface
             // allowed_classes => false：IPC 报文只承载数据，禁止实例化任意类，
             // 避免本地攻击者向队列注入报文触发反序列化利用链。
             return @unserialize($data, ['allowed_classes' => false]);
-        } catch (\Throwable $e) {
+        } catch (\Throwable $e) { // @phpstan-ignore catch.neverThrown (防御 unserialize 潜在异常，运行期不触发无害)
             throw IPCException::serializationFailed($data, $e->getMessage());
         }
     }

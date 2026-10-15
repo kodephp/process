@@ -88,6 +88,7 @@ final class HttpClient
 
             $ch = curl_init();
 
+            // @phpstan-ignore argument.type (URL/方法由调用方输入驱动，运行期保证非空)
             curl_setopt_array($ch, [
                 CURLOPT_URL => $url,
                 CURLOPT_RETURNTRANSFER => true,
@@ -214,6 +215,7 @@ final class HttpClient
 
             $ch = curl_init();
 
+            // @phpstan-ignore argument.type (URL/方法由调用方输入驱动，运行期保证非空)
             curl_setopt_array($ch, [
                 CURLOPT_URL => $url,
                 CURLOPT_FILE => $fp,

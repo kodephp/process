@@ -266,7 +266,7 @@ final class RpcClient
             $sec  = (int) $left;
             $usec = (int) (($left - $sec) * 1_000_000);
 
-            if (@stream_select($read, $write, $except, $sec, $usec) === false || $read === []) {
+            if (@stream_select($read, $write, $except, $sec, $usec) === false || $read === []) { // @phpstan-ignore identical.alwaysFalse (stream_select 按引用可清空 $read，静态不可追踪)
                 break;
             }
 

@@ -386,7 +386,7 @@ final class Cluster
         return self::$elections[$name] ??= new LeaderElection(
             self::store(),
             $name,
-            $nodeId ?? self::$self?->id ?? (gethostname() . '-' . getmypid()),
+            $nodeId ?? self::$self->id ?? (gethostname() . '-' . getmypid()),
             $ttl
         );
     }

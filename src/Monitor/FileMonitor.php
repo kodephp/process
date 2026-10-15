@@ -17,6 +17,7 @@ final class FileMonitor
     private bool $running = false;
     private array $extensions = ['.php'];
     private array $excludeDirs = ['.git', '.svn', 'vendor', 'node_modules', '.trae'];
+    /** @var null|callable */
     private $onChangeCallback = null;
     private bool $daemonMode = false;
     private bool $debugMode = true;
@@ -227,7 +228,7 @@ final class FileMonitor
 
         echo "[FileMonitor] Started monitoring " . count($this->watchDirs) . " directories\n";
 
-        while ($this->running) {
+        while ($this->running) { // @phpstan-ignore while.alwaysTrue (外部 stop()/信号跨线程置 false，静态不可证)
             usleep($this->checkInterval);
             $this->tick();
         }

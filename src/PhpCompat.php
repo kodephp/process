@@ -29,7 +29,8 @@ final class PhpCompat
 
     public static function isPhp84(): bool
     {
-        return PHP_VERSION_ID >= 80400 && PHP_VERSION_ID < 80500;
+        // php ^8.4 已保证 >= 80400
+        return PHP_VERSION_ID < 80500;
     }
 
     public static function isPhp85(): bool
@@ -84,7 +85,7 @@ final class PhpCompat
 
     public static function hasPersistentCurlShare(): bool
     {
-        return extension_loaded('curl') && class_exists('CURLShare', false);
+        return extension_loaded('curl') && class_exists('CurlShare', false);
     }
 
     /**
@@ -173,8 +174,9 @@ final class PhpCompat
         }
 
         if (self::$curlShareHandle === null) {
-            $class = 'CURLShare';
-            $handle = new $class(constant('CURLSHARE_NONE'));
+            $class = 'CurlShare';
+            // CurlShare 构造函数无参数（传参会 ArgumentCountError）
+            $handle = new $class();
             $handle->setopt(\CURLSHOPT_SHARE, constant('CURL_LOCK_DATA_COOKIE'));
             $handle->setopt(\CURLSHOPT_SHARE, constant('CURL_LOCK_DATA_DNS'));
             $handle->setopt(\CURLSHOPT_SHARE, constant('CURL_LOCK_DATA_SSL_SESSION'));

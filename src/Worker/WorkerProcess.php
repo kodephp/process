@@ -285,7 +285,7 @@ class WorkerProcess implements WorkerInterface
 
             // 僵尸状态下 posix_kill(pid,0) 仍为 true，须靠 waitpid 回收才能感知退出
             while ($this->reapIfOurs($pid) === false && microtime(true) < $deadline) {
-                if (!@posix_kill($pid, 0)) {
+                if (!@posix_kill($pid, 0)) { // @phpstan-ignore booleanNot.alwaysFalse (进程存活探测护栏，静态不可证)
                     break;  // 已被别处（master SIGCHLD 处理器）回收
                 }
                 usleep(50000);
@@ -298,7 +298,7 @@ class WorkerProcess implements WorkerInterface
             $deadline = microtime(true) + 2;
 
             while ($this->reapIfOurs($pid) === false && microtime(true) < $deadline) {
-                if (!@posix_kill($pid, 0)) {
+                if (!@posix_kill($pid, 0)) { // @phpstan-ignore booleanNot.alwaysFalse (进程存活探测护栏，静态不可证)
                     break;
                 }
                 usleep(20000);
@@ -375,6 +375,7 @@ class WorkerProcess implements WorkerInterface
         $this->heartbeatTimeout = $timeout;
     }
 
+    /** @param mixed $channel IPC 通道对象 */
     public function addIpcChannel($channel): void
     {
         $this->ipcChannels[] = $channel;

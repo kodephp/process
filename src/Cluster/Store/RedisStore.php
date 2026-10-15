@@ -141,7 +141,6 @@ final class RedisStore implements StoreInterface
             return [];
         }
 
-        $keys   = array_values($keys);
         $raw    = $this->call(fn (): mixed => $this->redis->mget(array_map($this->k(...), $keys)));
         $result = [];
 

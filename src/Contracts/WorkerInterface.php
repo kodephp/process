@@ -35,6 +35,8 @@ interface WorkerInterface extends ProcessInterface
 
     public function heartbeat(): array;
 
+    public function setCallback(callable $callback): void;
+
     public function assignTask(string $taskId, array $data): void;
 
     public function completeTask(string $taskId, mixed $result): void;

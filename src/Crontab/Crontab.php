@@ -28,6 +28,7 @@ final class Crontab
     private const SEARCH_HORIZON_DAYS = 367;
 
     private string $expression;
+    /** @var callable */
     private $callback;
     private ?int $id = null;
     private static int $idCounter = 0;

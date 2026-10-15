@@ -13,6 +13,10 @@ use Psr\Log\NullLogger;
  * 
  * 提供更高级的信号管理功能，包括事件系统和信号优先级
  */
+/**
+ * @method void dispatch(int $signal, mixed $info = null) 转发到 SignalHandler::dispatch
+ * @method void ignore(int $signal) 转发到 SignalHandler::ignore（SIG_IGN）
+ */
 class SignalDispatcher
 {
     private SignalHandler $handler;
@@ -50,7 +54,7 @@ class SignalDispatcher
         });
 
         if (!$this->handler->hasHandler($signal)) {
-            $this->handler->register($signal, function (int $sig) use ($signal) {
+            $this->handler->register($signal, function (int $sig) {
                 $this->dispatchEvent($sig);
             });
         }
@@ -104,7 +108,7 @@ class SignalDispatcher
         $listeners = $this->eventListeners[$signal] ?? [];
 
         foreach ($listeners as $id => $data) {
-            if ($this->propagationStopped) {
+            if ($this->propagationStopped) { // @phpstan-ignore if.alwaysFalse (监听器闭包内调 stopPropagation，跨闭包静态不可证)
                 break;
             }
 

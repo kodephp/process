@@ -414,7 +414,7 @@ class MasterProcess implements ProcessInterface
     {
         try {
             pcntl_signal_dispatch();
-        } catch (\Throwable $e) {
+        } catch (\Throwable $e) { // @phpstan-ignore catch.neverThrown (常驻循环异常边界，防御性保留)
             $this->logger->error('信号派发异常', ['exception' => $e->getMessage()]);
         }
 

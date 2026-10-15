@@ -260,7 +260,7 @@ final class Promise
             // 自身充当事件循环，排空微任务/定时器/延迟任务后再让出 CPU。
             Async::tick();
 
-            if ($this->state === self::PENDING) {
+            if ($this->state === self::PENDING) { // @phpstan-ignore identical.alwaysTrue (Async::tick 回调可经微任务改 state，静态不可证)
                 usleep(1000);
             }
         }

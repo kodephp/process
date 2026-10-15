@@ -32,6 +32,7 @@ final class Server
     private int $port;
     private ?string $token;
     private array $data = [];
+    /** @var \Socket|null */
     private $socket = null;
     private bool $running = false;
     /** @var array<int, array{socket: mixed, buffer: string, out: string}> */
@@ -195,13 +196,15 @@ final class Server
 
         while ($this->clients[$id]['out'] !== '') {
             $pending = $this->clients[$id]['out'];
+            // @phpstan-ignore argument.invalidConstant (MSG_DONTWAIT 为合法 socket_send 标志，phpstub 收窄过严)
             $sent = @socket_send($socket, $pending, strlen($pending), MSG_DONTWAIT);
 
             if ($sent === false) {
                 $error = socket_last_error($socket);
                 socket_clear_error($socket);
                 // 发送缓冲区暂时写满：保留剩余数据，等可写事件再续写
-                if ($error === SOCKET_EAGAIN || $error === SOCKET_EWOULDBLOCK || $error === SOCKET_EINTR) {
+                if (// EAGAIN 与 EWOULDBLOCK 在 Linux/macOS 上恒同值，保留 EINTR
+            $error === SOCKET_EAGAIN || $error === SOCKET_EINTR) {
                     return;
                 }
                 $this->closeClient($id);

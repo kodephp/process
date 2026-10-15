@@ -388,7 +388,7 @@ final class SelectLoop implements LoopInterface
                 $next = $delta;
             }
         }
-        return $next === null ? null : max(0.0, $next);
+        return $next === null ? null : max(0.0, $next); // @phpstan-ignore identical.alwaysFalse (timers 为空时返回 null 是接口语义，防御保留)
     }
 
     private function now(): float

@@ -1810,9 +1810,7 @@ final class NativeRuntime extends AbstractRuntime
         unset($this->timers[$timerId]);
 
         // 底层事件循环的定时器必须显式移除，否则仍会在下一轮触发
-        if ($loopId !== null) {
-            $this->loop?->delTimer($loopId);
-        }
+        $this->loop?->delTimer($loopId);
 
         return true;
     }

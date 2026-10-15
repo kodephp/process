@@ -196,7 +196,7 @@ final class DistributedLock
             $left = $deadline - microtime(true);
             usleep((int) (min($sleep, $left) * 1_000_000));
 
-            if ($this->tryAcquire()) {
+            if ($this->tryAcquire()) { // @phpstan-ignore if.alwaysFalse (存储层 setIfAbsent/depth 状态跨调用变化，静态不可证；运行期重试语义)
                 return true;
             }
 

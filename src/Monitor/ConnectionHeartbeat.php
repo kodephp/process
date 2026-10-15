@@ -10,7 +10,9 @@ final class ConnectionHeartbeat
     private int $heartbeatTimeout;
     private array $connections = [];
     private bool $running = false;
+    /** @var null|callable */
     private $onTimeoutCallback = null;
+    /** @var null|callable */
     private $onHeartbeatCallback = null;
 
     public function __construct(int $interval = 55, int $timeout = 110)

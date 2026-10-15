@@ -174,12 +174,13 @@ final class Hpack
     ];
 
     /** @var array<int, array{0: int, 1: int}>|null 8 位窗口快速解码表：byte => [symbol, bits] */
+    /** @var array<int, array{int,int}|null>|null 8 位快速表：window => [symbol, bits]，未命中槽为 null */
     private static ?array $huffFast = null;
 
     /** @var array<int, array<int, int>>|null 长码查找：bits => [code => symbol] */
     private static ?array $huffLong = null;
 
-    /** @var array<string, int>|null "name\0value" => 静态表索引 */
+    /** @var array<string, array<int|string, int>>|null "name" => [value => index] 静态表对索引 */
     private static ?array $staticPairIndex = null;
 
     /** @var array<string, int>|null name => 最小静态表索引 */
@@ -733,7 +734,7 @@ final class Hpack
         //
         // 之所以能带着 ≥ 8 位走到这里：热路径 while ($curBits >= 8) 在 decodeLong()
         // 返回 false 时 break，而最短长码为 10 位，故 $curBits 为 8 或 9 时必然 break。
-        if ($curBits >= 8) {
+        if ($curBits >= 8) { // @phpstan-ignore greaterOrEqual.alwaysFalse (防御 Huffman 码字截断，2 字节样本可触发 ArithmeticError 逃逸)
             throw Http2Exception::compression('Huffman 码字截断');
         }
 

@@ -15,6 +15,7 @@ final class Client
     private string $host;
     private int $port;
     private ?string $token;
+    /** @var \Socket|null */
     private $socket = null;
     private int $timeout = 5;
     private int $retryCount = 3;
@@ -307,6 +308,11 @@ final class Client
             @socket_close($this->socket);
             $this->socket = null;
         }
+    }
+
+    public function close(): void
+    {
+        $this->disconnect();
     }
 
     public function setTimeout(int $seconds): self

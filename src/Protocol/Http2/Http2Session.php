@@ -20,10 +20,8 @@ namespace Kode\Process\Protocol\Http2;
  */
 final class Http2Session
 {
-    private const string STATE_IDLE      = 'idle';
     private const string STATE_OPEN      = 'open';
     private const string STATE_HALF_CLOSED_REMOTE = 'half-closed-remote';
-    private const string STATE_CLOSED    = 'closed';
 
     /** 本端通告的设置 */
     private int $maxConcurrentStreams;

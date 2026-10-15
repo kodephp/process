@@ -13,7 +13,7 @@ use Psr\Http\Message\StreamInterface;
  */
 final class ProcessStream implements StreamInterface
 {
-    /** @param resource $resource */
+    /** @param resource|null $resource */
     public function __construct(private $resource)
     {
     }

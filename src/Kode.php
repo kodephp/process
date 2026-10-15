@@ -20,6 +20,7 @@ use Kode\Process\Queue\QueueManager;
 use Kode\Process\Runtime\RuntimeInterface;
 use Kode\Process\Runtime\RuntimeType;
 use Kode\Process\Signal\SignalHandler;
+use Psr\Log\LoggerInterface;
 
 /**
  * 静态门面：一行代码起服务。
