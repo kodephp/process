@@ -547,6 +547,11 @@ src/
 
 ## 版本要点
 
+### v7.1.1
+- **select 兜底循环不再被 FD_SETSIZE 毒死。** PHP 8 的 `(int)$stream` 是资源 id 而非 OS fd，旧的 `guardFdLimit()` 用资源 id 与 1024 比较，判据本身就是错的；一旦真实 fd 达到 1024 并被登记进 `stream_select`，select 整体失败、循环空转，已断开连接的 EOF 回调永不触发，所有 fd 永久泄漏（实测客户端全部关闭 30s 后仍有 1087 个 fd）。现在 `SelectLoop` 改按**已登记流数量**闸门（默认 900，为 select 预留约 124 个 fd），`NativeRuntime::registerAcceptedConnection()` 达到上限即关闭新连接，保证既有连接始终能被正常监听与回收（实测 1200 次连接冲刷后 fd 回落到 77，无泄漏）。
+- 新增 `SelectLoop::isSaturated()` 与 `tests/SelectLoopTest::testIsSaturatedCountsStreamsInsteadOfResourceIds()`：用资源 id 明显大于 2 的临时流证明判据不依赖 `(int)$stream`，且同一条流同时登记读/写只计一次；`testFdSetSizeWarningFiresExactlyOnce` 继续对告警文案里的 `FD_SETSIZE` 关键字做守卫。
+- 未装 `ext-event`/`ext-ev` 时按上述上限拒收并告警；装了扩展后 `LoopFactory` 自动择优（event > ev > select），FD_SETSIZE 约束随 C 层多路复用消失。
+
 ### v5.5.1
 - **pid 文件互斥现在真的锁得住「同时敲两次」。** v5.5.0 的 `claimPidFile()` 只做「读 → 判 → 返回」，写盘发生在它返回之后、由 `file_put_contents()` 另开一个 fd 完成 —— 两步之间没有任何互斥。实测在同一台机器上同时敲两次 `php kode process:start`：两边都在对方落盘之前读到「没人占用」，于是真起出**两套**守护进程（两个 master 各带 worker），而 pid 文件里只留下其中一个 —— 另一套从状态表上永久隐形，`stop`/`reload` 都摸不到它。判活也挡不住这种交错，因为判定那一刻对方本来就还没写。
 - 现在「判归属 + 落盘」跑在同一把**非阻塞排他 flock** 里（新增 `withPidLock()`，判定本体拆成 `assertPidFileUnowned()`）：锁加在 pid 文件本身而不是旁边的 `*.lock`（路径只有一份，读侧与测试拿 `getPidFile()` 就能占到同一个锁），open 用 `'c'`（不存在就建、存在**不截断** —— 截断会把别人的占位抹成空文件，而空文件按「未占用」处理，等于用一次 open 把活着的实例赶走），写盘用**持锁的那只手写**（`ftruncate` + `fwrite`；另开 fd 等于绕过自己的锁）。抢不到锁立刻抛「另一个进程正在启动并占用 …（并发启动）」，不阻塞 supervise 入口；打不开该路径同样抛（别让「写不下去」伪装成「没人占用」）。

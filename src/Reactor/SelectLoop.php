@@ -15,6 +15,43 @@ namespace Kode\Process\Reactor;
  */
 final class SelectLoop implements LoopInterface
 {
+    /**
+     * select 兜底循环可安全监听的**流数量**上限（不是 fd 编号）。
+     *
+     * 注意：PHP 8 里 `(int)$stream` 是资源 id，不保证等于操作系统 fd，无法直接
+     * 判断「fd >= FD_SETSIZE」。因此这里用保守的连接数上限：默认 900，给监听
+     * 套接字、DB 连接、日志等基础句柄预留约 124 个 fd，避免基础句柄 + 连接数
+     * 越过 1024 后让 stream_select 整体失败。
+     *
+     * 可在构造时下调，供测试用小阈值模拟饱和；生产可通过 ext-event / ext-ev
+     * 切到 C 层多路复用后不再受此限制。
+     */
+    public const DEFAULT_STREAM_LIMIT = 900;
+
+    private int $streamLimit;
+
+    public function __construct(?int $streamLimit = null)
+    {
+        $this->streamLimit = $streamLimit ?? self::DEFAULT_STREAM_LIMIT;
+    }
+
+    public function streamLimit(): int
+    {
+        return $this->streamLimit;
+    }
+
+    /**
+     * 当前登记的读写流是否已达到兜底上限。
+     *
+     * 同一流同时登记读/写只算一个（按资源 id 取并集）。调用方（NativeRuntime）
+     * 在 accept 之后、登记之前检查：饱和就关闭新连接，绝不把第 N+1 个流塞进
+     * stream_select 集合 —— 那会让 select 整体失败、循环空转、所有 fd 永不释放。
+     */
+    public function isSaturated(): bool
+    {
+        return \count($this->readStreams + $this->writeStreams) >= $this->streamLimit;
+    }
+
     /** @var array<int, resource> */
     private array $readStreams = [];
 
@@ -228,9 +265,9 @@ final class SelectLoop implements LoopInterface
             try {
                 $count = @\stream_select($read, $write, $except, $sec, $usec);
             } catch (\Throwable $e2) {
-                // 重试仍抛错：若集合里仍含高 fd（>= FD_SETSIZE），给出明确告警一次，
+                // 重试仍抛错：若读写流已达兜底上限，给出明确告警一次；
                 // 否则静默退避，避免无谓刷屏。
-                if ($this->hasFdAtOrAboveSetSize()) {
+                if ($this->isSaturated()) {
                     $this->warnFdSetSize();
                 }
                 \usleep(1000);
@@ -239,9 +276,9 @@ final class SelectLoop implements LoopInterface
         }
 
         if ($count === false) {
-            // 其余失败（如高 fd 超 FD_SETSIZE 等平台限制）：剔除失效流并短暂退避再重试。
+            // 其余失败（如基础 fd 偏多导致越界等平台限制）：剔除失效流并短暂退避再重试。
             $this->pruneInvalidStreams();
-            if ($this->hasFdAtOrAboveSetSize()) {
+            if ($this->isSaturated()) {
                 $this->warnFdSetSize();
             }
             \usleep(1000);
@@ -325,34 +362,24 @@ final class SelectLoop implements LoopInterface
     private bool $fdSetSizeWarned = false;
 
     /**
-     * FD_SETSIZE（fd >= 1024）告警统一出口：注册期 guardFdLimit 与运行期 select 失败检测
+     * 兜底上限告警统一出口：注册期 guardFdLimit 与运行期 select 失败检测
      * 共用同一标志，保证无论哪条路径先触发，都只记录一次。
      */
-    private function warnFdSetSize(): void
+    public function warnFdSetSize(): void
     {
         if ($this->fdSetSizeWarned) {
             return;
         }
         $this->fdSetSizeWarned = true;
         \error_log(
-            'SelectLoop: 检测到 fd >= 1024 (FD_SETSIZE)，stream_select 无法安全监听该流，'
-            . '多路复用将退化为每 tick 空转。请安装 ext-event / ext-ev 切换到 C 层多路复用以解除连接数上限。'
+            'SelectLoop: 连接数达到 select 兜底上限（' . $this->streamLimit . '），继续接纳会逼近 FD_SETSIZE，'
+            . 'stream_select 无法安全监听。请安装 ext-event / ext-ev 切换到 C 层多路复用以解除连接数上限。'
         );
     }
 
-    /**
-     * 当前读写流中是否存在 fd 编号 >= 1024 的连接。仅在 select 失败 / 重试失败的分支调用，
-     * 不进入正常 tick 热路径。
-     */
-    private function hasFdAtOrAboveSetSize(): bool
+    private function guardFdLimit(int $id): void
     {
-        return array_any($this->readStreams, fn($_, $id) => $id >= 1024)
-            || array_any($this->writeStreams, fn($_, $id) => $id >= 1024);
-    }
-
-    private function guardFdLimit(int $fd): void
-    {
-        if ($fd >= 1024) {
+        if ($this->isSaturated()) {
             $this->warnFdSetSize();
         }
     }

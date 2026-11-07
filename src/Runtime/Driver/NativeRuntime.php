@@ -16,6 +16,7 @@ use Kode\Process\Protocol\TextProtocol;
 use Kode\Process\Protocol\WebSocketProtocol;
 use Kode\Process\Reactor\LoopFactory;
 use Kode\Process\Reactor\LoopInterface;
+use Kode\Process\Reactor\SelectLoop;
 use Kode\Process\Runtime\AbstractRuntime;
 use Kode\Process\Runtime\Capability;
 use Kode\Process\Runtime\ConnectionInterface;
@@ -930,6 +931,18 @@ final class NativeRuntime extends AbstractRuntime
     private function registerAcceptedConnection($connSock, array $listener, string $peerName): void
     {
         $this->tuneSocket($connSock);
+
+        // select 兜底循环受 FD_SETSIZE 约束，且 PHP 8 的 (int)$stream 是资源 id
+        // 而非操作系统 fd，无法逐个判断 fd 编号。这里改按**登记流数量**闸门：
+        // 达到兜底上限就不收新连接（直接关闭），保证既有连接始终能被 stream_select
+        // 正常监听与回收；否则超限的那一枚会让 select 整体失败、循环空转、
+        // 所有已断开连接的 fd 永不释放，进程对所有连接失聪。
+        if ($this->loop instanceof SelectLoop && $this->loop->isSaturated()) {
+            $this->loop->warnFdSetSize();
+            @\fclose($connSock);
+
+            return;
+        }
 
         $scheme = (string)$listener['scheme'];
         $conn   = new NativeConnection(

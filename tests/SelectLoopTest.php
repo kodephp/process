@@ -195,4 +195,47 @@ final class SelectLoopTest extends TestCase
         $this->assertCount(1, $lines, 'FD_SETSIZE 告警必须全生命周期只记录一次');
         $this->assertStringContainsString('FD_SETSIZE', $content);
     }
+
+    /**
+     * 兜底闸门按**登记流数量**判断，不能按 `(int)$stream` 判断。
+     *
+     * PHP 8 中 `(int)$stream` 是资源 id（本例里远大于阈值），并不等于操作系统 fd；
+     * 旧实现拿它比对 1024，会误判/漏判。这里把上限下调到 2，断言：
+     *  - 资源 id 已大于 2，但登记 1 个流时仍未饱和（证明没有误用资源 id）；
+     *  - 登记第 2 个流后饱和；
+     *  - 同一流同时登记读/写只算一个。
+     */
+    public function testIsSaturatedCountsStreamsInsteadOfResourceIds(): void
+    {
+        $streams = [];
+        try {
+            for ($i = 0; $i < 4; $i++) {
+                $s = \fopen('php://temp', 'r+');
+                $this->assertIsResource($s);
+                $streams[] = $s;
+            }
+
+            $this->assertGreaterThan(2, (int) $streams[0], '资源 id 必须大于测试阈值，才能证明没有按 id 判断');
+
+            $loop = new SelectLoop(2);
+            $this->assertFalse($loop->isSaturated());
+
+            $loop->onReadable($streams[0], static fn(): null => null);
+            $this->assertFalse($loop->isSaturated(), '只登记 1 个流（资源 id 已 > 2）不得误判饱和');
+
+            $loop->onReadable($streams[1], static fn(): null => null);
+            $this->assertTrue($loop->isSaturated(), '登记数达到上限即饱和');
+
+            $loop2 = new SelectLoop(1);
+            $loop2->onReadable($streams[2], static fn(): null => null);
+            $loop2->onWritable($streams[2], static fn(): null => null);
+            $this->assertTrue($loop2->isSaturated(), '同一流读+写只应算作一个登记流');
+        } finally {
+            foreach ($streams as $s) {
+                if (\is_resource($s)) {
+                    \fclose($s);
+                }
+            }
+        }
+    }
 }
