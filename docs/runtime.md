@@ -151,6 +151,7 @@ $rt->listen('http://0.0.0.0:8080', [
     'heartbeat'     => 60,      // 空闲连接回收秒数（默认 0 = 关闭！见下方安全提示）
     'keepAlive'     => true,    // HTTP keep-alive，默认开
     'maxSendBuffer' => 8388608, // 单连接发送缓冲上限，超出即断开（背压）
+    'maxBody'       => 10485760,// HTTP/1.1 + HTTP/2 统一请求体上限（字节，默认 10MB）
     'stopTimeout'   => 10,      // master 等待 worker 退出的最长秒数（超时 SIGKILL）
     'gracefulShutdownTimeout' => 3, // worker 内等待在途连接优雅收尾的秒数（默认 3）
 
@@ -159,7 +160,7 @@ $rt->listen('http://0.0.0.0:8080', [
     'http2MaxConcurrentStreams'   => 128,    // 单连接最大并发流数（防单连接占满）
     'http2InitialWindow'          => 1048576,// 流初始窗口字节数
     'http2MaxHeaderListSize'      => 65536,  // 请求头列表最大字节数（防超大头攻击）
-    'http2MaxRequestBody'         => 10485760,// 单条流请求体上限字节数（防请求体无限缓冲耗尽内存，与 HTTP/1.1 MAX_LENGTH 对称）
+    'http2MaxRequestBody'         => 10485760,// 单条流请求体上限字节数；缺省跟随 maxBody，可单独覆盖
 
     // ---- Swoole 专有 ----
     'mode'       => 'process',  // 切到 SWOOLE_PROCESS（默认 BASE，吞吐高约 8%）
@@ -173,6 +174,10 @@ $rt->listen('http://0.0.0.0:8080', [
 > 不配置时，空闲连接会一直挂着，恶意客户端可借此发起 **慢速攻击（Slowloris）**——开大量半开/空闲连接耗尽 worker 与文件描述符。
 > 生产环境建议显式配置，例如 `'heartbeat' => 60`（60 秒无活动即回收）。
 > 同理，TLS 监听下 `http2MaxConcurrentStreams` / `http2MaxHeaderListSize` 已设上限以抵御单连接占满与超大头攻击，按需收紧即可。
+>
+> **`maxBody` 与内存**：Native 运行时把整条请求体累积在连接缓冲区后再交给业务。把上限从 10MB 提到 200MB 只是放开限制，
+> 并不会改变这一行为——并发上传 N 个 200MB 文件就可能需要约 N×200MB 内存。生产环境应配合反向代理的体积限制、
+> 并发上传数限制，并优先让大文件走对象存储的直传/分片上传；超限请求会在头块阶段收到 `413` + `Connection: close`。
 
 > **两个停机超时的关系**：`gracefulShutdownTimeout` 是 **worker 内**给在途连接收尾的宽限期，
 > `stopTimeout` 是 **master** 等 worker 退出、超时就 `SIGKILL` 的硬上限。

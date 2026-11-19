@@ -547,6 +547,12 @@ src/
 
 ## 版本要点
 
+### v7.1.2
+- **请求体上限不再写死 10MB。** `HttpProtocol::MAX_LENGTH` 退化为默认值，新增 `maxBody` serve 选项与 `HttpProtocol::setMaxLength()` / `maxLength()` / `resetMaxLength()`；上限按 `Content-Length` 在头块阶段判定，不再先缓冲完整 body 才拒绝。`maxBody` 同时驱动 HTTP/1.1 判定、HTTP/2 单流上限、Swoole `package_max_length` 与 Workerman `maxPackageSize`，`http2MaxRequestBody` 保留为精准覆盖，四种口径不再各写一份默认值导致上传配置分叉（413 结构化响应由 Native 提供；Swoole/Workerman 的超限断连行为由底层决定）。
+- **超限从「静默断连」改为 `413` + `Connection: close`。** `input()` 对超长返回独立哨兵 `HttpProtocol::PAYLOAD_TOO_LARGE = -2`，与请求走私的 `-1` 严格区分；NativeRuntime 收到哨兵即回结构化 413（`{"error":"payload_too_large","max_bytes":N}`）再关连接，客户端无需猜测是体太大还是服务故障。请求走私防护（重复/非法 CL、Transfer-Encoding）不受影响。
+- 新增协议层边界测试与真实 socket 冒烟（只发头块、200MB body 不落地即收到 413，业务 handler 不被调用），以及运行时配置门禁；反空转验证：破坏可配置上限 → 4 红，拆掉 413 发送语句 → 1 红。
+- 注意：Native 运行时仍把整条请求体累积在内存中后再交给业务，调大上限等于放宽内存占用上限；大文件仍应走对象存储直传/分片，生产配合反向代理限流。
+
 ### v7.1.1
 - **select 兜底循环不再被 FD_SETSIZE 毒死。** PHP 8 的 `(int)$stream` 是资源 id 而非 OS fd，旧的 `guardFdLimit()` 用资源 id 与 1024 比较，判据本身就是错的；一旦真实 fd 达到 1024 并被登记进 `stream_select`，select 整体失败、循环空转，已断开连接的 EOF 回调永不触发，所有 fd 永久泄漏（实测客户端全部关闭 30s 后仍有 1087 个 fd）。现在 `SelectLoop` 改按**已登记流数量**闸门（默认 900，为 select 预留约 124 个 fd），`NativeRuntime::registerAcceptedConnection()` 达到上限即关闭新连接，保证既有连接始终能被正常监听与回收（实测 1200 次连接冲刷后 fd 回落到 77，无泄漏）。
 - 新增 `SelectLoop::isSaturated()` 与 `tests/SelectLoopTest::testIsSaturatedCountsStreamsInsteadOfResourceIds()`：用资源 id 明显大于 2 的临时流证明判据不依赖 `(int)$stream`，且同一条流同时登记读/写只计一次；`testFdSetSizeWarningFiresExactlyOnce` 继续对告警文案里的 `FD_SETSIZE` 关键字做守卫。

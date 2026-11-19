@@ -79,8 +79,8 @@ final class NativeRuntime extends AbstractRuntime
      * 否则客户端以极低速率持续发送不含完整头块的数据即可让 recvBuffer 无限增长，
      * 单连接即可打爆 worker 内存（千连接级联即内存耗尽）。
      *
-     * 该上限独立于 {@see HttpProtocol::MAX_LENGTH}（整请求 10MB，含合法大 body）：
-     * 头块定型后进入 {@see HttpProtocol::input()} 的常规长度校验，大 body 不受影响。
+     * 该上限独立于 {@see HttpProtocol::maxLength()}（整请求上限，默认 10MB，可经 maxBody 调大）：
+     * 头块定型后进入 {@see HttpProtocol::input()} 的常规长度校验，合法大 body 不受影响。
      * WebSocket 握手首包同源受此上限约束（原 16KB 内联判断统一收敛到此常量）。
      */
     private const int MAX_HEADER_BUFFER = 65536;
@@ -310,13 +310,19 @@ final class NativeRuntime extends AbstractRuntime
         $this->keepAlive       = (bool)($opts['keepAlive'] ?? true);
         $this->gzipEnabled     = (bool)($opts['gzip'] ?? true);
 
+        // 请求体上限：maxBody 是 HTTP/1.1 与 HTTP/2 的统一旋钮。
+        // 以前两边各自写死 10MB，业务把上传配置调到 200MB 后仍在头块阶段被断连；
+        // 现在一次配置同时落到协议判定与 h2 流判定，http2MaxRequestBody 保留为精准覆盖。
+        $maxBody = max(1, (int)($opts['maxBody'] ?? HttpProtocol::MAX_LENGTH));
+        HttpProtocol::setMaxLength($maxBody);
+
         // HTTP/2（h2c）：默认开启，与 HTTP/1.1 在同一端口自动协商，
         // 客户端不支持 h2 时完全不受影响（既不改握手也不加解析开销）。
         $this->http2Enabled              = (bool)($opts['http2'] ?? true);
         $this->http2MaxConcurrentStreams = max(1, (int)($opts['http2MaxConcurrentStreams'] ?? 128));
         $this->http2InitialWindow        = max(Frame::DEFAULT_WINDOW_SIZE, (int)($opts['http2InitialWindow'] ?? 1048576));
         $this->http2MaxHeaderListSize    = max(0, (int)($opts['http2MaxHeaderListSize'] ?? Http2Session::DEFAULT_MAX_HEADER_LIST_SIZE));
-        $this->http2MaxRequestBody       = max(0, (int)($opts['http2MaxRequestBody'] ?? Http2Session::DEFAULT_MAX_REQUEST_BODY));
+        $this->http2MaxRequestBody       = max(0, (int)($opts['http2MaxRequestBody'] ?? $maxBody));
         $this->gracefulShutdownTimeout   = max(0, (int)($opts['gracefulShutdownTimeout'] ?? 3));
         // master 的停机总超时必须覆盖 worker 的优雅宽限期，否则会在宽限期内 SIGKILL
         // 在途请求（gracefulShutdownTimeout=30 而 stopTimeout=5 时必现）。取两者较大值。
@@ -1136,6 +1142,14 @@ final class NativeRuntime extends AbstractRuntime
             $len = $protoClass::input($buf, $conn);
             if ($len === 0) {
                 break; // 需要更多数据
+            }
+            if ($len === HttpProtocol::PAYLOAD_TOO_LARGE) {
+                // 头块已给出 Content-Length 即可判定，body 不必收齐。
+                // 必须显式回 413：旧实现把超长和请求走私都当成 -1 直接断连，
+                // 客户端拿到空连接，既不知道该切片上传也无法区分服务端故障。
+                $conn->sendRaw(HttpProtocol::payloadTooLargeResponse());
+                $this->closeConnection($conn);
+                return;
             }
             if ($len === -1) {
                 $this->closeConnection($conn);

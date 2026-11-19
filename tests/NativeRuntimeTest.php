@@ -11,6 +11,7 @@ use Kode\Process\Runtime\Capability;
 use Kode\Process\Protocol\Http2\Frame;
 use Kode\Process\Protocol\Http2\Hpack;
 use Kode\Process\Protocol\Http2\Http2Session;
+use Kode\Process\Protocol\HttpProtocol;
 use Kode\Process\Runtime\Driver\NativeRuntime;
 use Kode\Process\Runtime\RuntimeType;
 use Kode\Process\Tests\Fixtures\EchoProtocol;
@@ -146,6 +147,90 @@ final class NativeRuntimeTest extends TestCase
         $rtDefault = new NativeRuntime();
         $method->invoke($rtDefault, []);
         $this->assertSame(Http2Session::DEFAULT_MAX_HEADER_LIST_SIZE, $prop->getValue($rtDefault));
+    }
+
+    /** maxBody 必须同时落到 HTTP/1.1 判定与 HTTP/2 单流上限，避免两边的上传口径分叉 */
+    public function testMaxBodyOptionDrivesBothProtocols(): void
+    {
+        $ref   = new \ReflectionClass(NativeRuntime::class);
+        $apply = $ref->getMethod('applyOptions');
+        $apply->setAccessible(true);
+        $prop = $ref->getProperty('http2MaxRequestBody');
+        $prop->setAccessible(true);
+
+        try {
+            $rt = new NativeRuntime();
+            $apply->invoke($rt, ['maxBody' => 209715200]);
+            self::assertSame(209715200, HttpProtocol::maxLength(), 'HTTP/1.1 判定未跟随 maxBody');
+            self::assertSame(209715200, $prop->getValue($rt), 'HTTP/2 单流上限未跟随 maxBody');
+
+            $rtOverride = new NativeRuntime();
+            $apply->invoke($rtOverride, ['maxBody' => 209715200, 'http2MaxRequestBody' => 4096]);
+            self::assertSame(209715200, HttpProtocol::maxLength());
+            self::assertSame(4096, $prop->getValue($rtOverride), 'http2MaxRequestBody 精准覆盖应优先');
+
+            $rtDefault = new NativeRuntime();
+            $apply->invoke($rtDefault, []);
+            self::assertSame(HttpProtocol::MAX_LENGTH, HttpProtocol::maxLength());
+            self::assertSame(HttpProtocol::MAX_LENGTH, $prop->getValue($rtDefault));
+        } finally {
+            HttpProtocol::resetMaxLength();
+        }
+    }
+
+    /** 真实 socket：超限请求在头块阶段收到 413，业务 handler 不被调用 */
+    public function testOversizedRequestGets413OverRealSocket(): void
+    {
+        if (!NativeRuntime::isAvailable()) {
+            $this->markTestSkipped('需要 PHP CLI + ext-pcntl + ext-posix');
+        }
+
+        $port   = $this->findFreePort();
+        $script = $this->writeHttpServerScript(
+            $port,
+            ['workers' => 1, 'maxBody' => 256],
+            'static function ($conn, $data): void { $conn->send("unexpected-handler-hit"); }'
+        );
+        $proc = proc_open([PHP_BINARY, $script], [], $pipes);
+        $this->assertIsResource($proc, '无法启动 Native HTTP 子进程');
+
+        try {
+            $this->waitForPort($port, 4.0);
+            $fp = @fsockopen('127.0.0.1', $port, $errno, $errstr, 2.0);
+            $this->assertNotFalse($fp, "连接失败: {$errstr} ({$errno})");
+            stream_set_timeout($fp, 3);
+
+            // 只发头块，200MB body 一个字节都不发——超限应在头块解析时立即判定
+            fwrite($fp, "POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 209715200\r\n\r\n");
+
+            $resp = '';
+            while (($chunk = @fread($fp, 8192)) !== '' && $chunk !== false) {
+                $resp .= $chunk;
+            }
+            fclose($fp);
+
+            $this->assertStringStartsWith('HTTP/1.1 413 Payload Too Large', $resp);
+            $this->assertStringContainsString('Connection: close', $resp);
+            $this->assertStringContainsString('"max_bytes":256', $resp);
+            $this->assertStringNotContainsString('unexpected-handler-hit', $resp);
+        } finally {
+            $this->stopProc($proc, $script);
+        }
+    }
+
+    /** 超限分支必须真的回 413，不能退回旧实现「和走私一样静默断连」 */
+    public function testOverLimitBranchSends413Response(): void
+    {
+        $runtime = (string) file_get_contents(dirname(__DIR__) . '/src/Runtime/Driver/NativeRuntime.php');
+        $proto   = (string) file_get_contents(dirname(__DIR__) . '/src/Protocol/HttpProtocol.php');
+
+        self::assertMatchesRegularExpression(
+            '/^\s*\$conn->sendRaw\(HttpProtocol::payloadTooLargeResponse\(\)\);/m',
+            $runtime,
+            '超限必须是可执行的发送语句，注释掉不算接线'
+        );
+        self::assertStringContainsString('HttpProtocol::PAYLOAD_TOO_LARGE', $runtime);
+        self::assertStringContainsString("'Connection' => 'close'", $proto);
     }
 
     /**

@@ -22,7 +22,9 @@ interface ProtocolInterface
      * 
      * @param string $buffer 输入缓冲区
      * @param mixed $connection 连接对象（可选）
-     * @return int 包长度，0 表示需要更多数据，-1 表示协议错误
+     * @return int 包长度，0 表示需要更多数据，-1 表示协议错误（断连）；
+     *             -2 表示请求体超限（HTTP 专属，调用方应回 413 后关闭连接）。
+     *             其他协议不使用 -2，因此旧调用方按「<0 即关闭」处理仍然安全。
      */
     public static function input(string $buffer, mixed $connection = null): int;
 

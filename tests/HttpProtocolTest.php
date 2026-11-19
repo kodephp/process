@@ -212,6 +212,83 @@ final class HttpProtocolTest extends TestCase
         $this->assertSame(strlen($raw), HttpProtocol::input($raw));
     }
 
+    // ------------------------------------------- input()：可配置请求体上限
+
+    #[\Override]
+    protected function tearDown(): void
+    {
+        HttpProtocol::resetMaxLength();
+        parent::tearDown();
+    }
+
+    public function testDefaultMaxLengthIsTenMegabytes(): void
+    {
+        self::assertSame(10485760, HttpProtocol::MAX_LENGTH);
+        self::assertSame(HttpProtocol::MAX_LENGTH, HttpProtocol::maxLength());
+    }
+
+    public function testConfiguredMaxLengthAcceptsLargeBody(): void
+    {
+        HttpProtocol::setMaxLength(200 * 1024 * 1024);
+        $body = str_repeat('x', 1024);
+        $raw = "POST /upload HTTP/1.1\r\nHost: a\r\nContent-Length: " . strlen($body) . "\r\n\r\n" . $body;
+
+        self::assertSame(strlen($raw), HttpProtocol::input($raw));
+    }
+
+    /** 头块一到就能判超限，不必先吃下 200MB body */
+    public function testOverLimitIsDetectedBeforeBodyArrives(): void
+    {
+        HttpProtocol::setMaxLength(1024);
+        $head = "POST /upload HTTP/1.1\r\nHost: a\r\nContent-Length: 200000000\r\n\r\n";
+
+        self::assertSame(HttpProtocol::PAYLOAD_TOO_LARGE, HttpProtocol::input($head));
+        self::assertNotSame(-1, HttpProtocol::PAYLOAD_TOO_LARGE, '超限必须和协议错误可区分');
+    }
+
+    public function testExactBoundaryAcceptedAndOneByteLessRejected(): void
+    {
+        $raw = "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\n\r\nhello";
+        $len = strlen($raw);
+
+        HttpProtocol::setMaxLength($len);
+        self::assertSame($len, HttpProtocol::input($raw));
+
+        HttpProtocol::setMaxLength($len - 1);
+        self::assertSame(HttpProtocol::PAYLOAD_TOO_LARGE, HttpProtocol::input($raw));
+    }
+
+    public function testIncompleteHeaderOverLimitReturnsTooLarge(): void
+    {
+        HttpProtocol::setMaxLength(32);
+
+        self::assertSame(HttpProtocol::PAYLOAD_TOO_LARGE, HttpProtocol::input(str_repeat('x', 64)));
+    }
+
+    /** 调大上限不能顺手放开请求走私防护 */
+    public function testSmugglingStillRejectedUnderCustomLimit(): void
+    {
+        HttpProtocol::setMaxLength(1024 * 1024);
+        $raw = "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\nhello";
+
+        self::assertSame(-1, HttpProtocol::input($raw));
+    }
+
+    public function testPayloadTooLargeResponseIsWellFormed(): void
+    {
+        HttpProtocol::setMaxLength(209715200);
+        $parsed = HttpProtocol::parseResponse(HttpProtocol::payloadTooLargeResponse());
+
+        self::assertSame(413, $parsed['status']);
+        self::assertSame('close', $parsed['headers']['connection']);
+        self::assertSame('application/json; charset=utf-8', $parsed['headers']['content-type']);
+        self::assertSame(
+            ['error' => 'payload_too_large', 'max_bytes' => 209715200],
+            json_decode($parsed['body'], true)
+        );
+        self::assertSame(strlen($parsed['body']), (int) $parsed['headers']['content-length']);
+    }
+
     // ------------------------------------------- 响应头 CRLF 注入防护
 
     public function testEncodeStripsCrlfFromHeaderValue(): void

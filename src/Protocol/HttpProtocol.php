@@ -14,8 +14,30 @@ final class HttpProtocol implements ProtocolInterface
     private const string EOF = "\r\n\r\n";
     private const string HEADER_EOF = "\r\n";
 
-    /** 请求报文总长度上限 */
+    /**
+     * 默认请求报文总长度上限（10MB）。
+     *
+     * 这是「未配置」时的兜底值，不再是写死的判定值——运行时通过 {@see setMaxLength()}
+     * 按 maxBody 选项覆盖（如视频上传需要 200MB）。判定一律走 {@see self::$maxLength}。
+     */
     public const int MAX_LENGTH = 10485760;
+
+    /**
+     * input() 返回值：请求体超过已配置上限（HTTP 专属）。
+     *
+     * 必须与 -1（协议错误/请求走私，直接断连）分开：超限是客户端可恢复的错误，
+     * 调用方应回 413 + Connection: close 再关闭连接；否则客户端只会看到空连接，
+     * 无法区分「体太大」与「服务崩了」，也不会停止继续发送剩余 body。
+     */
+    public const int PAYLOAD_TOO_LARGE = -2;
+
+    /**
+     * 当前生效的请求报文总长度上限。
+     *
+     * 进程级配置：由 serve 选项在启动时落地，运行期不再变更。刻意不用全局可变函数，
+     * 让上限的写入点收敛到 {@see setMaxLength()} 一个地方。
+     */
+    private static int $maxLength = self::MAX_LENGTH;
 
     /** 自动 gzip 压缩的最小响应体字节数（过小压缩收益不抵开销） */
     public const int GZIP_MIN_SIZE = 1024;
@@ -65,10 +87,45 @@ final class HttpProtocol implements ProtocolInterface
         return 'http';
     }
 
+    /** 设置请求报文总长度上限（字节）；小于 1 的值夹到 1，避免 0 被误当成「不限」而打爆内存。 */
+    public static function setMaxLength(int $bytes): void
+    {
+        self::$maxLength = max(1, $bytes);
+    }
+
+    public static function maxLength(): int
+    {
+        return self::$maxLength;
+    }
+
+    /** 复位为内置默认值；供多监听进程与测试隔离使用。 */
+    public static function resetMaxLength(): void
+    {
+        self::$maxLength = self::MAX_LENGTH;
+    }
+
+    /**
+     * 生成请求体超限响应。
+     *
+     * 必带 Connection: close：本端已经丢弃该请求的剩余 body，继续复用连接会让
+     * 下一条请求从 body 中间开始解析（连接级错位）。Content-Length 由 encode 补齐。
+     */
+    public static function payloadTooLargeResponse(): string
+    {
+        return self::encode([
+            'status' => 413,
+            'headers' => [
+                'Content-Type' => 'application/json; charset=utf-8',
+                'Connection' => 'close',
+            ],
+            'body' => '{"error":"payload_too_large","max_bytes":' . self::$maxLength . '}',
+        ]);
+    }
+
     /**
      * 计算完整请求报文长度
      *
-     * @return int 0=报文未接收完整；-1=超长应拒绝；>0=完整报文字节数
+     * @return int 0=报文未接收完整；-1=协议错误；-2=请求体超过 maxLength；>0=完整报文字节数
      */
     #[\Override]
     public static function input(string $buffer, mixed $connection = null): int
@@ -76,7 +133,7 @@ final class HttpProtocol implements ProtocolInterface
         $pos = strpos($buffer, self::EOF);
 
         if ($pos === false) {
-            return strlen($buffer) > self::MAX_LENGTH ? -1 : 0;
+            return strlen($buffer) > self::$maxLength ? self::PAYLOAD_TOO_LARGE : 0;
         }
 
         $headerLength = $pos + 4;
@@ -93,8 +150,10 @@ final class HttpProtocol implements ProtocolInterface
 
         $totalLength = $headerLength + $contentLength;
 
-        if ($totalLength > self::MAX_LENGTH) {
-            return -1;
+        // 仅凭 Content-Length 即可判定，不必等 body 收齐——200MB 上传被拒时
+        // 应在头块到达的那一刻就回 413，而不是先吃掉 200MB 内存再断连。
+        if ($totalLength > self::$maxLength) {
+            return self::PAYLOAD_TOO_LARGE;
         }
 
         return strlen($buffer) < $totalLength ? 0 : $totalLength;

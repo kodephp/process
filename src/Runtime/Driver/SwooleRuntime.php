@@ -139,6 +139,9 @@ final class SwooleRuntime extends AbstractRuntime
             'log_level'        => $opts['logLevel'] ?? SWOOLE_LOG_ERROR,
             'enable_coroutine' => (bool)($opts['coroutine'] ?? false),
             'backlog'          => (int)($opts['backlog'] ?? 65535),
+            // Swoole 默认 package_max_length 仅 2MB；不跟随 maxBody 的话，
+            // 切到本运行时大上传会重新卡死，配置口径与 Native 分叉。
+            'package_max_length' => max(1, (int)($opts['maxBody'] ?? HttpProtocol::MAX_LENGTH)),
         ];
         if (!empty($opts['maxRequest'])) {
             $settings['max_request'] = (int)$opts['maxRequest'];

@@ -113,6 +113,10 @@ final class WorkermanRuntime extends AbstractRuntime
             $worker        = new $workerClass($address, $context);
             $worker->count = (int)($opts['workers'] ?? 4);
             $worker->name  = (string)($opts['name'] ?? 'kode-process');
+            // Workerman 默认 maxPackageSize 10MB；跟随 maxBody 才能让同一个上传配置
+            // 在三种运行时下语义一致（超限由 Workerman 自行断连，不返回 413）。
+            // @phpstan-ignore property.notFound (Workerman Worker 公开魔术属性)
+            $worker->maxPackageSize = max(1, (int)($opts['maxBody'] ?? HttpProtocol::MAX_LENGTH));
 
             if (!empty($opts['reusePort'])) {
                 $worker->reusePort = true;
