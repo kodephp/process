@@ -152,6 +152,7 @@ $rt->listen('http://0.0.0.0:8080', [
     'keepAlive'     => true,    // HTTP keep-alive，默认开
     'maxSendBuffer' => 8388608, // 单连接发送缓冲上限，超出即断开（背压）
     'maxBody'       => 10485760,// HTTP/1.1 + HTTP/2 统一请求体上限（字节，默认 10MB）
+    'maxFileSize'   => 0,       // multipart 单文件上限；0 = 跟随 maxBody，可用于「整体放行但单文件收紧」
     'stopTimeout'   => 10,      // master 等待 worker 退出的最长秒数（超时 SIGKILL）
     'gracefulShutdownTimeout' => 3, // worker 内等待在途连接优雅收尾的秒数（默认 3）
 

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Kode\Process\Tests;
 
 use Kode\Process\Http\Request;
+use Kode\Process\Protocol\HttpProtocol;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -579,5 +580,74 @@ final class RequestTest extends TestCase
     public function testNonMultipartHasNoFiles(): void
     {
         $this->assertSame([], Request::fromRaw(self::RAW_POST_JSON)->files());
+    }
+
+    // ------------------------------------------ multipart 单文件上限与 maxBody 对齐
+
+    #[\Override]
+    protected function tearDown(): void
+    {
+        Request::resetMaxFileSize();
+        HttpProtocol::resetMaxLength();
+        parent::tearDown();
+    }
+
+    private static function rawUploadWith(string $content): string
+    {
+        return "POST /api/upload HTTP/1.1\r\n"
+            . "Host: example.com\r\n"
+            . "Content-Type: multipart/form-data; boundary=BOUND\r\n"
+            . "\r\n"
+            . "--BOUND\r\n"
+            . "Content-Disposition: form-data; name=\"file\"; filename=\"big.bin\"\r\n"
+            . "Content-Type: application/octet-stream\r\n"
+            . "\r\n"
+            . $content
+            . "\r\n--BOUND--\r\n";
+    }
+
+    public function testMaxFileSizeFollowsBodyLimitByDefault(): void
+    {
+        HttpProtocol::setMaxLength(209715200);
+
+        self::assertSame(209715200, Request::maxFileSize(), '单文件上限必须跟随 maxBody，不能再写死 100MB');
+    }
+
+    public function testExplicitMaxFileSizeCanTightenWithoutChangingBodyLimit(): void
+    {
+        HttpProtocol::setMaxLength(209715200);
+        Request::setMaxFileSize(20 * 1024 * 1024);
+        self::assertSame(20 * 1024 * 1024, Request::maxFileSize());
+
+        Request::setMaxFileSize(null);
+        self::assertSame(209715200, Request::maxFileSize());
+    }
+
+    public function testPartOverConfiguredLimitIsMarkedIniSize(): void
+    {
+        Request::setMaxFileSize(8);
+        $files = Request::fromRaw(self::rawUploadWith(str_repeat('x', 16)))->files();
+
+        self::assertSame(UPLOAD_ERR_INI_SIZE, $files['file']->getError());
+        self::assertSame('big.bin', $files['file']->getClientFilename());
+    }
+
+    public function testPartWithinConfiguredLimitIsAccepted(): void
+    {
+        Request::setMaxFileSize(1024 * 1024);
+        $files = Request::fromRaw(self::rawUploadWith('small'))->files();
+
+        self::assertSame(UPLOAD_ERR_OK, $files['file']->getError());
+        self::assertSame('small', $files['file']->getStream()->getContents());
+    }
+
+    /** 上限只能来自配置：写死 100MB 会让 maxBody 调大后上传仍在解析层失败 */
+    public function testNoHardCodedSingleFileLimitRemains(): void
+    {
+        $src = (string) file_get_contents(dirname(__DIR__) . '/src/Http/Request.php');
+
+        self::assertStringNotContainsString('100 * 1024 * 1024', $src);
+        self::assertStringNotContainsString('104857600', $src);
+        self::assertStringContainsString('$size > $limit', $src);
     }
 }

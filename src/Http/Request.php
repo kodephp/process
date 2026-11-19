@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Kode\Process\Http;
 
+use Kode\Process\Protocol\HttpProtocol;
+
 /**
  * 跨运行时统一的 HTTP 请求对象。
  *
@@ -91,6 +93,15 @@ final class Request implements \ArrayAccess, \IteratorAggregate, \Countable, \Js
     /** @var array<string, mixed>|null */
     private ?array $files = null;
     private ?string $body = null;
+
+    /**
+     * multipart 单文件上限（字节）；null = 跟随 {@see HttpProtocol::maxLength()}（即 serve 的 maxBody）。
+     *
+     * 曾经写死 100MB：把 maxBody 调到 200MB 后，视频在解析层就被标成 UPLOAD_ERR_INI_SIZE，
+     * 业务只看到「未收到有效文件」——既拿不到 413，也不知道该调哪个旋钮。上限跟随请求体
+     * 上限后，两者不会再分叉；显式配置保留给「请求体 200MB 但单文件只允许 20MB」的场景。
+     */
+    private static ?int $maxFileSize = null;
 
     /** @var array<string, mixed> 业务自定义附加数据（中间件传值） */
     private array $attributes = [];
@@ -564,6 +575,24 @@ final class Request implements \ArrayAccess, \IteratorAggregate, \Countable, \Js
         return $this->cookies()[$key] ?? $default;
     }
 
+    /** 设置 multipart 单文件上限；null 表示跟随 HTTP 请求体上限（maxBody）。 */
+    public static function setMaxFileSize(?int $bytes): void
+    {
+        self::$maxFileSize = $bytes === null ? null : max(1, $bytes);
+    }
+
+    /** 当前生效的单文件上限（字节）。 */
+    public static function maxFileSize(): int
+    {
+        return self::$maxFileSize ?? HttpProtocol::maxLength();
+    }
+
+    /** 复位为「跟随 maxBody」；供多监听进程与测试隔离使用。 */
+    public static function resetMaxFileSize(): void
+    {
+        self::$maxFileSize = null;
+    }
+
     /** @return array<string, mixed> 上传文件，Native 暂不解析 multipart，返回空数组 */
     public function files(): array
     {
@@ -585,8 +614,9 @@ final class Request implements \ArrayAccess, \IteratorAggregate, \Countable, \Js
      * Native 运行时 multipart 解析（SRC_RAW）。
      *
      * Swoole/Workerman 由引擎预解析；自研运行时在此补齐，否则上传在默认运行时
-     * 永远拿不到文件。约束：单请求至多 20 个文件、单文件 100MB（超限部件按
-     * UPLOAD_ERR_INI_SIZE 标记，不中断其它部件）；文件名经 basename 清洗。
+     * 永远拿不到文件。约束：单请求至多 20 个文件、单文件 {@see self::maxFileSize()}
+     * （默认跟随 maxBody；超限部件按 UPLOAD_ERR_INI_SIZE 标记，不中断其它部件）；
+     * 文件名经 basename 清洗。
      *
      * @return array<string, \Psr\Http\Message\UploadedFileInterface|array>
      */
@@ -612,6 +642,7 @@ final class Request implements \ArrayAccess, \IteratorAggregate, \Countable, \Js
         }
 
         $count = 0;
+        $limit = self::maxFileSize();
         foreach (explode('--' . $boundary, $body) as $part) {
             $part = ltrim($part, "\r\n");
             if ($part === '' || $part === '--' || str_starts_with($part, '--')) {
@@ -646,7 +677,7 @@ final class Request implements \ArrayAccess, \IteratorAggregate, \Countable, \Js
             }
 
             $size = strlen($content);
-            if ($size > 100 * 1024 * 1024) {
+            if ($size > $limit) {
                 $files[$name] = new UploadedFile('', 0, UPLOAD_ERR_INI_SIZE, $filename, $mediaType);
                 continue;
             }

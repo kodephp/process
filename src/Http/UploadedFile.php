@@ -27,6 +27,20 @@ final class UploadedFile implements \Psr\Http\Message\UploadedFileInterface
     ) {
     }
 
+    /**
+     * 回收未被 moveTo 认领的临时文件。
+     *
+     * 解析层为每个部件建一个临时文件；业务在类型/大小/MIME 校验阶段拒绝时往往直接返回，
+     * 不会调用 moveTo——这些文件此前永久留在 sys_get_temp_dir()，大批量上传能把 /tmp 写满。
+     * moveTo 成功后 path 已指向目标文件且 $moved 置位，这里不碰它。
+     */
+    public function __destruct()
+    {
+        if (!$this->moved && $this->path !== '' && is_file($this->path)) {
+            @unlink($this->path);
+        }
+    }
+
     #[\Override]
     public function getStream(): StreamInterface
     {

@@ -547,6 +547,11 @@ src/
 
 ## 版本要点
 
+### v7.1.3
+- **multipart 单文件上限不再写死 100MB。** v7.1.2 放开了 `maxBody`，但 Native 运行时的 multipart 解析仍按 100MB 判定，把 200MB 视频标成 `UPLOAD_ERR_INI_SIZE`——业务只看到「未收到有效文件」，既拿不到 413 也不知道该调哪个旋钮。现在 `Request::maxFileSize()` 缺省跟随 `HttpProtocol::maxLength()`（即 maxBody），新增 `maxFileSize` serve 选项用于「整体放行但单文件收紧」；20 个部件上限与请求走私防护不变。
+- **上传临时文件不再永久滞留 /tmp。** `UploadedFile` 析构时回收未被 `moveTo` 认领的临时文件；此前业务在类型/大小/MIME 校验阶段直接返回时，每单都会留下一个临时文件，批量上传可写满磁盘。`moveTo` 成功后目标文件不受影响。
+- 新增上限来源配置/覆盖/硬编码清零与临时文件回收回归；反空转：恢复 100MB 硬编码 → 2 红，拆掉析构回收 → 1 红。
+
 ### v7.1.2
 - **请求体上限不再写死 10MB。** `HttpProtocol::MAX_LENGTH` 退化为默认值，新增 `maxBody` serve 选项与 `HttpProtocol::setMaxLength()` / `maxLength()` / `resetMaxLength()`；上限按 `Content-Length` 在头块阶段判定，不再先缓冲完整 body 才拒绝。`maxBody` 同时驱动 HTTP/1.1 判定、HTTP/2 单流上限、Swoole `package_max_length` 与 Workerman `maxPackageSize`，`http2MaxRequestBody` 保留为精准覆盖，四种口径不再各写一份默认值导致上传配置分叉（413 结构化响应由 Native 提供；Swoole/Workerman 的超限断连行为由底层决定）。
 - **超限从「静默断连」改为 `413` + `Connection: close`。** `input()` 对超长返回独立哨兵 `HttpProtocol::PAYLOAD_TOO_LARGE = -2`，与请求走私的 `-1` 严格区分；NativeRuntime 收到哨兵即回结构化 413（`{"error":"payload_too_large","max_bytes":N}`）再关连接，客户端无需猜测是体太大还是服务故障。请求走私防护（重复/非法 CL、Transfer-Encoding）不受影响。

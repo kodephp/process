@@ -23,7 +23,7 @@
         "load-balancer"
     ],
     "license": "Apache-2.0",
-    "version": "7.1.2",
+    "version": "7.1.3",
     "authors": [
         {
             "name": "KodePHP Team",

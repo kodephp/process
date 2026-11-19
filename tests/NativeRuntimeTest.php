@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Kode\Process\Tests;
 
+use Kode\Process\Http\Request;
 use Kode\Process\Kode;
 use Kode\Process\Protocol\ProtocolFactory;
 use Kode\Process\Runtime;
@@ -174,6 +175,27 @@ final class NativeRuntimeTest extends TestCase
             self::assertSame(HttpProtocol::MAX_LENGTH, HttpProtocol::maxLength());
             self::assertSame(HttpProtocol::MAX_LENGTH, $prop->getValue($rtDefault));
         } finally {
+            HttpProtocol::resetMaxLength();
+        }
+    }
+
+    /** maxFileSize 缺省跟随 maxBody，显式配置只用于收紧单文件上限 */
+    public function testMaxFileSizeOptionDefaultsToMaxBody(): void
+    {
+        $ref   = new \ReflectionClass(NativeRuntime::class);
+        $apply = $ref->getMethod('applyOptions');
+        $apply->setAccessible(true);
+
+        try {
+            $rt = new NativeRuntime();
+            $apply->invoke($rt, ['maxBody' => 209715200]);
+            self::assertSame(209715200, Request::maxFileSize());
+
+            $rtTight = new NativeRuntime();
+            $apply->invoke($rtTight, ['maxBody' => 209715200, 'maxFileSize' => 8192]);
+            self::assertSame(8192, Request::maxFileSize());
+        } finally {
+            Request::resetMaxFileSize();
             HttpProtocol::resetMaxLength();
         }
     }

@@ -315,6 +315,8 @@ final class NativeRuntime extends AbstractRuntime
         // 现在一次配置同时落到协议判定与 h2 流判定，http2MaxRequestBody 保留为精准覆盖。
         $maxBody = max(1, (int)($opts['maxBody'] ?? HttpProtocol::MAX_LENGTH));
         HttpProtocol::setMaxLength($maxBody);
+        // multipart 单文件上限缺省跟随 maxBody；显式配置只用于「整体放行但单文件收紧」。
+        Request::setMaxFileSize(isset($opts['maxFileSize']) ? max(1, (int)$opts['maxFileSize']) : null);
 
         // HTTP/2（h2c）：默认开启，与 HTTP/1.1 在同一端口自动协商，
         // 客户端不支持 h2 时完全不受影响（既不改握手也不加解析开销）。
